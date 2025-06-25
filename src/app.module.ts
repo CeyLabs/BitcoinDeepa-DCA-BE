@@ -5,10 +5,12 @@ import { PackageController } from './modules/package/package.controller';
 import { PackageModule } from './modules/package/package.module';
 import { PackageService } from './modules/package/package.service';
 import { SubscriptionService } from './modules/subscription/subscription.service';
+import { AuthModule } from './modules/auth/auth.module';
+import { JwtService } from '@nestjs/jwt';
 
 @Module({
-  imports: [SubscriptionModule, PackageModule],
+  imports: [SubscriptionModule, PackageModule, AuthModule],
   controllers: [SubscriptionController, PackageController],
-  providers: [PackageService, SubscriptionService],
+  providers: [PackageService, SubscriptionService, JwtService],
 })
 export class AppModule {}
