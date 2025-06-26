@@ -1,12 +1,15 @@
 # BitcoinDeepa DCA Telegram Mini App Backend
 
-A NestJS backend service for the BitcoinDeepa DCA (Dollar Cost Averaging) Telegram Mini App, providing subscription management and package handling with Telegram authentication.
+A NestJS backend service for the BitcoinDeepa DCA (Dollar Cost Averaging) Telegram Mini App, providing subscription management, payment integration, and user management with Telegram authentication.
 
 ## 🚀 Features
 
 - **Telegram Mini App Authentication**: Secure JWT-based authentication using Telegram's init data
-- **Subscription Management**: Create and manage user subscriptions
+- **Subscription Management**: Create, manage, and cancel user subscriptions
 - **Package System**: Handle different subscription packages
+- **PayHere Payment Integration**: Recurring payments, webhook, and subscription cancellation
+- **Transaction Tracking**: Webhook for payment notifications and user transaction history
+- **User Management**: Create and manage user profiles
 - **Database Integration**: PostgreSQL with Knex.js for migrations and seeding
 - **TypeScript**: Full type safety throughout the application
 
@@ -23,6 +26,7 @@ A NestJS backend service for the BitcoinDeepa DCA (Dollar Cost Averaging) Telegr
 - Node.js v22
 - PostgreSQL database
 - Telegram Bot Token
+- PayHere Merchant credentials (see below)
 - pnpm (recommended)
 
 ## 🚀 Quick Start
@@ -80,20 +84,38 @@ Validates Telegram Mini App init data and returns a JWT token.
 **Request:**
 ```json
 {
-  "initData": "query_id=AAHdF6IQAAAAAN0XohDhrOrc&user=%7B%22id%22%3A123456789%2C%22first_name%22%3A%22John%22%2C%22last_name%22%3A%22Doe%22%2C%22username%22%3A%22johndoe%22%2C%22language_code%22%3A%22en%22%7D&auth_date=1234567890&hash=abc123..."
+  "initData": "<initDataStringFromTelegram>"
 }
 ```
 
-**Response:**
+### User Management
+
+#### POST /user
+Create a new user profile (requires authentication).
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+**Request:**
 ```json
 {
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "user": {
-    "telegram_id": "123456789",
-    "username": "johndoe"
-  }
+  "first_name": "Alice",
+  "last_name": "Smith",
+  "email": "alice@example.com",
+  "phone": "1234567890",
+  "address": "123 Main St",
+  "city": "Colombo",
+  "country": "Sri Lanka"
 }
 ```
+**Response:**
+- 201 Created (empty body)
+
+### Packages
+
+#### GET /package
+Get all available packages.
 
 ### Subscriptions
 
@@ -105,32 +127,61 @@ Get the current subscription for the authenticated user.
 Authorization: Bearer <jwt_token>
 ```
 
-**Response:**
+#### POST /subscription/payhere-link
+Get a PayHere payment link for a package.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+**Request:**
 ```json
 {
-  "id": "sub_123",
-  "user_id": "123456789",
-  "package_id": "pkg_456",
-  "created_at": "2024-01-01T00:00:00Z",
-  "updated_at": "2024-01-01T00:00:00Z"
+  "package_id": "<uuid>"
 }
 ```
 
-### Packages
+#### POST /subscription/cancel
+Cancel the current user's active subscription (PayHere API integration).
 
-#### GET /package
-Get all available packages.
-
-**Response:**
-```json
-[
-  {
-    "id": "pkg_456",
-    "name": "Basic Plan",
-    "price": 9.99,
-    "description": "Basic DCA subscription",
-    "created_at": "2024-01-01T00:00:00Z",
-    "updated_at": "2024-01-01T00:00:00Z"
-  }
-]
+**Headers:**
 ```
+Authorization: Bearer <jwt_token>
+```
+
+### Transactions & PayHere Webhook
+
+#### POST /transaction/payhere-webhook
+PayHere will POST payment notifications to this endpoint 
+
+#### GET /transaction/current
+List all transactions for the current authenticated user.
+
+**Headers:**
+```
+Authorization: Bearer <jwt_token>
+```
+
+## 💳 PayHere Integration
+
+- **Recurring Payments:** Generates PayHere payment links for subscriptions.
+- **Webhook:** Handles payment notifications and updates transaction status.
+- **Cancel Subscription:** Cancels PayHere subscriptions and updates local DB.
+- **OAuth:** Uses PayHere OAuth for secure API access.
+
+## 🗂️ Project Structure
+
+- `src/modules/user` - User management
+- `src/modules/package` - Subscription packages
+- `src/modules/subscription` - Subscription logic and PayHere integration
+- `src/modules/transaction` - Payment notifications and transaction history
+- `src/modules/payhere` - PayHere API helpers
+
+## 📝 Notes
+- Ensure your PayHere notify_url is public and points to `/transaction/payhere-webhook`.
+- The backend expects all PayHere secrets and IDs to be set in your environment.
+- All endpoints (except webhook) require JWT authentication.
+
+---
+
+For more details, see the code and comments in each module.

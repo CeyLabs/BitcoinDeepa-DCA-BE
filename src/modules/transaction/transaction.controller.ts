@@ -16,11 +16,11 @@ import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 
-@Controller('webhook')
+@Controller('transaction')
 export class TransactionController {
   constructor(private readonly transactionService: TransactionService) {}
 
-  @Post('payhere')
+  @Post('payhere-webhook')
   async handlePayHereWebhook(
     @Body() body: PayHereNotificationParams,
     @Res() res: Response,
