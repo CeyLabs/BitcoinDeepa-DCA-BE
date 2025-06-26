@@ -70,4 +70,22 @@ export class SubscriptionController {
     });
     return { link };
   }
+
+  @Post('cancel')
+  @UseGuards(ConditionalAuthGuard)
+  async cancelCurrentSubscription(@CurrentUser() user: JwtPayload) {
+    const subscription =
+      await this.subscriptionService.getCurrentSubscriptionForUser(
+        user.user_id,
+      );
+    if (!subscription || !subscription.payhere_sub_id) {
+      throw new NotFoundException('Subscription not found');
+    }
+
+    await this.subscriptionService.cancelPayHereSubscription(
+      subscription.payhere_sub_id,
+    );
+
+    return;
+  }
 }
