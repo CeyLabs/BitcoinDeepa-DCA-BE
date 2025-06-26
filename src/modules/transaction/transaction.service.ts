@@ -1,0 +1,129 @@
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import md5 from 'crypto-js/md5';
+import { KnexService } from '../knex/knex.service';
+
+export interface PayHereNotificationParams {
+  merchant_id: string;
+  order_id: string;
+  payment_id: string;
+  subscription_id: string;
+  payhere_amount: string;
+  payhere_currency: string;
+  status_code: string;
+  md5sig: string;
+}
+
+type Status = 'SUCCESS' | 'PENDING' | 'CANCELLED' | 'FAILED' | 'CHARGEBACK';
+
+export interface Transaction {
+  payhere_pay_id: string;
+  payhere_sub_id: string;
+  status: Status;
+  created_at?: Date;
+  updated_at?: Date;
+}
+
+interface Subscription {
+  user_id: string;
+  payhere_sub_id: string;
+  // add other fields as needed
+}
+
+@Injectable()
+export class TransactionService {
+  constructor(private readonly knexService: KnexService) {}
+
+  private readonly logger = new Logger(TransactionService.name);
+
+  async handlePayHereNotification(
+    data: PayHereNotificationParams,
+  ): Promise<void> {
+    const {
+      merchant_id,
+      order_id,
+      payhere_amount,
+      payhere_currency,
+      status_code,
+      md5sig,
+      payment_id,
+      subscription_id,
+    } = data;
+
+    const merchant_secret = String(process.env.PAYHERE_MERCHANT_SECRET);
+    const local_md5sig = md5(
+      merchant_id +
+        order_id +
+        payhere_amount +
+        payhere_currency +
+        status_code +
+        md5(merchant_secret).toString().toUpperCase(),
+    )
+      .toString()
+      .toUpperCase();
+
+    if (local_md5sig == md5sig) {
+      throw new UnauthorizedException('Md5 verification failed');
+    }
+
+    const existingTransaction = await this.knexService
+      .knex<Transaction>('transaction')
+      .where('payhere_pay_id', payment_id)
+      .first();
+
+    // Mapped status
+    const status = this.getPayHereStatusMapped(status_code);
+
+    if (existingTransaction) {
+      await this.knexService
+        .knex('transaction')
+        .update({
+          status: status,
+        })
+        .where('payhere_pay_id', payment_id);
+      return;
+    }
+
+    await this.createTransaction({
+      payhere_pay_id: payment_id,
+      payhere_sub_id: subscription_id,
+      status,
+    });
+  }
+
+  async createTransaction(transaction: Transaction): Promise<Transaction> {
+    return await this.knexService.knex('transaction').insert(transaction);
+  }
+
+  private getPayHereStatusMapped(status_code: string): Status {
+    switch (status_code) {
+      case '2':
+        return 'SUCCESS';
+      case '0':
+        return 'PENDING';
+      case '-1':
+        return 'CANCELLED';
+      case '-2':
+        return 'FAILED';
+      case '-3':
+        return 'CHARGEBACK';
+      default:
+        return 'FAILED'; // fallback for unknown codes
+    }
+  }
+
+  async getTransactionsByUserId(user_id: string): Promise<Transaction[]> {
+    // Find the user's subscription
+    const subscription: Subscription | undefined = await this.knexService
+      .knex<Subscription>('subscription')
+      .where('user_id', user_id)
+      .first();
+    if (!subscription || !subscription.payhere_sub_id) {
+      return [];
+    }
+    // Fetch transactions for the subscription
+    return this.knexService
+      .knex<Transaction>('transaction')
+      .where('payhere_sub_id', subscription.payhere_sub_id)
+      .orderBy('created_at', 'desc');
+  }
+}

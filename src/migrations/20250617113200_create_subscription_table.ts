@@ -4,7 +4,7 @@ const tableName = 'subscription';
 
 export async function up(knex: Knex): Promise<void> {
   await knex.schema.createTable(tableName, (table) => {
-    table.uuid('id').primary().defaultTo(knex.raw('uuid_generate_v4()'));
+    table.string('payhere_sub_id').primary();
     table
       .string('user_id')
       .references('id')
@@ -15,6 +15,7 @@ export async function up(knex: Knex): Promise<void> {
       .references('id')
       .inTable('package')
       .onDelete('RESTRICT');
+    table.boolean('is_active').notNullable().defaultTo(true);
     table.timestamps(true, true);
   });
 }
