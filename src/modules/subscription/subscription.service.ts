@@ -1,8 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import knexConfig from '../../../knexfile';
-import Knex from 'knex';
-
-const knex = Knex(knexConfig[process.env.NODE_ENV || 'development']);
+import { KnexService } from '../knex/knex.service';
 
 export interface Subscription {
   id: string;
@@ -14,9 +11,14 @@ export interface Subscription {
 
 @Injectable()
 export class SubscriptionService {
+  constructor(private readonly knexService: KnexService) {}
+
   async getCurrentSubscriptionForUser(
     user_id: string,
   ): Promise<Subscription | undefined> {
-    return await knex<Subscription>('subscription').where({ user_id }).first();
+    return await this.knexService
+      .knex<Subscription>('subscription')
+      .where({ user_id })
+      .first();
   }
 }

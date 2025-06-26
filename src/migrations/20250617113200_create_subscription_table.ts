@@ -5,7 +5,11 @@ const tableName = 'subscription';
 export async function up(knex: Knex): Promise<void> {
   await knex.schema.createTable(tableName, (table) => {
     table.uuid('id').primary().defaultTo(knex.raw('uuid_generate_v4()'));
-    table.string('user_id').notNullable();
+    table
+      .string('user_id')
+      .references('id')
+      .inTable('user')
+      .onDelete('RESTRICT');
     table
       .uuid('package_id')
       .references('id')

@@ -1,8 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import knexConfig from '../../../knexfile';
-import Knex from 'knex';
-
-const knex = Knex(knexConfig[process.env.NODE_ENV || 'development']);
+import { KnexService } from '../knex/knex.service';
 
 export interface Package {
   id: string;
@@ -16,7 +13,16 @@ export interface Package {
 
 @Injectable()
 export class PackageService {
+  constructor(private readonly knexService: KnexService) {}
+
   async getAllPackages(): Promise<Package[]> {
-    return await knex<Package>('package').select('*');
+    return await this.knexService.knex<Package>('package').select('*');
+  }
+
+  async getPackageById(id: string): Promise<Package | undefined> {
+    return await this.knexService
+      .knex<Package>('package')
+      .where('id', id)
+      .first();
   }
 }
