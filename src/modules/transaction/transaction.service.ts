@@ -61,7 +61,9 @@ export class TransactionService {
       .toString()
       .toUpperCase();
 
-    if (local_md5sig == md5sig) {
+    // If the calculated signature does not match the one provided by PayHere
+    // the notification may have been tampered with. In that case we reject it.
+    if (local_md5sig !== md5sig) {
       throw new UnauthorizedException('Md5 verification failed');
     }
 
