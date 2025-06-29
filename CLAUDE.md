@@ -9,6 +9,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - Database: PostgreSQL with Knex.js ORM
 - Authentication: JWT tokens with Telegram WebApp InitData validation
 - Payment Gateway: PayHere (Sri Lankan payment processor)
+- Bitcoin Integration: CoinGecko API for real-time BTC prices and DCA calculations
 - Time Management: dayjs for date/time operations
 - Development: pnpm, ESLint, Prettier
 
@@ -51,13 +52,19 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Environment-specific configurations
    - Connection monitoring and keep-alive mechanisms
 
+8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
+   - CoinGecko API integration for real-time Bitcoin prices
+   - Automatic satoshi calculation for DCA transactions
+   - Price caching with configurable TTL (20 seconds default)
+   - Support for multiple currencies (LKR, USD, etc.)
+
 ### Database Schema
 
 **Tables:**
 - `package`: Subscription packages (UUID PK, name, frequency, amount, currency)
 - `user`: User profiles (Telegram ID as PK, personal info, address)
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
-- `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, timestamps)
+- `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, timestamps)
 
 **Relationships:**
 - Users → Subscriptions (1:many)
@@ -115,6 +122,11 @@ PAYHERE_APP_ID=your_app_id
 PAYHERE_APP_SECRET=your_app_secret
 PAYHERE_BASE_URL=https://sandbox.payhere.lk  # or production URL
 
+# Bitcoin DCA Configuration
+COINGECKO_API_KEY=your_coingecko_pro_api_key  # Optional, for better rate limits
+ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
+BITCOIN_PRICE_CACHE_TTL=20  # Cache duration in seconds (default: 20)
+
 # Server
 PORT=3000
 ```
@@ -142,7 +154,8 @@ PORT=3000
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public)
-- `GET /transaction/current` - Get user's transaction history (authenticated)
+- `GET /transaction/current` - Get user's transaction history with Bitcoin data (authenticated)
+- `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 
 ## Development Guidelines
 

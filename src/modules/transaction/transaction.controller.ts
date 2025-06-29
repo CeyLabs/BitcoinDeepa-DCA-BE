@@ -35,4 +35,10 @@ export class TransactionController {
   async getUserTransactions(@CurrentUser() user: JwtPayload) {
     return this.transactionService.getTransactionsByUserId(user.user_id);
   }
+
+  @Get('dca-summary')
+  @UseGuards(ConditionalAuthGuard)
+  async getDCASummary(@CurrentUser() user: JwtPayload) {
+    return this.transactionService.getDCASummaryForUser(user.user_id);
+  }
 }

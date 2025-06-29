@@ -21,6 +21,13 @@ export async function up(knex: Knex): Promise<void> {
       )
       .defaultTo('PENDING')
       .notNullable();
+
+    // Bitcoin DCA related fields
+    table.decimal('btc_price_at_purchase', 15, 8).nullable();
+    table.bigint('satoshis_purchased').nullable();
+    table.string('price_currency', 3).nullable();
+    table.timestamp('coingecko_timestamp').nullable();
+
     table.timestamps(true, true);
   });
 }
