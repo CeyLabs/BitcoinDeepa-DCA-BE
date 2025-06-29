@@ -99,20 +99,15 @@ export class TransactionService {
   }
 
   private getPayHereStatusMapped(status_code: string): Status {
-    switch (status_code) {
-      case '2':
-        return 'SUCCESS';
-      case '0':
-        return 'PENDING';
-      case '-1':
-        return 'CANCELLED';
-      case '-2':
-        return 'FAILED';
-      case '-3':
-        return 'CHARGEBACK';
-      default:
-        return 'FAILED'; // fallback for unknown codes
-    }
+    const statusMap: Record<string, Status> = {
+      '2': 'SUCCESS',
+      '0': 'PENDING',
+      '-1': 'CANCELLED',
+      '-2': 'FAILED',
+      '-3': 'CHARGEBACK',
+    };
+
+    return statusMap[status_code] ?? 'FAILED';
   }
 
   async getTransactionsByUserId(user_id: string): Promise<Transaction[]> {
