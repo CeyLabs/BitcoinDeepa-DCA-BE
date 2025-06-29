@@ -90,6 +90,7 @@ export class TransactionService {
   }
 
   async createTransaction(transaction: Transaction): Promise<Transaction> {
+    return this.knexService.knex('transaction').insert(transaction);
     const [created] = await this.knexService
       .knex('transaction')
       .insert(transaction)
