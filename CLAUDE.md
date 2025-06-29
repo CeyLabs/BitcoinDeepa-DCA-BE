@@ -121,6 +121,11 @@ PORT=3000
 
 ## API Endpoints Reference
 
+**Authentication Coverage:**
+- All endpoints requiring user context are protected with `@UseGuards(ConditionalAuthGuard)`
+- Public endpoints: Package listing, PayHere webhook, Telegram authentication
+- Protected endpoints: User creation, subscription management, transaction history
+
 ### Authentication
 - `POST /auth/telegram` - Validate Telegram InitData, return JWT token
 

@@ -41,6 +41,7 @@ export class SubscriptionController {
   }
 
   @Post('payhere-link')
+  @UseGuards(ConditionalAuthGuard)
   async getPayHereLink(
     @CurrentUser() user: JwtPayload,
     @Body() body: { package_id: string },
