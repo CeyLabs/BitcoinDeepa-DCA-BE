@@ -72,9 +72,9 @@ const config: { [key: string]: Knex.Config } = {
     connection: {
       host: '127.0.0.1',
       port: 3009,
-      database: 'binance-ama-bot',
-      user: 'binance-ama-bot',
-      password: 'binance-ama-bot',
+      database: 'bitcoindeepa-dca',
+      user: 'bitcoindeepa-dca',
+      password: 'bitcoindeepa-dca',
       // Keep connections alive
       ssl: false,
       keepAlive: true,

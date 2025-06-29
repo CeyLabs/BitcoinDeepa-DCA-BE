@@ -52,10 +52,10 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 ### Database Schema
 
 **Tables:**
-- `package`: Subscription packages (UUID, name, frequency, amount, currency)
+- `package`: Subscription packages (UUID PK, name, frequency, amount, currency)
 - `user`: User profiles (Telegram ID as PK, personal info, address)
-- `subscription`: Active subscriptions (PayHere sub ID, user ID, package ID, status)
-- `transaction`: Payment records (PayHere pay ID, subscription ID, status, timestamps)
+- `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
+- `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, timestamps)
 
 **Relationships:**
 - Users → Subscriptions (1:many)

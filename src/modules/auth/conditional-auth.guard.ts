@@ -17,15 +17,25 @@ export class ConditionalAuthGuard implements CanActivate {
   constructor(private readonly jwtService: JwtService) {}
 
   canActivate(context: ExecutionContext): boolean {
-    // Check if authentication is enabled
-    const enableAuth = process.env.ENABLE_AUTH !== 'false';
-
     const request = context.switchToHttp().getRequest<RequestWithUser>();
 
+    // Only allow auth bypass in development environment
+    const isProduction = process.env.NODE_ENV === 'production';
+    const enableAuth = process.env.ENABLE_AUTH !== 'false';
+
+    // Force authentication in production regardless of ENABLE_AUTH setting
+    if (isProduction) {
+      this.validateRequest(request);
+      return true;
+    }
+
+    // In non-production environments, check ENABLE_AUTH setting
     if (!enableAuth) {
-      // If auth is disabled, create a mock user for development
+      // If auth is disabled in development, create a mock user
+      const mockUserId = process.env.MOCK_TG_ID || 'dev-user-123';
       request.user = {
-        user_id: String(process.env.MOCK_TG_ID),
+        user_id: mockUserId,
+        telegram_id: mockUserId,
         username: 'dev-username',
       };
       return true;
