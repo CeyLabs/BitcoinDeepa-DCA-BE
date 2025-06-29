@@ -10,10 +10,10 @@ export class UserController {
   @Post()
   async createUser(
     @CurrentUser() user: JwtPayload,
-    @Body() createUserDto: Omit<User, 'user_id'>,
+    @Body() createUserDto: Omit<User, 'id'>,
   ) {
     return await this.userService.createUser({
-      user_id: user.user_id,
+      id: user.user_id,
       ...createUserDto,
     });
   }

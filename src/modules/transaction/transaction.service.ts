@@ -1,5 +1,5 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
-import md5 from 'crypto-js/md5';
+import { createHash } from 'crypto';
 import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
 
@@ -24,6 +24,10 @@ export interface Transaction {
   updated_at?: Date;
 }
 
+function md5String(input: string): string {
+  return createHash('md5').update(input).digest('hex');
+}
+
 @Injectable()
 export class TransactionService {
   constructor(private readonly knexService: KnexService) {}
@@ -45,16 +49,14 @@ export class TransactionService {
     } = data;
 
     const merchant_secret = String(process.env.PAYHERE_MERCHANT_SECRET);
-    const local_md5sig = md5(
+    const local_md5sig = md5String(
       merchant_id +
         order_id +
         payhere_amount +
         payhere_currency +
         status_code +
-        md5(merchant_secret).toString().toUpperCase(),
-    )
-      .toString()
-      .toUpperCase();
+        md5String(merchant_secret).toUpperCase(),
+    ).toUpperCase();
 
     // If the calculated signature does not match the one provided by PayHere
     // the notification may have been tampered with. In that case we reject it.
@@ -88,24 +90,23 @@ export class TransactionService {
   }
 
   async createTransaction(transaction: Transaction): Promise<Transaction> {
-    return await this.knexService.knex('transaction').insert(transaction);
+    const [created] = await this.knexService
+      .knex('transaction')
+      .insert(transaction)
+      .returning('*');
+    return created as Transaction;
   }
 
   private getPayHereStatusMapped(status_code: string): Status {
-    switch (status_code) {
-      case '2':
-        return 'SUCCESS';
-      case '0':
-        return 'PENDING';
-      case '-1':
-        return 'CANCELLED';
-      case '-2':
-        return 'FAILED';
-      case '-3':
-        return 'CHARGEBACK';
-      default:
-        return 'FAILED'; // fallback for unknown codes
-    }
+    const statusMap: Record<string, Status> = {
+      '2': 'SUCCESS',
+      '0': 'PENDING',
+      '-1': 'CANCELLED',
+      '-2': 'FAILED',
+      '-3': 'CHARGEBACK',
+    };
+
+    return statusMap[status_code] ?? 'FAILED';
   }
 
   async getTransactionsByUserId(user_id: string): Promise<Transaction[]> {
