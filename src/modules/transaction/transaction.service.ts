@@ -1,6 +1,7 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { KnexService } from '../knex/knex.service';
+import { Subscription } from '../../models/subscription';
 
 export interface PayHereNotificationParams {
   merchant_id: string;
@@ -21,12 +22,6 @@ export interface Transaction {
   status: Status;
   created_at?: Date;
   updated_at?: Date;
-}
-
-interface Subscription {
-  user_id: string;
-  payhere_sub_id: string;
-  // add other fields as needed
 }
 
 function md5String(input: string): string {
