@@ -6,7 +6,8 @@ import {
   Post,
   Body,
 } from '@nestjs/common';
-import { SubscriptionService, Subscription } from './subscription.service';
+import { SubscriptionService } from './subscription.service';
+import { Subscription } from '../../models/subscription';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
