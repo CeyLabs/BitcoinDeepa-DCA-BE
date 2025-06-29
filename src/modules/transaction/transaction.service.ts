@@ -1,5 +1,5 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
-import md5 from 'crypto-js/md5';
+import { createHash } from 'crypto';
 import { KnexService } from '../knex/knex.service';
 
 export interface PayHereNotificationParams {
@@ -29,6 +29,10 @@ interface Subscription {
   // add other fields as needed
 }
 
+function md5String(input: string): string {
+  return createHash('md5').update(input).digest('hex');
+}
+
 @Injectable()
 export class TransactionService {
   constructor(private readonly knexService: KnexService) {}
@@ -50,16 +54,14 @@ export class TransactionService {
     } = data;
 
     const merchant_secret = String(process.env.PAYHERE_MERCHANT_SECRET);
-    const local_md5sig = md5(
+    const local_md5sig = md5String(
       merchant_id +
         order_id +
         payhere_amount +
         payhere_currency +
         status_code +
-        md5(merchant_secret).toString().toUpperCase(),
-    )
-      .toString()
-      .toUpperCase();
+        md5String(merchant_secret).toUpperCase(),
+    ).toUpperCase();
 
     // If the calculated signature does not match the one provided by PayHere
     // the notification may have been tampered with. In that case we reject it.
