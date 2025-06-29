@@ -95,7 +95,11 @@ export class TransactionService {
   }
 
   async createTransaction(transaction: Transaction): Promise<Transaction> {
-    return await this.knexService.knex('transaction').insert(transaction);
+    const [created] = await this.knexService
+      .knex('transaction')
+      .insert(transaction)
+      .returning('*');
+    return created as Transaction;
   }
 
   private getPayHereStatusMapped(status_code: string): Status {
