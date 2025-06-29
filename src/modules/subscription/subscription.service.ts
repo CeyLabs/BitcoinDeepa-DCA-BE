@@ -1,15 +1,7 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
 import { PayHereService } from '../payhere/payhere.service';
-
-export interface Subscription {
-  id: string;
-  user_id: string;
-  package_id: string;
-  payhere_sub_id?: string;
-  created_at?: string;
-  updated_at?: string;
-}
+import { Subscription } from '../../models/subscription';
 
 @Injectable()
 export class SubscriptionService {
@@ -18,7 +10,7 @@ export class SubscriptionService {
   async getCurrentSubscriptionForUser(
     user_id: string,
   ): Promise<Subscription | undefined> {
-    return await this.knexService
+    return this.knexService
       .knex<Subscription>('subscription')
       .where({ user_id })
       .first();

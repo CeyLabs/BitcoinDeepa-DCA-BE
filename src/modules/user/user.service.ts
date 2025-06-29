@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
 
 export interface User {
-  user_id: string;
+  id: string;
   first_name: string;
   last_name: string;
   email: string;
@@ -17,10 +17,10 @@ export class UserService {
   constructor(private readonly knexService: KnexService) {}
 
   async createUser(createUserDto: User): Promise<void> {
-    await this.knexService.knex('user').insert(createUserDto);
+    return this.knexService.knex('user').insert(createUserDto);
   }
 
   async getUserById(id: string): Promise<User | undefined> {
-    return await this.knexService.knex<User>('user').where('id', id).first();
+    return this.knexService.knex<User>('user').where('id', id).first();
   }
 }

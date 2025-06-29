@@ -6,7 +6,8 @@ import {
   Post,
   Body,
 } from '@nestjs/common';
-import { SubscriptionService, Subscription } from './subscription.service';
+import { SubscriptionService } from './subscription.service';
+import { Subscription } from '../../models/subscription';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
@@ -50,6 +51,9 @@ export class SubscriptionController {
     }
 
     const _user = await this.userService.getUserById(user.user_id);
+    if (!_user) {
+      throw new NotFoundException('User not found');
+    }
 
     const link = PayHereService.getLink({
       user_id: user.user_id,
@@ -57,7 +61,7 @@ export class SubscriptionController {
       amount: String(_package.amount),
       currency: _package.currency,
       first_name: _user!.first_name,
-      last_name: _user!.first_name,
+      last_name: _user.last_name,
       email: _user!.email,
       phone: _user!.phone,
       address: _user!.address,
