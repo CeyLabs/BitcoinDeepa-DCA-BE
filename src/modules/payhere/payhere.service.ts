@@ -1,4 +1,4 @@
-import md5 from 'crypto-js/md5';
+import { createHash } from 'crypto';
 import axios from 'axios';
 
 export interface IGetLinkParams {
@@ -26,8 +26,7 @@ interface CancelSubscriptionResponse {
 
 function md5String(input: string): string {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return
-    return md5(input).toString();
+    return createHash('md5').update(input).digest('hex');
   } catch {
     return '';
   }
