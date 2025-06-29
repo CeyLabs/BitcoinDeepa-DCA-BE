@@ -23,7 +23,7 @@ export async function up(knex: Knex): Promise<void> {
       .notNullable();
 
     // Bitcoin DCA related fields
-    table.decimal('btc_price_at_purchase', 15, 8).nullable();
+    table.decimal('btc_price_at_purchase', 18, 2).nullable(); // 16 digits before decimal, 2 after for LKR prices
     table.bigint('satoshis_purchased').nullable();
     table.string('price_currency', 3).nullable();
     table.timestamp('coingecko_timestamp').nullable();

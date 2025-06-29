@@ -6,6 +6,16 @@ import { AppModule } from '../src/app.module';
 import { KnexService } from '../src/modules/knex/knex.service';
 import { BitcoinPriceService } from '../src/modules/bitcoin-price/bitcoin-price.service';
 
+interface TransactionRecord {
+  payhere_pay_id: string;
+  payhere_sub_id: string;
+  status: string;
+  btc_price_at_purchase: string | null;
+  satoshis_purchased: string | null;
+  price_currency: string | null;
+  coingecko_timestamp: Date | null;
+}
+
 describe('PayHere Webhook (e2e)', () => {
   let app: INestApplication;
   let knexService: KnexService;
@@ -143,18 +153,18 @@ describe('PayHere Webhook (e2e)', () => {
       expect(response.text).toBe('OK');
 
       // Verify transaction was created with Bitcoin data
-      const transaction = await knexService
+      const transaction = (await knexService
         .knex('transaction')
         .where('payhere_pay_id', testPaymentId)
-        .first();
+        .first()) as TransactionRecord;
 
       expect(transaction).toBeDefined();
       expect(transaction.status).toBe('SUCCESS');
       expect(transaction.payhere_sub_id).toBe(testSubscriptionId);
-      expect(parseFloat(transaction.btc_price_at_purchase)).toBe(
+      expect(parseFloat(transaction.btc_price_at_purchase!)).toBe(
         mockBitcoinData.btc_price,
       );
-      expect(parseInt(transaction.satoshis_purchased)).toBe(
+      expect(parseInt(transaction.satoshis_purchased!)).toBe(
         mockBitcoinData.satoshis,
       );
       expect(transaction.price_currency).toBe(mockBitcoinData.currency);
@@ -206,10 +216,10 @@ describe('PayHere Webhook (e2e)', () => {
       expect(response.text).toBe('OK');
 
       // Verify transaction was created without Bitcoin data
-      const transaction = await knexService
+      const transaction = (await knexService
         .knex('transaction')
         .where('payhere_pay_id', 'test_pay_failed')
-        .first();
+        .first()) as TransactionRecord;
 
       expect(transaction).toBeDefined();
       expect(transaction.status).toBe('FAILED');
@@ -283,17 +293,17 @@ describe('PayHere Webhook (e2e)', () => {
       expect(response.text).toBe('OK');
 
       // Verify transaction was updated with Bitcoin data
-      const transaction = await knexService
+      const transaction = (await knexService
         .knex('transaction')
         .where('payhere_pay_id', testPaymentId)
-        .first();
+        .first()) as TransactionRecord;
 
       expect(transaction).toBeDefined();
       expect(transaction.status).toBe('SUCCESS');
-      expect(parseFloat(transaction.btc_price_at_purchase)).toBe(
+      expect(parseFloat(transaction.btc_price_at_purchase!)).toBe(
         mockBitcoinData.btc_price,
       );
-      expect(parseInt(transaction.satoshis_purchased)).toBe(
+      expect(parseInt(transaction.satoshis_purchased!)).toBe(
         mockBitcoinData.satoshis,
       );
     });
@@ -315,13 +325,15 @@ describe('PayHere Webhook (e2e)', () => {
         .send(webhookData)
         .expect(401);
 
-      expect(response.body.message).toBe('Md5 verification failed');
+      expect((response.body as { message: string }).message).toBe(
+        'Md5 verification failed',
+      );
 
       // Verify no transaction was created
-      const transaction = await knexService
+      const transaction = (await knexService
         .knex('transaction')
         .where('payhere_pay_id', 'test_pay_invalid')
-        .first();
+        .first()) as TransactionRecord;
 
       expect(transaction).toBeUndefined();
     });
@@ -376,10 +388,10 @@ describe('PayHere Webhook (e2e)', () => {
       expect(response.text).toBe('OK');
 
       // Verify transaction was created without Bitcoin data but with SUCCESS status
-      const transaction = await knexService
+      const transaction = (await knexService
         .knex('transaction')
         .where('payhere_pay_id', 'test_pay_btc_fail')
-        .first();
+        .first()) as TransactionRecord;
 
       expect(transaction).toBeDefined();
       expect(transaction.status).toBe('SUCCESS');
@@ -435,10 +447,10 @@ describe('PayHere Webhook (e2e)', () => {
       expect(response.text).toBe('OK');
 
       // Verify transaction was created without Bitcoin data
-      const transaction = await knexService
+      const transaction = (await knexService
         .knex('transaction')
         .where('payhere_pay_id', 'test_pay_no_btc')
-        .first();
+        .first()) as TransactionRecord;
 
       expect(transaction).toBeDefined();
       expect(transaction.status).toBe('SUCCESS');
@@ -506,10 +518,10 @@ describe('PayHere Webhook (e2e)', () => {
         expect(response.text).toBe('OK');
 
         // Verify transaction status
-        const transaction = await knexService
+        const transaction = (await knexService
           .knex('transaction')
           .where('payhere_pay_id', paymentId)
-          .first();
+          .first()) as TransactionRecord;
 
         expect(transaction).toBeDefined();
         expect(transaction.status).toBe(statusTest.expected);
