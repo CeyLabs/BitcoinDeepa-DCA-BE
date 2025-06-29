@@ -9,6 +9,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - Database: PostgreSQL with Knex.js ORM
 - Authentication: JWT tokens with Telegram WebApp InitData validation
 - Payment Gateway: PayHere (Sri Lankan payment processor)
+- Time Management: dayjs for date/time operations
 - Development: pnpm, ESLint, Prettier
 
 ## Architecture & Module Structure
@@ -16,10 +17,11 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 ### Core Modules
 
 1. **Auth Module** (`src/modules/auth/`)
-   - Telegram WebApp InitData validation using HMAC-SHA256
+   - Telegram WebApp InitData validation using HMAC-SHA256 with timestamp verification (24-hour max age)
    - JWT token generation and verification (7-day expiration)
    - Single guard strategy: `ConditionalAuthGuard` (supports both authenticated and development modes)
    - `@CurrentUser()` decorator for extracting user context
+   - Replay attack protection through timestamp validation using dayjs
 
 2. **User Module** (`src/modules/user/`)
    - User profile management and creation
@@ -252,8 +254,10 @@ enum Status {
 
 ## Development Notes
 
-- When `ENABLE_AUTH=false`, all protected endpoints use mock user data
+- When `ENABLE_AUTH=false`, all protected endpoints use mock user data (development only)
 - PayHere webhooks must be publicly accessible (no authentication)
-- Telegram InitData validation requires proper HMAC-SHA256 verification
+- Telegram InitData validation requires proper HMAC-SHA256 verification with 24-hour timestamp limit
+- Replay attack protection: InitData must be less than 24 hours old
+- Production environments always enforce authentication regardless of ENABLE_AUTH setting
 - Database uses UUID for packages, string IDs for users (Telegram ID)
 - All timestamps use PostgreSQL's automatic timestamp handling

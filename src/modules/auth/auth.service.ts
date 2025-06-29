@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as crypto from 'crypto';
+import * as dayjs from 'dayjs';
 
 export interface TelegramInitData {
   query_id?: string;
@@ -29,8 +30,23 @@ export class AuthService {
     try {
       const parsed = new URLSearchParams(initData);
       const hash = parsed.get('hash');
+      const authDate = parsed.get('auth_date');
 
-      if (!hash) {
+      if (!hash || !authDate) {
+        return false;
+      }
+
+      // Validate timestamp to prevent replay attacks
+      const authTimestamp = parseInt(authDate, 10);
+      if (isNaN(authTimestamp)) {
+        return false;
+      }
+
+      const authTime = dayjs.unix(authTimestamp);
+      const currentTime = dayjs();
+      const maxAge = 24; // 24 hours
+
+      if (currentTime.diff(authTime, 'hour') > maxAge) {
         return false;
       }
 
