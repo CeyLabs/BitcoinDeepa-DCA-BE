@@ -18,7 +18,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 1. **Auth Module** (`src/modules/auth/`)
    - Telegram WebApp InitData validation using HMAC-SHA256
    - JWT token generation and verification (7-day expiration)
-   - Multiple guard strategies: `ConditionalAuthGuard`, `JwtAuthGuard`, `BaseAuthGuard`
+   - Single guard strategy: `ConditionalAuthGuard` (supports both authenticated and development modes)
    - `@CurrentUser()` decorator for extracting user context
 
 2. **User Module** (`src/modules/user/`)
