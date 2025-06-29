@@ -18,7 +18,7 @@ export class SubscriptionService {
   async getCurrentSubscriptionForUser(
     user_id: string,
   ): Promise<Subscription | undefined> {
-    return await this.knexService
+    return this.knexService
       .knex<Subscription>('subscription')
       .where({ user_id })
       .first();

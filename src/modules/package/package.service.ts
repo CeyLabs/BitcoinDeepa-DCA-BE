@@ -16,13 +16,10 @@ export class PackageService {
   constructor(private readonly knexService: KnexService) {}
 
   async getAllPackages(): Promise<Package[]> {
-    return await this.knexService.knex<Package>('package').select('*');
+    return this.knexService.knex<Package>('package').select('*');
   }
 
   async getPackageById(id: string): Promise<Package | undefined> {
-    return await this.knexService
-      .knex<Package>('package')
-      .where('id', id)
-      .first();
+    return this.knexService.knex<Package>('package').where('id', id).first();
   }
 }

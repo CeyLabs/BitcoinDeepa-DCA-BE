@@ -93,7 +93,7 @@ export class TransactionService {
   }
 
   async createTransaction(transaction: Transaction): Promise<Transaction> {
-    return await this.knexService.knex('transaction').insert(transaction);
+    return this.knexService.knex('transaction').insert(transaction);
   }
 
   private getPayHereStatusMapped(status_code: string): Status {

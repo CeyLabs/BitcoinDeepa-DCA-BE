@@ -17,10 +17,10 @@ export class UserService {
   constructor(private readonly knexService: KnexService) {}
 
   async createUser(createUserDto: User): Promise<void> {
-    await this.knexService.knex('user').insert(createUserDto);
+    return this.knexService.knex('user').insert(createUserDto);
   }
 
   async getUserById(id: string): Promise<User | undefined> {
-    return await this.knexService.knex<User>('user').where('id', id).first();
+    return this.knexService.knex<User>('user').where('id', id).first();
   }
 }
