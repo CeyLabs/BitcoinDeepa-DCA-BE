@@ -1,14 +1,14 @@
 import { Module } from '@nestjs/common';
 import { SubscriptionService } from './subscription.service';
 import { SubscriptionController } from './subscription.controller';
-import { JwtService } from '@nestjs/jwt';
 import { KnexModule } from '../knex/knex.module';
-import { UserService } from '../user/user.service';
-import { PackageService } from '../package/package.service';
+import { AuthModule } from '../auth/auth.module';
+import { UserModule } from '../user/user.module';
+import { PackageModule } from '../package/package.module';
 
 @Module({
-  imports: [KnexModule],
-  providers: [SubscriptionService, JwtService, UserService, PackageService],
+  imports: [KnexModule, AuthModule, UserModule, PackageModule],
+  providers: [SubscriptionService],
   exports: [SubscriptionService],
   controllers: [SubscriptionController],
 })

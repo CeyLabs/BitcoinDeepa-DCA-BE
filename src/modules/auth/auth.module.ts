@@ -13,6 +13,6 @@ import { ConditionalAuthGuard } from './conditional-auth.guard';
   ],
   controllers: [AuthController],
   providers: [AuthService, ConditionalAuthGuard],
-  exports: [AuthService, ConditionalAuthGuard],
+  exports: [AuthService, ConditionalAuthGuard, JwtModule],
 })
 export class AuthModule {}
