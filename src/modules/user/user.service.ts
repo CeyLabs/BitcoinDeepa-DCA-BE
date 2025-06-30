@@ -23,4 +23,9 @@ export class UserService {
   async getUserById(id: string): Promise<User | undefined> {
     return this.knexService.knex<User>('user').where('id', id).first();
   }
+
+  async userExists(id: string): Promise<boolean> {
+    const user = await this.getUserById(id);
+    return !!user;
+  }
 }

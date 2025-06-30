@@ -1,4 +1,4 @@
-import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Body, UseGuards, Get, Param } from '@nestjs/common';
 import { User, UserService } from './user.service';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
@@ -18,5 +18,11 @@ export class UserController {
       id: user.user_id,
       ...createUserDto,
     });
+  }
+
+  @Get('exists/:telegramId')
+  async checkUserExists(@Param('telegramId') telegramId: string) {
+    const exists = await this.userService.userExists(telegramId);
+    return { registered: exists };
   }
 }
