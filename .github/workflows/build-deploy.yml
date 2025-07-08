@@ -116,7 +116,7 @@ jobs:
             Restart=always
             RestartSec=5s
             WorkingDirectory=${{ env.DEPLOY_PATH }}${{ env.PROJECT_DIR }}
-            ExecStart=/bin/bash -c '\''source $HOME/.nvm/nvm.sh && exec node -r dotenv/config ${{ env.DEPLOY_PATH }}${{ env.PROJECT_DIR }}/dist/main.js dotenv_config_path=.env.production'\''
+            ExecStart=/bin/bash -c '\''source $HOME/.nvm/nvm.sh && exec node -r dotenv/config ${{ env.DEPLOY_PATH }}${{ env.PROJECT_DIR }}/dist/src/main.js dotenv_config_path=.env.production'\''
             Environment=NODE_ENV=production
             Environment=HOME=/root
             Environment=NVM_DIR=/root/.nvm
