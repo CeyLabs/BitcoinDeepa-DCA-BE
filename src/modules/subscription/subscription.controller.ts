@@ -14,6 +14,7 @@ import { JwtPayload } from '../auth/auth.service';
 import { PayHereService } from '../payhere/payhere.service';
 import { PackageService } from '../package/package.service';
 import { UserService } from '../user/user.service';
+import { randomUUID } from 'crypto';
 
 @Controller('subscription')
 export class SubscriptionController {
@@ -58,7 +59,7 @@ export class SubscriptionController {
 
     const link = PayHereService.getLink({
       user_id: user.user_id,
-      order_id: '-',
+      order_id: randomUUID(),
       amount: String(_package.amount),
       currency: _package.currency,
       first_name: _user.first_name,
