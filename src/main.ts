@@ -14,7 +14,17 @@ async function bootstrap() {
   // Use the custom logger for the application
   app.useLogger(databaseLogger);
   
-  await app.listen(process.env.PORT ?? 3000);
+  // Enable CORS for production deployment
+  app.enableCors({
+    origin: process.env.CORS_ORIGIN || '*',
+    credentials: true,
+  });
+  
+  const port = process.env.PORT || 3000;
+  await app.listen(port);
+  
+  databaseLogger.log(`🚀 Application is running on port ${port}`);
+  databaseLogger.log(`📊 Health check available at: /health`);
 }
 
 void bootstrap();

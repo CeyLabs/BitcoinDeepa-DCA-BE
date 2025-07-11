@@ -1,0 +1,61 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build outputs
+dist
+build
+.next
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# Version control
+.git
+.gitignore
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+
+# Coverage and test reports
+coverage
+.nyc_output
+test-results
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary folders
+.tmp
+.temp
+
+# Documentation
+*.md
+docs
+
+# Docker files
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Railway files
+railway.json
+.railwayignore

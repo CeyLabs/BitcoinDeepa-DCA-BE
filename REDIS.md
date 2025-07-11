@@ -15,15 +15,15 @@ The application is configured to use a cloud Redis instance. No local setup requ
 npm run start:dev
 ```
 
-### 3. Alternative: Local Redis with Docker Compose
+### 3. Alternative: Local Redis with Docker
 For local development without cloud Redis:
 
 ```bash
-# Start Redis (and PostgreSQL)
-docker-compose up -d redis
+# Start Redis container
+docker run -d --name redis -p 6379:6379 redis:7-alpine
 
 # Verify Redis is running
-docker exec -it bitcoindeepa-redis redis-cli ping
+docker exec -it redis redis-cli ping
 # Should respond with: PONG
 ```
 
@@ -86,16 +86,16 @@ Check cache performance in application logs:
 docker ps | grep redis
 
 # View Redis logs
-docker logs bitcoindeepa-redis
+docker logs redis
 
 # Restart Redis
-docker-compose restart redis
+docker restart redis
 ```
 
 ### Clear Cache Manually
 ```bash
 # Connect to Redis CLI
-docker exec -it bitcoindeepa-redis redis-cli
+docker exec -it redis redis-cli
 
 # Clear all cache
 FLUSHDB
@@ -109,8 +109,9 @@ KEYS dca:*
 
 ## Production Considerations
 
-1. **Persistence**: Redis data persists in `redis_data` volume
+1. **Cloud Redis**: Use managed Redis services (Railway, AWS ElastiCache, etc.)
 2. **Memory**: Monitor Redis memory usage with `INFO memory`
-3. **Security**: Add password authentication for production
+3. **Security**: Always use password authentication for production
 4. **Clustering**: Consider Redis Cluster for high availability
 5. **Monitoring**: Set up Redis monitoring and alerts
+6. **Backups**: Configure regular Redis data backups

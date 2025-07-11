@@ -1,0 +1,30 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "npm run build",
+    "watchPatterns": [
+      "**/*.ts",
+      "**/*.js",
+      "package.json",
+      "knexfile.js",
+      "migrations/**/*",
+      "seeds/**/*"
+    ]
+  },
+  "deploy": {
+    "startCommand": "npm run migrate && npm run start:prod",
+    "healthcheckPath": "/health/simple",
+    "healthcheckTimeout": 300,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  },
+  "environments": {
+    "production": {
+      "variables": {
+        "NODE_ENV": "production",
+        "ENABLE_AUTH": "true"
+      }
+    }
+  }
+}
