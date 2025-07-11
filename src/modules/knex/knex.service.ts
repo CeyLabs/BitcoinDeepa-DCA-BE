@@ -21,6 +21,8 @@ export class KnexService implements OnModuleInit, OnModuleDestroy {
   public knex!: Knex;
   private readonly logger = new Logger(KnexService.name);
   private readonly NODE_ENV = process.env.NODE_ENV || 'development';
+  private connectionCount = 0;
+  private hasLoggedInitialConnection = false;
 
   onModuleInit(): void {
     // Use the appropriate environment configuration
@@ -43,7 +45,12 @@ export class KnexService implements OnModuleInit, OnModuleDestroy {
             this.logger.error('Error during connection validation', err);
             done(err, conn);
           } else {
-            this.logger.log('Database connection established successfully');
+            this.connectionCount++;
+            // Only log the first successful connection to reduce noise
+            if (!this.hasLoggedInitialConnection) {
+              this.logger.log('Database connection established successfully');
+              this.hasLoggedInitialConnection = true;
+            }
             done(null, conn);
           }
         });
@@ -74,6 +81,9 @@ export class KnexService implements OnModuleInit, OnModuleDestroy {
         query: query.sql,
       });
     });
+
+    // Log database setup completion
+    this.logger.log(`Database connection pool configured (min: ${poolConfig.min}, max: ${poolConfig.max})`);
   }
 
   async onModuleDestroy(): Promise<void> {
