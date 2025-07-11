@@ -4,6 +4,7 @@ import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+import Big from 'big.js';
 
 export interface PayHereNotificationParams {
   merchant_id: string;
@@ -212,23 +213,25 @@ export class TransactionService {
   }
 
   async getTransactionsByUserId(user_id: string): Promise<Transaction[]> {
-    // Find the user's subscription
-    const subscription: Subscription | undefined = await this.knexService
+    // Find all user's subscriptions
+    const subscriptions: Subscription[] = await this.knexService
       .knex<Subscription>('subscription')
-      .where('user_id', user_id)
-      .first();
-    if (!subscription || !subscription.payhere_sub_id) {
-      await this.dbLogger.info(`No subscription found for user ${user_id} - returning empty transaction list`);
+      .where('user_id', user_id);
+      
+    if (subscriptions.length === 0) {
+      await this.dbLogger.info(`No subscriptions found for user ${user_id} - returning empty transaction list`);
       return [];
     }
+
+    const subscriptionIds = subscriptions.map(sub => sub.payhere_sub_id);
     
-    // Fetch transactions for the subscription
+    // Fetch transactions for ALL subscriptions
     const transactions = await this.knexService
       .knex<Transaction>('transaction')
-      .where('payhere_sub_id', subscription.payhere_sub_id)
+      .whereIn('payhere_sub_id', subscriptionIds)
       .orderBy('created_at', 'desc');
     
-    await this.dbLogger.info(`Retrieved ${transactions.length} transactions for user ${user_id} (subscription: ${subscription.payhere_sub_id})`);
+    await this.dbLogger.info(`Retrieved ${transactions.length} transactions for user ${user_id} across ${subscriptions.length} subscriptions`);
     return transactions;
   }
 
@@ -245,21 +248,23 @@ export class TransactionService {
     try {
       await this.dbLogger.info(`Calculating DCA summary for user ${user_id}`);
       
-      // Find the user's subscription
-      const subscription: Subscription | undefined = await this.knexService
+      // Find all user's subscriptions
+      const subscriptions: Subscription[] = await this.knexService
         .knex<Subscription>('subscription')
-        .where('user_id', user_id)
-        .first();
+        .where('user_id', user_id);
 
-      if (!subscription || !subscription.payhere_sub_id) {
-        await this.dbLogger.info(`No subscription found for user ${user_id} - returning null DCA summary`);
+      if (subscriptions.length === 0) {
+        await this.dbLogger.info(`No subscriptions found for user ${user_id} - returning null DCA summary`);
         return null;
       }
 
-      // Get all successful transactions with Bitcoin data
+      const subscriptionIds = subscriptions.map(sub => sub.payhere_sub_id);
+      await this.dbLogger.info(`Found ${subscriptions.length} subscriptions for user ${user_id}: ${subscriptionIds.join(', ')}`);
+
+      // Get all successful transactions with Bitcoin data across ALL user subscriptions
       const transactions = await this.knexService
         .knex<Transaction>('transaction')
-        .where('payhere_sub_id', subscription.payhere_sub_id)
+        .whereIn('payhere_sub_id', subscriptionIds)
         .whereNotNull('satoshis_purchased')
         .where('status', 'SUCCESS');
 
@@ -277,43 +282,55 @@ export class TransactionService {
         };
       }
 
+      // Use Big.js for precise satoshi calculations
       const totalSatoshis = transactions.reduce(
-        (sum, tx) => sum + (tx.satoshis_purchased || 0),
-        0,
+        (sum, tx) => {
+          const satoshis = tx.satoshis_purchased ? new Big(tx.satoshis_purchased) : new Big(0);
+          return sum.plus(satoshis);
+        },
+        new Big(0),
       );
 
+      // Calculate total spent using Big.js for precision
       const totalSpent = transactions.reduce(
-        (sum, tx) =>
-          sum +
-          (tx.btc_price_at_purchase
-            ? (tx.satoshis_purchased! / 100_000_000) * tx.btc_price_at_purchase
-            : 0),
-        0,
+        (sum, tx) => {
+          if (tx.btc_price_at_purchase && tx.satoshis_purchased) {
+            // Convert satoshis to BTC (divide by 100,000,000) and multiply by price
+            const satoshisBig = new Big(tx.satoshis_purchased);
+            const btcAmount = satoshisBig.div(100_000_000);
+            const spentAmount = btcAmount.times(tx.btc_price_at_purchase);
+            return sum.plus(spentAmount);
+          }
+          return sum;
+        },
+        new Big(0),
       );
 
-      const averageBTCPrice =
-        totalSpent > 0 && totalSatoshis > 0
-          ? totalSpent / (totalSatoshis / 100_000_000)
-          : 0;
+      // Calculate average BTC price using Big.js
+      const averageBTCPrice = 
+        totalSpent.gt(0) && totalSatoshis.gt(0)
+          ? totalSpent.div(totalSatoshis.div(100_000_000))
+          : new Big(0);
 
       const dates = transactions
         .map((tx) => tx.created_at)
         .filter((date) => date)
         .sort();
 
+      // Convert Big.js values to numbers for the response
       const summary = {
         total_transactions: transactions.length,
         successful_transactions: transactions.length,
-        total_satoshis_purchased: totalSatoshis,
-        total_amount_spent: totalSpent,
-        average_btc_price: averageBTCPrice,
+        total_satoshis_purchased: Number(totalSatoshis.toString()),
+        total_amount_spent: Number(totalSpent.toString()),
+        average_btc_price: Number(averageBTCPrice.toString()),
         currency: transactions[0]?.price_currency || 'LKR',
         first_purchase_date: dates.length > 0 ? dates[0] : undefined,
         last_purchase_date:
           dates.length > 0 ? dates[dates.length - 1] : undefined,
       };
 
-      await this.dbLogger.info(`DCA summary calculated for user ${user_id}: ${totalSatoshis} total sats, ${totalSpent.toFixed(2)} ${summary.currency} spent, avg price ${averageBTCPrice.toFixed(2)}`);
+      await this.dbLogger.info(`DCA summary calculated for user ${user_id}: ${totalSatoshis.toString()} total sats, ${totalSpent.toFixed(2)} ${summary.currency} spent, avg price ${averageBTCPrice.toFixed(2)}`);
       return summary;
     } catch (error) {
       await this.dbLogger.error(`Error calculating DCA summary for user ${user_id}: ${error.message}`);
