@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
+import { DatabaseLoggerService } from '../knex/database-logger.service';
 
 export interface PayHereNotificationParams {
   merchant_id: string;
@@ -38,6 +39,7 @@ export class TransactionService {
   constructor(
     private readonly knexService: KnexService,
     private readonly bitcoinPriceService: BitcoinPriceService,
+    private readonly dbLogger: DatabaseLoggerService,
   ) {}
 
   private readonly logger = new Logger(TransactionService.name);
@@ -69,28 +71,35 @@ export class TransactionService {
     // If the calculated signature does not match the one provided by PayHere
     // the notification may have been tampered with. In that case we reject it.
     if (local_md5sig !== md5sig) {
+      await this.dbLogger.error(`MD5 signature verification failed for payment_id ${payment_id}, order_id ${order_id}: expected ${local_md5sig}, received ${md5sig}`);
       throw new UnauthorizedException('Md5 verification failed');
     }
+    
+    await this.dbLogger.info(`MD5 signature verified for payment_id ${payment_id}, order_id ${order_id}`);
+    
+    const status = this.getPayHereStatusMapped(status_code);
+    await this.dbLogger.info(`Processing PayHere notification: payment_id=${payment_id}, subscription_id=${subscription_id}, status=${status}, amount=${payhere_amount} ${payhere_currency}`);
 
     const existingTransaction = await this.knexService
       .knex<Transaction>('transaction')
       .where('payhere_pay_id', payment_id)
       .first();
 
-    // Mapped status
-    const status = this.getPayHereStatusMapped(status_code);
-
     if (existingTransaction) {
+      await this.dbLogger.info(`Updating existing transaction ${payment_id}: ${existingTransaction.status} → ${status}`);
+      
       const updateData: Partial<Transaction> = { status };
 
       // If transaction is now successful and we don't have Bitcoin data, fetch it
       if (status === 'SUCCESS' && !existingTransaction.satoshis_purchased) {
+        await this.dbLogger.info(`Fetching Bitcoin data for successful transaction ${payment_id}`);
         const bitcoinData = await this.fetchBitcoinDataForTransaction(
           parseFloat(payhere_amount),
           payhere_currency,
         );
         if (bitcoinData) {
           Object.assign(updateData, bitcoinData);
+          await this.dbLogger.info(`Bitcoin data added to transaction ${payment_id}: ${bitcoinData.satoshis_purchased} sats at ${bitcoinData.btc_price_at_purchase} ${bitcoinData.price_currency}`);
         }
       }
 
@@ -98,10 +107,14 @@ export class TransactionService {
         .knex('transaction')
         .update(updateData)
         .where('payhere_pay_id', payment_id);
+      
+      await this.dbLogger.info(`Transaction ${payment_id} updated successfully`);
       return;
     }
 
     // Create new transaction with Bitcoin data if successful
+    await this.dbLogger.info(`Creating new transaction for payment_id ${payment_id}, subscription_id ${subscription_id}, status ${status}`);
+    
     const transactionData: Transaction = {
       payhere_pay_id: payment_id,
       payhere_sub_id: subscription_id,
@@ -110,24 +123,34 @@ export class TransactionService {
 
     // Only fetch Bitcoin data for successful transactions
     if (status === 'SUCCESS') {
+      await this.dbLogger.info(`Fetching Bitcoin data for new successful transaction ${payment_id}`);
       const bitcoinData = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
       );
       if (bitcoinData) {
         Object.assign(transactionData, bitcoinData);
+        await this.dbLogger.info(`Bitcoin data fetched for new transaction ${payment_id}: ${bitcoinData.satoshis_purchased} sats at ${bitcoinData.btc_price_at_purchase} ${bitcoinData.price_currency}`);
       }
     }
 
     await this.createTransaction(transactionData);
+    await this.dbLogger.info(`New transaction ${payment_id} created successfully`);
   }
 
   async createTransaction(transaction: Transaction): Promise<Transaction> {
-    const result = await this.knexService
-      .knex('transaction')
-      .insert(transaction)
-      .returning('*');
-    return result[0] as Transaction;
+    try {
+      const result = await this.knexService
+        .knex('transaction')
+        .insert(transaction)
+        .returning('*');
+      
+      await this.dbLogger.info(`Transaction inserted into database: ${transaction.payhere_pay_id}`);
+      return result[0] as Transaction;
+    } catch (error) {
+      await this.dbLogger.error(`Failed to insert transaction ${transaction.payhere_pay_id}: ${error.message}`);
+      throw error;
+    }
   }
 
   private getPayHereStatusMapped(status_code: string): Status {
@@ -154,23 +177,20 @@ export class TransactionService {
     try {
       // Check if Bitcoin tracking is enabled
       if (process.env.ENABLE_BITCOIN_TRACKING === 'false') {
-        this.logger.debug('Bitcoin tracking is disabled');
+        await this.dbLogger.info('Bitcoin tracking is disabled - skipping Bitcoin data fetch');
         return null;
       }
 
+      await this.dbLogger.info(`Fetching Bitcoin price for ${amount} ${currency}`);
       const bitcoinCalculation =
         await this.bitcoinPriceService.calculateSatoshis(amount, currency);
 
       if (!bitcoinCalculation) {
-        this.logger.warn(
-          `Failed to fetch Bitcoin price for ${amount} ${currency}`,
-        );
+        await this.dbLogger.warn(`Failed to fetch Bitcoin price for ${amount} ${currency} - CoinGecko API may be unavailable`);
         return null;
       }
 
-      this.logger.log(
-        `Bitcoin DCA calculation: ${amount} ${currency} = ${bitcoinCalculation.satoshis} satoshis at ${bitcoinCalculation.btc_price} ${currency}/BTC`,
-      );
+      await this.dbLogger.info(`Bitcoin DCA calculation: ${amount} ${currency} = ${bitcoinCalculation.satoshis} satoshis at ${bitcoinCalculation.btc_price} ${currency}/BTC`);
 
       return {
         btc_price_at_purchase: bitcoinCalculation.btc_price,
@@ -179,7 +199,7 @@ export class TransactionService {
         coingecko_timestamp: bitcoinCalculation.timestamp,
       };
     } catch (error) {
-      this.logger.error('Error fetching Bitcoin data for transaction:', error);
+      await this.dbLogger.error(`Error fetching Bitcoin data for transaction (${amount} ${currency}): ${error.message}`);
       return null;
     }
   }
@@ -191,13 +211,18 @@ export class TransactionService {
       .where('user_id', user_id)
       .first();
     if (!subscription || !subscription.payhere_sub_id) {
+      await this.dbLogger.info(`No subscription found for user ${user_id} - returning empty transaction list`);
       return [];
     }
+    
     // Fetch transactions for the subscription
-    return this.knexService
+    const transactions = await this.knexService
       .knex<Transaction>('transaction')
       .where('payhere_sub_id', subscription.payhere_sub_id)
       .orderBy('created_at', 'desc');
+    
+    await this.dbLogger.info(`Retrieved ${transactions.length} transactions for user ${user_id} (subscription: ${subscription.payhere_sub_id})`);
+    return transactions;
   }
 
   async getDCASummaryForUser(user_id: string): Promise<{
@@ -211,6 +236,8 @@ export class TransactionService {
     last_purchase_date?: Date;
   } | null> {
     try {
+      await this.dbLogger.info(`Calculating DCA summary for user ${user_id}`);
+      
       // Find the user's subscription
       const subscription: Subscription | undefined = await this.knexService
         .knex<Subscription>('subscription')
@@ -218,6 +245,7 @@ export class TransactionService {
         .first();
 
       if (!subscription || !subscription.payhere_sub_id) {
+        await this.dbLogger.info(`No subscription found for user ${user_id} - returning null DCA summary`);
         return null;
       }
 
@@ -228,7 +256,10 @@ export class TransactionService {
         .whereNotNull('satoshis_purchased')
         .where('status', 'SUCCESS');
 
+      await this.dbLogger.info(`Found ${transactions.length} successful transactions with Bitcoin data for user ${user_id}`);
+
       if (transactions.length === 0) {
+        await this.dbLogger.info(`No successful transactions with Bitcoin data for user ${user_id} - returning empty summary`);
         return {
           total_transactions: 0,
           successful_transactions: 0,
@@ -263,7 +294,7 @@ export class TransactionService {
         .filter((date) => date)
         .sort();
 
-      return {
+      const summary = {
         total_transactions: transactions.length,
         successful_transactions: transactions.length,
         total_satoshis_purchased: totalSatoshis,
@@ -274,8 +305,11 @@ export class TransactionService {
         last_purchase_date:
           dates.length > 0 ? dates[dates.length - 1] : undefined,
       };
+
+      await this.dbLogger.info(`DCA summary calculated for user ${user_id}: ${totalSatoshis} total sats, ${totalSpent.toFixed(2)} ${summary.currency} spent, avg price ${averageBTCPrice.toFixed(2)}`);
+      return summary;
     } catch (error) {
-      this.logger.error('Error calculating DCA summary:', error);
+      await this.dbLogger.error(`Error calculating DCA summary for user ${user_id}: ${error.message}`);
       return null;
     }
   }

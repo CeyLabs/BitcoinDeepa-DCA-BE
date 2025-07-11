@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as crypto from 'crypto';
 import * as dayjs from 'dayjs';
+import { DatabaseLoggerService } from '../knex/database-logger.service';
 
 export interface TelegramInitData {
   query_id?: string;
@@ -24,21 +25,26 @@ export interface JwtPayload {
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly dbLogger: DatabaseLoggerService,
+  ) {}
 
-  verifyTelegramInitData(initData: string, botToken: string): boolean {
+  async verifyTelegramInitData(initData: string, botToken: string): Promise<boolean> {
     try {
       const parsed = new URLSearchParams(initData);
       const hash = parsed.get('hash');
       const authDate = parsed.get('auth_date');
 
       if (!hash || !authDate) {
+        await this.dbLogger.warn('Missing hash or auth_date in Telegram init data verification');
         return false;
       }
 
       // Validate timestamp to prevent replay attacks
       const authTimestamp = parseInt(authDate, 10);
       if (isNaN(authTimestamp)) {
+        await this.dbLogger.warn('Invalid timestamp format in Telegram init data');
         return false;
       }
 
@@ -47,6 +53,7 @@ export class AuthService {
       const maxAge = 24; // 24 hours
 
       if (currentTime.diff(authTime, 'hour') > maxAge) {
+        await this.dbLogger.warn(`Expired Telegram auth data - age: ${currentTime.diff(authTime, 'hour')} hours (max: ${maxAge})`);
         return false;
       }
 
@@ -68,8 +75,14 @@ export class AuthService {
         .update(dataCheckString)
         .digest('hex');
 
-      return computedHash === hash;
-    } catch {
+      const isValid = computedHash === hash;
+      if (!isValid) {
+        await this.dbLogger.warn('Hash verification failed for Telegram init data');
+      }
+
+      return isValid;
+    } catch (error) {
+      await this.dbLogger.error(`Exception during Telegram init data verification: ${error.message}`);
       return false;
     }
   }
@@ -95,11 +108,20 @@ export class AuthService {
     }
   }
 
-  generateJwt(payload: JwtPayload): string {
-    return this.jwtService.sign(payload);
+  async generateJwt(payload: JwtPayload): Promise<string> {
+    const token = this.jwtService.sign(payload);
+    await this.dbLogger.info(`JWT token generated for user: ${payload.telegram_id}`);
+    return token;
   }
 
-  verifyJwt(token: string): JwtPayload {
-    return this.jwtService.verify(token);
+  async verifyJwt(token: string): Promise<JwtPayload> {
+    try {
+      const payload = this.jwtService.verify(token);
+      await this.dbLogger.info(`JWT token verified for user: ${payload.telegram_id}`);
+      return payload;
+    } catch (error) {
+      await this.dbLogger.warn(`JWT verification failed: ${error.message}`);
+      throw error;
+    }
   }
 }

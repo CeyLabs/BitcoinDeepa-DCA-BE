@@ -15,30 +15,53 @@ import {
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
+import { DatabaseLoggerService } from '../knex/database-logger.service';
 
 @Controller('transaction')
 export class TransactionController {
-  constructor(private readonly transactionService: TransactionService) {}
+  constructor(
+    private readonly transactionService: TransactionService,
+    private readonly dbLogger: DatabaseLoggerService,
+  ) {}
 
   @Post('payhere-webhook')
   async handlePayHereWebhook(
     @Body() body: PayHereNotificationParams,
     @Res() res: Response,
   ) {
-    // req.body will contain the form-urlencoded data
-    await this.transactionService.handlePayHereNotification(body);
-    return res.status(HttpStatus.OK).send('OK');
+    await this.dbLogger.info(`PayHere webhook received: order_id=${body.order_id}, status=${body.status_code}, amount=${body.payhere_amount} ${body.payhere_currency}`);
+    
+    try {
+      await this.transactionService.handlePayHereNotification(body);
+      await this.dbLogger.info(`PayHere webhook processed successfully for order_id: ${body.order_id}`);
+      return res.status(HttpStatus.OK).send('OK');
+    } catch (error) {
+      await this.dbLogger.error(`PayHere webhook processing failed for order_id ${body.order_id}: ${error.message}`);
+      return res.status(HttpStatus.OK).send('OK');
+    }
   }
 
   @Get('current')
   @UseGuards(ConditionalAuthGuard)
   async getUserTransactions(@CurrentUser() user: JwtPayload) {
-    return this.transactionService.getTransactionsByUserId(user.user_id);
+    await this.dbLogger.info(`User ${user.telegram_id} requesting transaction history`);
+    const transactions = await this.transactionService.getTransactionsByUserId(user.user_id);
+    await this.dbLogger.info(`Returned ${transactions.length} transactions for user ${user.telegram_id}`);
+    return transactions;
   }
 
   @Get('dca-summary')
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
-    return this.transactionService.getDCASummaryForUser(user.user_id);
+    await this.dbLogger.info(`User ${user.telegram_id} requesting DCA summary`);
+    const summary = await this.transactionService.getDCASummaryForUser(user.user_id);
+    
+    if (summary) {
+      await this.dbLogger.info(`DCA summary calculated for user ${user.telegram_id}: ${summary.total_satoshis_purchased} sats, ${summary.successful_transactions} transactions`);
+    } else {
+      await this.dbLogger.info(`No DCA summary data available for user ${user.telegram_id}`);
+    }
+    
+    return summary;
   }
 }

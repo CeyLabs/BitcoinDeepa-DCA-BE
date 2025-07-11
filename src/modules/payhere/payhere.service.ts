@@ -1,5 +1,7 @@
+import { Injectable } from '@nestjs/common';
 import { createHash } from 'crypto';
 import axios from 'axios';
+import { DatabaseLoggerService } from '../knex/database-logger.service';
 
 export interface IGetLinkParams {
   user_id: string;
@@ -32,14 +34,17 @@ function md5String(input: string): string {
   }
 }
 
+@Injectable()
 export class PayHereService {
-  static getBaseUrl(): string {
+  constructor(private readonly dbLogger: DatabaseLoggerService) {}
+
+  getBaseUrl(): string {
     return (process.env.PAYHERE_ENV as string) === 'live'
       ? 'https://www.payhere.lk'
       : 'https://sandbox.payhere.lk';
   }
 
-  static getLink({
+  async getLink({
     user_id,
     order_id,
     amount,
@@ -55,7 +60,8 @@ export class PayHereService {
     recurrence,
     duration,
     type = 'checkout',
-  }: IGetLinkParams): string {
+  }: IGetLinkParams): Promise<string> {
+    await this.dbLogger.info(`Generating PayHere payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}`);
     const hashedSecret = md5String(
       String(process.env.PAYHERE_MERCHANT_SECRET),
     ).toUpperCase();
@@ -94,52 +100,74 @@ export class PayHereService {
       custom_1: user_id,
     };
 
-    return `${PayHereService.getBaseUrl()}/pay/${type}?${new URLSearchParams(params).toString()}`;
+    const link = `${this.getBaseUrl()}/pay/${type}?${new URLSearchParams(params).toString()}`;
+    await this.dbLogger.info(`PayHere payment link generated successfully for order: ${order_id}`);
+    return link;
   }
 
-  static async getAccessToken(): Promise<string> {
+  async getAccessToken(): Promise<string> {
+    await this.dbLogger.info('Requesting PayHere OAuth token');
+    
     const appId = process.env.PAYHERE_APP_ID;
     const appSecret = process.env.PAYHERE_APP_SECRET;
     if (!appId || !appSecret) {
+      await this.dbLogger.error('PayHere App ID/Secret not configured - OAuth token generation failed');
       throw new Error('PayHere App ID/Secret not set');
     }
-    const authCode = Buffer.from(`${appId}:${appSecret}`).toString('base64');
-    const url = `${this.getBaseUrl()}/oauth/token`;
+    
+    try {
+      const authCode = Buffer.from(`${appId}:${appSecret}`).toString('base64');
+      const url = `${this.getBaseUrl()}/oauth/token`;
 
-    const params = new URLSearchParams();
-    params.append('grant_type', 'client_credentials');
-    const response: {
-      data: {
-        access_token: string;
-        token_type: string;
-        expires_in: number;
-        scope: string;
-      };
-    } = await axios.post(url, params, {
-      headers: {
-        Authorization: `Basic ${authCode}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-    });
-    return response.data.access_token;
+      const params = new URLSearchParams();
+      params.append('grant_type', 'client_credentials');
+      const response: {
+        data: {
+          access_token: string;
+          token_type: string;
+          expires_in: number;
+          scope: string;
+        };
+      } = await axios.post(url, params, {
+        headers: {
+          Authorization: `Basic ${authCode}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+      
+      await this.dbLogger.info(`PayHere OAuth token generated successfully (expires in ${response.data.expires_in}s)`);
+      return response.data.access_token;
+    } catch (error) {
+      await this.dbLogger.error(`PayHere OAuth token generation failed: ${error.message}`);
+      throw error;
+    }
   }
 
-  static async cancelSubscription(
+  async cancelSubscription(
     payhere_sub_id: string,
   ): Promise<CancelSubscriptionResponse> {
-    const accessToken = await PayHereService.getAccessToken();
-
-    const url = `${this.getBaseUrl()}/merchant/v1/subscription/cancel`;
-    const response: { data: CancelSubscriptionResponse } = await axios.post(
-      url,
-      { subscription_id: payhere_sub_id },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
+    await this.dbLogger.info(`Requesting PayHere subscription cancellation for: ${payhere_sub_id}`);
+    
+    try {
+      const accessToken = await this.getAccessToken();
+      const url = `${this.getBaseUrl()}/merchant/v1/subscription/cancel`;
+      
+      const response: { data: CancelSubscriptionResponse } = await axios.post(
+        url,
+        { subscription_id: payhere_sub_id },
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
         },
-      },
-    );
-    return response.data;
+      );
+      
+      await this.dbLogger.info(`PayHere subscription cancellation response for ${payhere_sub_id}: status=${response.data.status}, message=${response.data.msg}`);
+      return response.data;
+    } catch (error) {
+      await this.dbLogger.error(`PayHere subscription cancellation failed for ${payhere_sub_id}: ${error.message}`);
+      throw error;
+    }
   }
 }

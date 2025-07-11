@@ -5,9 +5,10 @@ import { KnexModule } from '../knex/knex.module';
 import { AuthModule } from '../auth/auth.module';
 import { UserModule } from '../user/user.module';
 import { PackageModule } from '../package/package.module';
+import { PayHereModule } from '../payhere/payhere.module';
 
 @Module({
-  imports: [KnexModule, AuthModule, UserModule, PackageModule],
+  imports: [KnexModule, AuthModule, UserModule, PackageModule, PayHereModule],
   providers: [SubscriptionService],
   exports: [SubscriptionService],
   controllers: [SubscriptionController],
