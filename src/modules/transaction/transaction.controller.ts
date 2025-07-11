@@ -6,6 +6,7 @@ import {
   Get,
   UseGuards,
   Body,
+  NotFoundException,
 } from '@nestjs/common';
 import { Response } from 'express';
 import {
@@ -41,13 +42,28 @@ export class TransactionController {
     }
   }
 
-  @Get('current')
+  @Get('list')
   @UseGuards(ConditionalAuthGuard)
   async getUserTransactions(@CurrentUser() user: JwtPayload) {
     await this.dbLogger.info(`User ${user.telegram_id} requesting transaction history`);
     const transactions = await this.transactionService.getTransactionsByUserId(user.user_id);
     await this.dbLogger.info(`Returned ${transactions.length} transactions for user ${user.telegram_id}`);
     return transactions;
+  }
+
+  @Get('latest')
+  @UseGuards(ConditionalAuthGuard)
+  async getLatestTransaction(@CurrentUser() user: JwtPayload) {
+    await this.dbLogger.info(`User ${user.telegram_id} requesting latest transaction`);
+    const transaction = await this.transactionService.getLatestTransactionForUser(user.user_id);
+    
+    if (transaction) {
+      await this.dbLogger.info(`Latest transaction found for user ${user.telegram_id}: ${transaction.payhere_pay_id}, status: ${transaction.status}`);
+      return transaction;
+    } else {
+      await this.dbLogger.warn(`No transactions found for user ${user.telegram_id} with active subscription`);
+      throw new NotFoundException('No transactions found');
+    }
   }
 
   @Get('dca-summary')

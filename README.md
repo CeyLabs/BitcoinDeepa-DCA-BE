@@ -154,7 +154,7 @@ Authorization: Bearer <jwt_token>
 #### POST /transaction/payhere-webhook
 PayHere will POST payment notifications to this endpoint 
 
-#### GET /transaction/current
+#### GET /transaction/list
 List all transactions for the current authenticated user.
 
 **Headers:**

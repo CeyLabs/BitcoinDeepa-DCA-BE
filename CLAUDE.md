@@ -154,7 +154,7 @@ PORT=3000
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public)
-- `GET /transaction/current` - Get user's transaction history with Bitcoin data (authenticated)
+- `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 
 ## Development Guidelines

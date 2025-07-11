@@ -235,6 +235,43 @@ export class TransactionService {
     return transactions;
   }
 
+  async getLatestTransactionForUser(user_id: string): Promise<Transaction | null> {
+    try {
+      await this.dbLogger.info(`Fetching latest transaction for user ${user_id}`);
+      
+      // Find user's active subscription
+      const activeSubscription: Subscription | undefined = await this.knexService
+        .knex<Subscription>('subscription')
+        .where('user_id', user_id)
+        .where('is_active', true)
+        .orderBy('created_at', 'desc')
+        .first();
+        
+      if (!activeSubscription) {
+        await this.dbLogger.info(`No active subscription found for user ${user_id} - returning null`);
+        return null;
+      }
+
+      // Get the latest transaction from the active subscription
+      const latestTransaction = await this.knexService
+        .knex<Transaction>('transaction')
+        .where('payhere_sub_id', activeSubscription.payhere_sub_id)
+        .orderBy('created_at', 'desc')
+        .first();
+      
+      if (latestTransaction) {
+        await this.dbLogger.info(`Latest transaction found for user ${user_id}: ${latestTransaction.payhere_pay_id} with status ${latestTransaction.status}`);
+      } else {
+        await this.dbLogger.info(`No transactions found for user ${user_id}'s active subscription ${activeSubscription.payhere_sub_id}`);
+      }
+      
+      return latestTransaction || null;
+    } catch (error) {
+      await this.dbLogger.error(`Error fetching latest transaction for user ${user_id}: ${error.message}`);
+      return null;
+    }
+  }
+
   async getDCASummaryForUser(user_id: string): Promise<{
     total_transactions: number;
     successful_transactions: number;
