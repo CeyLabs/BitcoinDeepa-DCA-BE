@@ -235,6 +235,73 @@ export class TransactionService {
     return transactions;
   }
 
+  async getTransactionsByUserIdPaginated(
+    user_id: string,
+    page: number = 1,
+    limit: number = 10,
+  ): Promise<{
+    transactions: Transaction[];
+    total_count: number;
+    total_pages: number;
+    current_page: number;
+    has_more: boolean;
+  }> {
+    try {
+      await this.dbLogger.info(`Fetching paginated transactions for user ${user_id} (page: ${page}, limit: ${limit})`);
+      
+      // Find all user's subscriptions
+      const subscriptions: Subscription[] = await this.knexService
+        .knex<Subscription>('subscription')
+        .where('user_id', user_id);
+        
+      if (subscriptions.length === 0) {
+        await this.dbLogger.info(`No subscriptions found for user ${user_id} - returning empty paginated result`);
+        return {
+          transactions: [],
+          total_count: 0,
+          total_pages: 0,
+          current_page: page,
+          has_more: false,
+        };
+      }
+
+      const subscriptionIds = subscriptions.map(sub => sub.payhere_sub_id);
+      
+      // Get total count for pagination
+      const [countResult] = await this.knexService
+        .knex<Transaction>('transaction')
+        .whereIn('payhere_sub_id', subscriptionIds)
+        .count('* as count');
+      
+      const totalCount = Number((countResult as any).count);
+      const totalPages = Math.ceil(totalCount / limit);
+      const offset = (page - 1) * limit;
+      
+      // Fetch paginated transactions
+      const transactions = await this.knexService
+        .knex<Transaction>('transaction')
+        .whereIn('payhere_sub_id', subscriptionIds)
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset);
+      
+      const hasMore = page < totalPages;
+      
+      await this.dbLogger.info(`Retrieved ${transactions.length} transactions for user ${user_id} (page ${page}/${totalPages}, total: ${totalCount})`);
+      
+      return {
+        transactions,
+        total_count: totalCount,
+        total_pages: totalPages,
+        current_page: page,
+        has_more: hasMore,
+      };
+    } catch (error) {
+      await this.dbLogger.error(`Error fetching paginated transactions for user ${user_id}: ${error.message}`);
+      throw error;
+    }
+  }
+
   async getLatestTransactionForUser(user_id: string): Promise<Transaction | null> {
     try {
       await this.dbLogger.info(`Fetching latest transaction for user ${user_id}`);

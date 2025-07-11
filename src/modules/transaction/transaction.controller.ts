@@ -7,6 +7,7 @@ import {
   UseGuards,
   Body,
   NotFoundException,
+  Query,
 } from '@nestjs/common';
 import { Response } from 'express';
 import {
@@ -44,11 +45,24 @@ export class TransactionController {
 
   @Get('list')
   @UseGuards(ConditionalAuthGuard)
-  async getUserTransactions(@CurrentUser() user: JwtPayload) {
-    await this.dbLogger.info(`User ${user.telegram_id} requesting transaction history`);
-    const transactions = await this.transactionService.getTransactionsByUserId(user.user_id);
-    await this.dbLogger.info(`Returned ${transactions.length} transactions for user ${user.telegram_id}`);
-    return transactions;
+  async getUserTransactions(
+    @CurrentUser() user: JwtPayload,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const pageNum = page ? parseInt(page, 10) : 1;
+    const limitNum = limit ? parseInt(limit, 10) : 10;
+    
+    await this.dbLogger.info(`User ${user.telegram_id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`);
+    
+    const result = await this.transactionService.getTransactionsByUserIdPaginated(
+      user.user_id,
+      pageNum,
+      limitNum,
+    );
+    
+    await this.dbLogger.info(`Returned ${result.transactions.length} transactions for user ${user.telegram_id} (page ${pageNum}/${result.total_pages})`);
+    return result;
   }
 
   @Get('latest')
