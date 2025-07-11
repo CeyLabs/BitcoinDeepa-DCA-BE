@@ -7,7 +7,7 @@ import {
   Body,
 } from '@nestjs/common';
 import { SubscriptionService } from './subscription.service';
-import { Subscription } from '../../models/subscription';
+import { SubscriptionDetails } from '../../models/subscription';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
@@ -31,11 +31,11 @@ export class SubscriptionController {
   @UseGuards(ConditionalAuthGuard)
   async getCurrentSubscription(
     @CurrentUser() user: JwtPayload,
-  ): Promise<Subscription> {
+  ): Promise<SubscriptionDetails> {
     await this.dbLogger.info(`User ${user.telegram_id} retrieving current subscription`);
     
     const subscription =
-      await this.subscriptionService.getCurrentSubscriptionForUser(
+      await this.subscriptionService.getCurrentSubscriptionDetailsForUser(
         user.user_id,
       );
 
