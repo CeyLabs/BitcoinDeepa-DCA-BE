@@ -3,6 +3,8 @@ import { KnexService } from '../knex/knex.service';
 import { PayHereService } from '../payhere/payhere.service';
 import { Subscription, SubscriptionDetails } from '../../models/subscription';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { RedisService } from '../redis/redis.service';
+import { CacheKeys } from '../redis/utils/cache-keys.util';
 import * as dayjs from 'dayjs';
 
 @Injectable()
@@ -11,6 +13,7 @@ export class SubscriptionService {
     private readonly knexService: KnexService,
     private readonly dbLogger: DatabaseLoggerService,
     private readonly payHereService: PayHereService,
+    private readonly redisService: RedisService,
   ) {}
 
   async getCurrentSubscriptionForUser(
@@ -26,6 +29,17 @@ export class SubscriptionService {
   async getCurrentSubscriptionDetailsForUser(
     user_id: string,
   ): Promise<SubscriptionDetails | undefined> {
+    const cacheKey = CacheKeys.user.subscription(user_id);
+    
+    // Try to get from cache first
+    const cached = await this.redisService.get<SubscriptionDetails>(cacheKey);
+    if (cached) {
+      await this.dbLogger.info(`Cache HIT for user subscription: ${user_id}`);
+      return cached;
+    }
+
+    await this.dbLogger.info(`Cache MISS for user subscription: ${user_id}, fetching from database`);
+    
     const result = await this.knexService
       .knex('subscription as s')
       .select(
@@ -68,7 +82,7 @@ export class SubscriptionService {
       nextBillingDate = startDate.add(monthsSinceStart + 1, 'month').toDate();
     }
 
-    return {
+    const subscriptionDetails: SubscriptionDetails = {
       payhere_sub_id: result.payhere_sub_id,
       user_id: result.user_id,
       package_id: result.package_id,
@@ -81,6 +95,11 @@ export class SubscriptionService {
       package_name: result.package_name,
       frequency: result.frequency,
     };
+
+    // Cache the result for 5 minutes (300 seconds)
+    await this.redisService.set(cacheKey, subscriptionDetails, { ttl: 300 });
+    
+    return subscriptionDetails;
   }
 
   async cancelPayHereSubscription(payhere_sub_id: string): Promise<void> {
@@ -102,5 +121,14 @@ export class SubscriptionService {
       await this.dbLogger.error(`PayHere API error during cancellation of subscription ${payhere_sub_id}: ${error.message}`);
       throw new BadRequestException('PayHere API error');
     }
+  }
+
+  /**
+   * Invalidate subscription cache for a user (call when subscription changes)
+   */
+  async invalidateUserSubscriptionCache(user_id: string): Promise<void> {
+    const cacheKey = CacheKeys.user.subscription(user_id);
+    await this.redisService.del(cacheKey);
+    await this.dbLogger.info(`Invalidated subscription cache for user: ${user_id}`);
   }
 }

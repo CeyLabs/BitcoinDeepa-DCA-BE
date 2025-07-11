@@ -4,9 +4,10 @@ import { TransactionService } from './transaction.service';
 import { BitcoinPriceModule } from '../bitcoin-price/bitcoin-price.module';
 import { AuthModule } from '../auth/auth.module';
 import { KnexModule } from '../knex/knex.module';
+import { RedisModule } from '../redis/redis.module';
 
 @Module({
-  imports: [BitcoinPriceModule, AuthModule, KnexModule],
+  imports: [BitcoinPriceModule, AuthModule, KnexModule, RedisModule],
   controllers: [TransactionController],
   providers: [TransactionService],
 })

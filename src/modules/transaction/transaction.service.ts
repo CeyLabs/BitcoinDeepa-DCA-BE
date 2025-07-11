@@ -4,6 +4,8 @@ import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { RedisService } from '../redis/redis.service';
+import { CacheKeys } from '../redis/utils/cache-keys.util';
 import Big from 'big.js';
 
 export interface PayHereNotificationParams {
@@ -43,6 +45,7 @@ export class TransactionService {
     private readonly knexService: KnexService,
     private readonly bitcoinPriceService: BitcoinPriceService,
     private readonly dbLogger: DatabaseLoggerService,
+    private readonly redisService: RedisService,
   ) {}
 
   private readonly logger = new Logger(TransactionService.name);
@@ -119,6 +122,11 @@ export class TransactionService {
         .where('payhere_pay_id', payment_id);
       
       await this.dbLogger.info(`Transaction ${payment_id} updated successfully`);
+      
+      // Invalidate user caches when transaction status is updated
+      if (user_id) {
+        await this.invalidateUserTransactionCaches(user_id);
+      }
       return;
     }
 
@@ -149,6 +157,11 @@ export class TransactionService {
 
     await this.createTransaction(transactionData);
     await this.dbLogger.info(`New transaction ${payment_id} created successfully`);
+    
+    // Invalidate user caches when a new transaction is created
+    if (user_id) {
+      await this.invalidateUserTransactionCaches(user_id);
+    }
   }
 
   async createTransaction(transaction: Transaction): Promise<Transaction> {
@@ -252,7 +265,23 @@ export class TransactionService {
     has_more: boolean;
   }> {
     try {
-      await this.dbLogger.info(`Fetching paginated transactions for user ${user_id} (page: ${page}, limit: ${limit})`);
+      const cacheKey = CacheKeys.transaction.list(user_id, page, limit);
+      
+      // Try to get from cache first
+      const cached = await this.redisService.get<{
+        transactions: Transaction[];
+        total_count: number;
+        total_pages: number;
+        current_page: number;
+        has_more: boolean;
+      }>(cacheKey);
+      
+      if (cached) {
+        await this.dbLogger.info(`Cache HIT for user transactions: ${user_id} (page: ${page}, limit: ${limit})`);
+        return cached;
+      }
+
+      await this.dbLogger.info(`Cache MISS for user transactions: ${user_id} (page: ${page}, limit: ${limit}), fetching from database`);
       
       // Find all user's subscriptions
       const subscriptions: Subscription[] = await this.knexService
@@ -261,13 +290,17 @@ export class TransactionService {
         
       if (subscriptions.length === 0) {
         await this.dbLogger.info(`No subscriptions found for user ${user_id} - returning empty paginated result`);
-        return {
+        const emptyResult = {
           transactions: [],
           total_count: 0,
           total_pages: 0,
           current_page: page,
           has_more: false,
         };
+        
+        // Cache empty result for 2 minutes
+        await this.redisService.set(cacheKey, emptyResult, { ttl: 120 });
+        return emptyResult;
       }
 
       const subscriptionIds = subscriptions.map(sub => sub.payhere_sub_id);
@@ -292,15 +325,20 @@ export class TransactionService {
       
       const hasMore = page < totalPages;
       
-      await this.dbLogger.info(`Retrieved ${transactions.length} transactions for user ${user_id} (page ${page}/${totalPages}, total: ${totalCount})`);
-      
-      return {
+      const result = {
         transactions,
         total_count: totalCount,
         total_pages: totalPages,
         current_page: page,
         has_more: hasMore,
       };
+      
+      // Cache the result for 2 minutes (120 seconds)
+      await this.redisService.set(cacheKey, result, { ttl: 120 });
+      
+      await this.dbLogger.info(`Retrieved ${transactions.length} transactions for user ${user_id} (page ${page}/${totalPages}, total: ${totalCount})`);
+      
+      return result;
     } catch (error) {
       await this.dbLogger.error(`Error fetching paginated transactions for user ${user_id}: ${error.message}`);
       throw error;
@@ -309,7 +347,16 @@ export class TransactionService {
 
   async getLatestTransactionForUser(user_id: string): Promise<any | null> {
     try {
-      await this.dbLogger.info(`Fetching latest transaction with package info for user ${user_id}`);
+      const cacheKey = CacheKeys.transaction.latest(user_id);
+      
+      // Try to get from cache first
+      const cached = await this.redisService.get<any>(cacheKey);
+      if (cached) {
+        await this.dbLogger.info(`Cache HIT for latest transaction: ${user_id}`);
+        return cached;
+      }
+
+      await this.dbLogger.info(`Cache MISS for latest transaction: ${user_id}, fetching from database`);
       
       // Find user's active subscription
       const activeSubscription: Subscription | undefined = await this.knexService
@@ -349,6 +396,8 @@ export class TransactionService {
         .first();
       
       if (result) {
+        // Cache the result for 1 minute (60 seconds)
+        await this.redisService.set(cacheKey, result, { ttl: 60 });
         await this.dbLogger.info(`Latest transaction found for user ${user_id}: ${result.payhere_pay_id} with status ${result.status}, package: ${result.package_name} (${result.package_amount} ${result.package_currency})`);
       } else {
         await this.dbLogger.info(`No transactions found for user ${user_id}'s active subscription ${activeSubscription.payhere_sub_id}`);
@@ -372,7 +421,26 @@ export class TransactionService {
     last_purchase_date?: Date;
   } | null> {
     try {
-      await this.dbLogger.info(`Calculating DCA summary for user ${user_id}`);
+      const cacheKey = CacheKeys.transaction.dcaSummary(user_id);
+      
+      // Try to get from cache first
+      const cached = await this.redisService.get<{
+        total_transactions: number;
+        successful_transactions: number;
+        total_satoshis_purchased: number;
+        total_amount_spent: number;
+        average_btc_price: number;
+        currency: string;
+        first_purchase_date?: Date;
+        last_purchase_date?: Date;
+      }>(cacheKey);
+      
+      if (cached) {
+        await this.dbLogger.info(`Cache HIT for DCA summary: ${user_id}`);
+        return cached;
+      }
+
+      await this.dbLogger.info(`Cache MISS for DCA summary: ${user_id}, calculating from database`);
       
       // Find all user's subscriptions
       const subscriptions: Subscription[] = await this.knexService
@@ -398,7 +466,7 @@ export class TransactionService {
 
       if (transactions.length === 0) {
         await this.dbLogger.info(`No successful transactions with Bitcoin data for user ${user_id} - returning empty summary`);
-        return {
+        const emptyResult = {
           total_transactions: 0,
           successful_transactions: 0,
           total_satoshis_purchased: 0,
@@ -406,6 +474,10 @@ export class TransactionService {
           average_btc_price: 0,
           currency: 'LKR',
         };
+        
+        // Cache empty result for 5 minutes
+        await this.redisService.set(cacheKey, emptyResult, { ttl: 300 });
+        return emptyResult;
       }
 
       // Use Big.js for precise satoshi calculations
@@ -456,6 +528,9 @@ export class TransactionService {
           dates.length > 0 ? dates[dates.length - 1] : undefined,
       };
 
+      // Cache the result for 5 minutes (300 seconds)
+      await this.redisService.set(cacheKey, summary, { ttl: 300 });
+      
       await this.dbLogger.info(`DCA summary calculated for user ${user_id}: ${totalSatoshis.toString()} total sats, ${totalSpent.toFixed(2)} ${summary.currency} spent, avg price ${averageBTCPrice.toFixed(2)}`);
       return summary;
     } catch (error) {
@@ -499,6 +574,26 @@ export class TransactionService {
     } catch (error) {
       await this.dbLogger.error(`Error ensuring subscription exists for ${payhere_sub_id}: ${error.message}`);
       // Don't throw error here as we still want to process the transaction
+    }
+  }
+
+  /**
+   * Invalidate all transaction-related caches for a user
+   */
+  async invalidateUserTransactionCaches(user_id: string): Promise<void> {
+    try {
+      // Invalidate latest transaction cache
+      await this.redisService.del(CacheKeys.transaction.latest(user_id));
+      
+      // Invalidate DCA summary cache
+      await this.redisService.del(CacheKeys.transaction.dcaSummary(user_id));
+      
+      // Invalidate paginated transaction lists (all pages)
+      await this.redisService.delByPattern(CacheKeys.patterns.userTransactions(user_id));
+      
+      await this.dbLogger.info(`Invalidated all transaction caches for user: ${user_id}`);
+    } catch (error) {
+      await this.dbLogger.error(`Error invalidating transaction caches for user ${user_id}: ${error.message}`);
     }
   }
 }

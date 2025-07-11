@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosResponse } from 'axios';
 import * as dayjs from 'dayjs';
+import { RedisService } from '../redis/redis.service';
+import { CacheKeys } from '../redis/utils/cache-keys.util';
 
 export interface BitcoinPriceData {
   btc_price: number;
@@ -28,10 +30,10 @@ interface CeylonCashResponse {
 @Injectable()
 export class BitcoinPriceService {
   private readonly logger = new Logger(BitcoinPriceService.name);
-  private btcUsdCache: { price: number; timestamp: Date } | null = null;
-  private usdLkrCache: { rate: number; timestamp: Date } | null = null;
-  private readonly CACHE_TTL_SECONDS = 20; // Cache frequency
+  private readonly CACHE_TTL_SECONDS = parseInt(process.env.BITCOIN_PRICE_CACHE_TTL || '20');
   private readonly SATOSHIS_PER_BTC = 100_000_000;
+
+  constructor(private readonly redisService: RedisService) {}
 
   async getBitcoinPrice(currency: string): Promise<BitcoinPriceData | null> {
     try {
@@ -111,12 +113,15 @@ export class BitcoinPriceService {
 
   private async fetchBitcoinPriceInUSD(): Promise<number | null> {
     try {
-      // Check cache first
-      if (this.btcUsdCache && this.isCacheValid(this.btcUsdCache.timestamp)) {
+      // Check Redis cache first
+      const cacheKey = CacheKeys.bitcoin.price('USD');
+      const cached = await this.redisService.get<{price: number; timestamp: Date}>(cacheKey);
+      
+      if (cached && this.isCacheValid(cached.timestamp)) {
         this.logger.debug(
-          `Using cached BTC/USD price: ${this.btcUsdCache.price}`,
+          `Using cached BTC/USD price from Redis: ${cached.price}`,
         );
-        return this.btcUsdCache.price;
+        return cached.price;
       }
 
       const apiKey = process.env.COINGECKO_API_KEY;
@@ -148,8 +153,9 @@ export class BitcoinPriceService {
         return null;
       }
 
-      // Cache the result
-      this.btcUsdCache = { price, timestamp: new Date() };
+      // Cache the result in Redis
+      const cacheData = { price, timestamp: new Date() };
+      await this.redisService.set(cacheKey, cacheData, { ttl: this.CACHE_TTL_SECONDS });
       this.logger.log(`Fetched fresh BTC/USD price: ${price}`);
 
       return price;
@@ -161,12 +167,15 @@ export class BitcoinPriceService {
 
   private async fetchUSDLKRRate(): Promise<number | null> {
     try {
-      // Check cache first
-      if (this.usdLkrCache && this.isCacheValid(this.usdLkrCache.timestamp)) {
+      // Check Redis cache first
+      const cacheKey = CacheKeys.bitcoin.usdLkr();
+      const cached = await this.redisService.get<{rate: number; timestamp: Date}>(cacheKey);
+      
+      if (cached && this.isCacheValid(cached.timestamp)) {
         this.logger.debug(
-          `Using cached USD/LKR rate: ${this.usdLkrCache.rate}`,
+          `Using cached USD/LKR rate from Redis: ${cached.rate}`,
         );
-        return this.usdLkrCache.rate;
+        return cached.rate;
       }
 
       const response: AxiosResponse<CeylonCashResponse> = await axios.get(
@@ -185,8 +194,9 @@ export class BitcoinPriceService {
         return null;
       }
 
-      // Cache the result
-      this.usdLkrCache = { rate: sellingRate, timestamp: new Date() };
+      // Cache the result in Redis
+      const cacheData = { rate: sellingRate, timestamp: new Date() };
+      await this.redisService.set(cacheKey, cacheData, { ttl: this.CACHE_TTL_SECONDS });
       this.logger.log(`Fetched fresh USD/LKR rate: ${sellingRate}`);
 
       return sellingRate;
@@ -216,34 +226,41 @@ export class BitcoinPriceService {
   }
 
   // Clear cache manually if needed
-  clearCache(): void {
-    this.btcUsdCache = null;
-    this.usdLkrCache = null;
-    this.logger.log('Bitcoin price cache cleared');
+  async clearCache(): Promise<void> {
+    await this.redisService.delByPattern(CacheKeys.patterns.allBitcoinPrices());
+    this.logger.log('Bitcoin price cache cleared from Redis');
   }
 
   // Get cache status for debugging
-  getCacheStatus(): {
+  async getCacheStatus(): Promise<{
     btc_usd?: { price: number; age_seconds: number };
     usd_lkr?: { rate: number; age_seconds: number };
-  } {
+  }> {
     const now = dayjs();
     const status: {
       btc_usd?: { price: number; age_seconds: number };
       usd_lkr?: { rate: number; age_seconds: number };
     } = {};
 
-    if (this.btcUsdCache) {
+    // Get BTC/USD cache status
+    const btcUsdCache = await this.redisService.get<{price: number; timestamp: Date}>(
+      CacheKeys.bitcoin.price('USD')
+    );
+    if (btcUsdCache) {
       status.btc_usd = {
-        price: this.btcUsdCache.price,
-        age_seconds: now.diff(dayjs(this.btcUsdCache.timestamp), 'second'),
+        price: btcUsdCache.price,
+        age_seconds: now.diff(dayjs(btcUsdCache.timestamp), 'second'),
       };
     }
 
-    if (this.usdLkrCache) {
+    // Get USD/LKR cache status  
+    const usdLkrCache = await this.redisService.get<{rate: number; timestamp: Date}>(
+      CacheKeys.bitcoin.usdLkr()
+    );
+    if (usdLkrCache) {
       status.usd_lkr = {
-        rate: this.usdLkrCache.rate,
-        age_seconds: now.diff(dayjs(this.usdLkrCache.timestamp), 'second'),
+        rate: usdLkrCache.rate,
+        age_seconds: now.diff(dayjs(usdLkrCache.timestamp), 'second'),
       };
     }
 
