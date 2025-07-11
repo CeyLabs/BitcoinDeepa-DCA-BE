@@ -5,6 +5,7 @@ import {
   UseGuards,
   Post,
   Body,
+  ConflictException,
 } from '@nestjs/common';
 import { SubscriptionService } from './subscription.service';
 import { SubscriptionDetails } from '../../models/subscription';
@@ -55,6 +56,13 @@ export class SubscriptionController {
     @Body() body: { package_id: string },
   ): Promise<{ link: string }> {
     await this.dbLogger.info(`User ${user.telegram_id} requesting payment link for package ${body.package_id}`);
+    
+    // Check if user already has an active subscription
+    const existingSubscription = await this.subscriptionService.getCurrentSubscriptionForUser(user.user_id);
+    if (existingSubscription && existingSubscription.is_active) {
+      await this.dbLogger.warn(`User ${user.telegram_id} attempted to create new subscription while having active subscription ${existingSubscription.payhere_sub_id}`);
+      throw new ConflictException('User already has an active subscription');
+    }
     
     const _package = await this.packageService.getPackageById(body.package_id);
     if (!_package) {
