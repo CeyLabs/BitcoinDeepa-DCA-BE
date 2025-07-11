@@ -302,9 +302,9 @@ export class TransactionService {
     }
   }
 
-  async getLatestTransactionForUser(user_id: string): Promise<Transaction | null> {
+  async getLatestTransactionForUser(user_id: string): Promise<any | null> {
     try {
-      await this.dbLogger.info(`Fetching latest transaction for user ${user_id}`);
+      await this.dbLogger.info(`Fetching latest transaction with package info for user ${user_id}`);
       
       // Find user's active subscription
       const activeSubscription: Subscription | undefined = await this.knexService
@@ -319,20 +319,37 @@ export class TransactionService {
         return null;
       }
 
-      // Get the latest transaction from the active subscription
-      const latestTransaction = await this.knexService
-        .knex<Transaction>('transaction')
-        .where('payhere_sub_id', activeSubscription.payhere_sub_id)
-        .orderBy('created_at', 'desc')
+      // Get the latest transaction with package information
+      const result = await this.knexService
+        .knex('transaction as t')
+        .select(
+          't.payhere_pay_id',
+          't.payhere_sub_id',
+          't.status',
+          't.btc_price_at_purchase',
+          't.satoshis_purchased',
+          't.price_currency',
+          't.coingecko_timestamp',
+          't.created_at',
+          't.updated_at',
+          'p.amount as package_amount',
+          'p.currency as package_currency',
+          'p.name as package_name',
+          'p.frequency as package_frequency'
+        )
+        .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
+        .join('package as p', 's.package_id', 'p.id')
+        .where('t.payhere_sub_id', activeSubscription.payhere_sub_id)
+        .orderBy('t.created_at', 'desc')
         .first();
       
-      if (latestTransaction) {
-        await this.dbLogger.info(`Latest transaction found for user ${user_id}: ${latestTransaction.payhere_pay_id} with status ${latestTransaction.status}`);
+      if (result) {
+        await this.dbLogger.info(`Latest transaction found for user ${user_id}: ${result.payhere_pay_id} with status ${result.status}, package: ${result.package_name} (${result.package_amount} ${result.package_currency})`);
       } else {
         await this.dbLogger.info(`No transactions found for user ${user_id}'s active subscription ${activeSubscription.payhere_sub_id}`);
       }
       
-      return latestTransaction || null;
+      return result || null;
     } catch (error) {
       await this.dbLogger.error(`Error fetching latest transaction for user ${user_id}: ${error.message}`);
       return null;
