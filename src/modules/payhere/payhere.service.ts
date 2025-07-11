@@ -5,6 +5,7 @@ import { DatabaseLoggerService } from '../knex/database-logger.service';
 
 export interface IGetLinkParams {
   user_id: string;
+  package_id: string;
   order_id: string;
   amount: string;
   currency: string;
@@ -46,6 +47,7 @@ export class PayHereService {
 
   async getLink({
     user_id,
+    package_id,
     order_id,
     amount,
     currency,
@@ -61,7 +63,7 @@ export class PayHereService {
     duration,
     type = 'checkout',
   }: IGetLinkParams): Promise<string> {
-    await this.dbLogger.info(`Generating PayHere payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}`);
+    await this.dbLogger.info(`Generating PayHere payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}, package: ${package_id}`);
     const hashedSecret = md5String(
       String(process.env.PAYHERE_MERCHANT_SECRET),
     ).toUpperCase();
@@ -98,6 +100,7 @@ export class PayHereService {
       amount: amountFormatted,
       hash,
       custom_1: user_id,
+      custom_2: package_id,
     };
 
     const link = `${this.getBaseUrl()}/pay/${type}?${new URLSearchParams(params).toString()}`;

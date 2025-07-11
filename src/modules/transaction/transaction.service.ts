@@ -14,6 +14,8 @@ export interface PayHereNotificationParams {
   payhere_currency: string;
   status_code: string;
   md5sig: string;
+  custom_1?: string; // user_id
+  custom_2?: string; // package_id (if we add it)
 }
 
 type Status = 'SUCCESS' | 'PENDING' | 'CANCELLED' | 'FAILED' | 'CHARGEBACK';
@@ -56,6 +58,8 @@ export class TransactionService {
       md5sig,
       payment_id,
       subscription_id,
+      custom_1: user_id,
+      custom_2: package_id,
     } = data;
 
     const merchant_secret = String(process.env.PAYHERE_MERCHANT_SECRET);
@@ -111,6 +115,9 @@ export class TransactionService {
       await this.dbLogger.info(`Transaction ${payment_id} updated successfully`);
       return;
     }
+
+    // Check if subscription exists, create if it doesn't
+    await this.ensureSubscriptionExists(subscription_id, user_id, package_id);
 
     // Create new transaction with Bitcoin data if successful
     await this.dbLogger.info(`Creating new transaction for payment_id ${payment_id}, subscription_id ${subscription_id}, status ${status}`);
@@ -311,6 +318,44 @@ export class TransactionService {
     } catch (error) {
       await this.dbLogger.error(`Error calculating DCA summary for user ${user_id}: ${error.message}`);
       return null;
+    }
+  }
+
+  private async ensureSubscriptionExists(
+    payhere_sub_id: string,
+    user_id?: string,
+    package_id?: string,
+  ): Promise<void> {
+    try {
+      // Check if subscription already exists
+      const existingSubscription = await this.knexService
+        .knex<Subscription>('subscription')
+        .where('payhere_sub_id', payhere_sub_id)
+        .first();
+
+      if (existingSubscription) {
+        await this.dbLogger.info(`Subscription ${payhere_sub_id} already exists`);
+        return;
+      }
+
+      // Create new subscription if we have the required data
+      if (user_id && package_id) {
+        await this.dbLogger.info(`Creating new subscription: ${payhere_sub_id} for user ${user_id}, package ${package_id}`);
+        
+        await this.knexService.knex('subscription').insert({
+          payhere_sub_id,
+          user_id,
+          package_id,
+          is_active: true,
+        });
+
+        await this.dbLogger.info(`New subscription ${payhere_sub_id} created successfully`);
+      } else {
+        await this.dbLogger.warn(`Cannot create subscription ${payhere_sub_id}: missing user_id (${user_id}) or package_id (${package_id})`);
+      }
+    } catch (error) {
+      await this.dbLogger.error(`Error ensuring subscription exists for ${payhere_sub_id}: ${error.message}`);
+      // Don't throw error here as we still want to process the transaction
     }
   }
 }
