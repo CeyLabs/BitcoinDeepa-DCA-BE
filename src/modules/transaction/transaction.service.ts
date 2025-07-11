@@ -1,4 +1,4 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, UnauthorizedException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
@@ -84,6 +84,11 @@ export class TransactionService {
     
     const status = this.getPayHereStatusMapped(status_code);
     await this.dbLogger.info(`Processing PayHere notification: payment_id=${payment_id}, subscription_id=${subscription_id}, status=${status}, amount=${payhere_amount} ${payhere_currency}`);
+
+    if(!subscription_id || Number(subscription_id) < 0) {
+      await this.dbLogger.error(`Invalid subscription id: ${subscription_id} for payment_id ${payment_id}`);
+      throw new InternalServerErrorException('Invalid subscription id');
+    }
 
     const existingTransaction = await this.knexService
       .knex<Transaction>('transaction')
