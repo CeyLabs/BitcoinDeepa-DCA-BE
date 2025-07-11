@@ -120,7 +120,7 @@ export class PayHereService {
     
     try {
       const authCode = Buffer.from(`${appId}:${appSecret}`).toString('base64');
-      const url = `${this.getBaseUrl()}/oauth/token`;
+      const url = `${this.getBaseUrl()}/merchant/v1/oauth/token`;
 
       const params = new URLSearchParams();
       params.append('grant_type', 'client_credentials');

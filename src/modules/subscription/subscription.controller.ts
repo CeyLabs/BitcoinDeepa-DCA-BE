@@ -101,7 +101,8 @@ export class SubscriptionController {
       await this.subscriptionService.getCurrentSubscriptionForUser(
         user.user_id,
       );
-    if (!subscription || !subscription.payhere_sub_id) {
+
+    if (!subscription || !subscription.payhere_sub_id || !subscription.is_active) {
       await this.dbLogger.warn(`Subscription cancellation failed - no active subscription found for user ${user.telegram_id}`);
       throw new NotFoundException('Subscription not found');
     }
@@ -112,6 +113,6 @@ export class SubscriptionController {
     );
     
     await this.dbLogger.info(`Subscription ${subscription.payhere_sub_id} successfully cancelled for user ${user.telegram_id}`);
-    return;
+    return { message: 'Subscription cancelled successfully' };
   }
 }
