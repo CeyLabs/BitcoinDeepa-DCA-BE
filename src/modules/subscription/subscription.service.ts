@@ -103,23 +103,60 @@ export class SubscriptionService {
   }
 
   async cancelPayHereSubscription(payhere_sub_id: string): Promise<void> {
+    const trx = await this.knexService.knex.transaction();
+    
     try {
+      await this.dbLogger.info(`Starting atomic cancellation for subscription: ${payhere_sub_id}`);
+      
+      // First, get the subscription to verify it exists and get user_id
+      const subscription = await trx('subscription')
+        .where('payhere_sub_id', payhere_sub_id)
+        .first();
+      
+      if (!subscription) {
+        throw new BadRequestException('Subscription not found');
+      }
+      
+      // Call PayHere API to cancel subscription
       await this.dbLogger.info(`Attempting PayHere API cancellation for subscription: ${payhere_sub_id}`);
       const result = await this.payHereService.cancelSubscription(payhere_sub_id);
       
-      if (result && result.status === 1) {
-        await this.knexService
-          .knex('subscription')
-          .update({ is_active: false })
-          .where('payhere_sub_id', payhere_sub_id);
-        
-        await this.dbLogger.info(`Subscription ${payhere_sub_id} marked as inactive in database`);
-      } else {
-        await this.dbLogger.warn(`PayHere cancellation failed for subscription ${payhere_sub_id}, status: ${result?.status}`);
+      // Check if PayHere cancellation was successful
+      if (!result || result.status !== 1) {
+        throw new BadRequestException(`PayHere cancellation failed, status: ${result?.status || 'unknown'}`);
       }
+      
+      // If PayHere API call succeeded, update database
+      await trx('subscription')
+        .update({ 
+          is_active: false,
+          updated_at: this.knexService.knex.fn.now()
+        })
+        .where('payhere_sub_id', payhere_sub_id);
+      
+      // Commit transaction
+      await trx.commit();
+      
+      // Invalidate cache after successful commit (non-critical operation)
+      try {
+        await this.invalidateUserSubscriptionCache(subscription.user_id);
+      } catch (cacheError) {
+        // Log cache error but don't fail the operation since DB operation succeeded
+        await this.dbLogger.warn(`Failed to invalidate cache after successful cancellation of ${payhere_sub_id}: ${cacheError.message}`);
+      }
+      
+      await this.dbLogger.info(`Subscription ${payhere_sub_id} successfully cancelled atomically`);
+      
     } catch (error) {
-      await this.dbLogger.error(`PayHere API error during cancellation of subscription ${payhere_sub_id}: ${error.message}`);
-      throw new BadRequestException('PayHere API error');
+      // Rollback transaction on any error
+      await trx.rollback();
+      await this.dbLogger.error(`Atomic cancellation failed for subscription ${payhere_sub_id}: ${error.message}`);
+      
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      
+      throw new BadRequestException('Subscription cancellation failed');
     }
   }
 

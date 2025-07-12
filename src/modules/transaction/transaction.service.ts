@@ -93,74 +93,102 @@ export class TransactionService {
       throw new InternalServerErrorException('Invalid subscription id');
     }
 
+    // Pre-fetch Bitcoin data outside transaction to avoid long-running transactions
+    let bitcoinDataForUpdate: any = null;
+    let bitcoinDataForNew: any = null;
+    
+    // Check if we need Bitcoin data for existing transaction update
     const existingTransaction = await this.knexService
       .knex<Transaction>('transaction')
       .where('payhere_pay_id', payment_id)
       .first();
 
-    if (existingTransaction) {
-      await this.dbLogger.info(`Updating existing transaction ${payment_id}: ${existingTransaction.status} → ${status}`);
-      
-      const updateData: Partial<Transaction> = { status };
-
-      // If transaction is now successful and we don't have Bitcoin data, fetch it
-      if (status === 'SUCCESS' && !existingTransaction.satoshis_purchased) {
-        await this.dbLogger.info(`Fetching Bitcoin data for successful transaction ${payment_id}`);
-        const bitcoinData = await this.fetchBitcoinDataForTransaction(
-          parseFloat(payhere_amount),
-          payhere_currency,
-        );
-        if (bitcoinData) {
-          Object.assign(updateData, bitcoinData);
-          await this.dbLogger.info(`Bitcoin data added to transaction ${payment_id}: ${bitcoinData.satoshis_purchased} sats at ${bitcoinData.btc_price_at_purchase} ${bitcoinData.price_currency}`);
-        }
-      }
-
-      await this.knexService
-        .knex('transaction')
-        .update(updateData)
-        .where('payhere_pay_id', payment_id);
-      
-      await this.dbLogger.info(`Transaction ${payment_id} updated successfully`);
-      
-      // Invalidate user caches when transaction status is updated
-      if (user_id) {
-        await this.invalidateUserTransactionCaches(user_id);
-      }
-      return;
-    }
-
-    // Check if subscription exists, create if it doesn't
-    await this.ensureSubscriptionExists(subscription_id, user_id, package_id);
-
-    // Create new transaction with Bitcoin data if successful
-    await this.dbLogger.info(`Creating new transaction for payment_id ${payment_id}, subscription_id ${subscription_id}, status ${status}`);
-    
-    const transactionData: Transaction = {
-      payhere_pay_id: payment_id,
-      payhere_sub_id: subscription_id,
-      status,
-    };
-
-    // Only fetch Bitcoin data for successful transactions
-    if (status === 'SUCCESS') {
-      await this.dbLogger.info(`Fetching Bitcoin data for new successful transaction ${payment_id}`);
-      const bitcoinData = await this.fetchBitcoinDataForTransaction(
+    if (existingTransaction && status === 'SUCCESS' && !existingTransaction.satoshis_purchased) {
+      await this.dbLogger.info(`Pre-fetching Bitcoin data for existing transaction ${payment_id}`);
+      bitcoinDataForUpdate = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
       );
-      if (bitcoinData) {
-        Object.assign(transactionData, bitcoinData);
-        await this.dbLogger.info(`Bitcoin data fetched for new transaction ${payment_id}: ${bitcoinData.satoshis_purchased} sats at ${bitcoinData.btc_price_at_purchase} ${bitcoinData.price_currency}`);
-      }
+    }
+    
+    // Pre-fetch Bitcoin data for new successful transactions
+    if (!existingTransaction && status === 'SUCCESS') {
+      await this.dbLogger.info(`Pre-fetching Bitcoin data for new transaction ${payment_id}`);
+      bitcoinDataForNew = await this.fetchBitcoinDataForTransaction(
+        parseFloat(payhere_amount),
+        payhere_currency,
+      );
     }
 
-    await this.createTransaction(transactionData);
-    await this.dbLogger.info(`New transaction ${payment_id} created successfully`);
+    // Use atomic transaction for all database operations only
+    const trx = await this.knexService.knex.transaction();
     
-    // Invalidate user caches when a new transaction is created
-    if (user_id) {
-      await this.invalidateUserTransactionCaches(user_id);
+    try {
+      await this.dbLogger.info(`Starting atomic processing for payment_id ${payment_id}`);
+      
+      // Re-check if transaction exists within transaction (for consistency)
+      const currentTransaction = await trx('transaction')
+        .where('payhere_pay_id', payment_id)
+        .first();
+
+      if (currentTransaction) {
+        await this.dbLogger.info(`Updating existing transaction ${payment_id}: ${currentTransaction.status} → ${status}`);
+        
+        const updateData: Partial<Transaction> = { status };
+
+        // Add pre-fetched Bitcoin data if available
+        if (bitcoinDataForUpdate) {
+          Object.assign(updateData, bitcoinDataForUpdate);
+          await this.dbLogger.info(`Bitcoin data added to transaction ${payment_id}: ${bitcoinDataForUpdate.satoshis_purchased} sats at ${bitcoinDataForUpdate.btc_price_at_purchase} ${bitcoinDataForUpdate.price_currency}`);
+        }
+
+        await trx('transaction')
+          .update(updateData)
+          .where('payhere_pay_id', payment_id);
+        
+        await this.dbLogger.info(`Transaction ${payment_id} updated successfully`);
+      } else {
+        // Ensure subscription exists before creating transaction
+        await this.ensureSubscriptionExistsAtomic(trx, subscription_id, user_id, package_id);
+
+        // Create new transaction with pre-fetched Bitcoin data
+        await this.dbLogger.info(`Creating new transaction for payment_id ${payment_id}, subscription_id ${subscription_id}, status ${status}`);
+        
+        const transactionData: Transaction = {
+          payhere_pay_id: payment_id,
+          payhere_sub_id: subscription_id,
+          status,
+        };
+
+        // Add pre-fetched Bitcoin data if available
+        if (bitcoinDataForNew) {
+          Object.assign(transactionData, bitcoinDataForNew);
+          await this.dbLogger.info(`Bitcoin data added to new transaction ${payment_id}: ${bitcoinDataForNew.satoshis_purchased} sats at ${bitcoinDataForNew.btc_price_at_purchase} ${bitcoinDataForNew.price_currency}`);
+        }
+
+        await this.createTransactionAtomic(trx, transactionData);
+        await this.dbLogger.info(`New transaction ${payment_id} created successfully`);
+      }
+      
+      // Commit all database operations
+      await trx.commit();
+      await this.dbLogger.info(`Atomic processing completed successfully for payment_id ${payment_id}`);
+      
+      // Invalidate user caches after successful commit (non-critical operation)
+      if (user_id) {
+        try {
+          await this.invalidateUserTransactionCaches(user_id);
+        } catch (cacheError) {
+          // Log cache error but don't fail the operation since DB operation succeeded
+          await this.dbLogger.warn(`Failed to invalidate cache after successful transaction processing ${payment_id}: ${cacheError.message}`);
+        }
+      }
+      
+    } catch (error) {
+      // Rollback all changes on any error
+      await trx.rollback();
+      await this.dbLogger.error(`Atomic processing failed for payment_id ${payment_id}: ${error.message}`);
+      throw error;
     }
   }
 
@@ -575,6 +603,55 @@ export class TransactionService {
       await this.dbLogger.error(`Error ensuring subscription exists for ${payhere_sub_id}: ${error.message}`);
       // Don't throw error here as we still want to process the transaction
     }
+  }
+
+  /**
+   * Atomic version of ensureSubscriptionExists for use within transactions
+   */
+  private async ensureSubscriptionExistsAtomic(
+    trx: any,
+    payhere_sub_id: string,
+    user_id?: string,
+    package_id?: string,
+  ): Promise<void> {
+    // Check if subscription already exists within the transaction
+    const existingSubscription = await trx('subscription')
+      .where('payhere_sub_id', payhere_sub_id)
+      .first();
+
+    if (existingSubscription) {
+      await this.dbLogger.info(`Subscription ${payhere_sub_id} already exists (atomic)`);
+      return;
+    }
+
+    // Create new subscription if we have the required data
+    if (user_id && package_id) {
+      await this.dbLogger.info(`Creating new subscription atomically: ${payhere_sub_id} for user ${user_id}, package ${package_id}`);
+      
+      await trx('subscription').insert({
+        payhere_sub_id,
+        user_id,
+        package_id,
+        is_active: true,
+      });
+
+      await this.dbLogger.info(`New subscription ${payhere_sub_id} created successfully (atomic)`);
+    } else {
+      await this.dbLogger.warn(`Cannot create subscription ${payhere_sub_id}: missing user_id (${user_id}) or package_id (${package_id}) (atomic)`);
+      throw new InternalServerErrorException('Insufficient data to create subscription');
+    }
+  }
+
+  /**
+   * Atomic version of createTransaction for use within transactions
+   */
+  async createTransactionAtomic(trx: any, transaction: Transaction): Promise<Transaction> {
+    const result = await trx('transaction')
+      .insert(transaction)
+      .returning('*');
+    
+    await this.dbLogger.info(`Transaction inserted atomically: ${transaction.payhere_pay_id}`);
+    return result[0] as Transaction;
   }
 
   /**
