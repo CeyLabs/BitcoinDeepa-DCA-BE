@@ -13,7 +13,7 @@
     ]
   },
   "deploy": {
-    "startCommand": "npm run migrate && npm run start:prod",
+    "startCommand": "npm run start:prod",
     "healthcheckPath": "/health/simple",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
