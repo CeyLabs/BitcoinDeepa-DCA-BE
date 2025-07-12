@@ -305,7 +305,6 @@ export class TransactionService {
       }>(cacheKey);
       
       if (cached) {
-        await this.dbLogger.info(`Cache HIT for user transactions: ${user_id} (page: ${page}, limit: ${limit})`);
         return cached;
       }
 
@@ -380,7 +379,6 @@ export class TransactionService {
       // Try to get from cache first
       const cached = await this.redisService.get<any>(cacheKey);
       if (cached) {
-        await this.dbLogger.info(`Cache HIT for latest transaction: ${user_id}`);
         return cached;
       }
 
@@ -464,7 +462,6 @@ export class TransactionService {
       }>(cacheKey);
       
       if (cached) {
-        await this.dbLogger.info(`Cache HIT for DCA summary: ${user_id}`);
         return cached;
       }
 

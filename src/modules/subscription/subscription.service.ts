@@ -34,7 +34,6 @@ export class SubscriptionService {
     // Try to get from cache first
     const cached = await this.redisService.get<SubscriptionDetails>(cacheKey);
     if (cached) {
-      await this.dbLogger.info(`Cache HIT for user subscription: ${user_id}`);
       return cached;
     }
 

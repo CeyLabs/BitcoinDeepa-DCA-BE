@@ -99,7 +99,7 @@ export class RedisService {
     
     try {
       const ttl = options?.ttl ? options.ttl * 1000 : undefined; // Convert to milliseconds
-      const x= await this.cacheManager.set(key, value, ttl);
+      await this.cacheManager.set(key, value, ttl);
       this.logger.debug(`Cache SET for key: ${key}, TTL: ${options?.ttl || 'default'}`);
     } catch (error) {
       this.logger.error(`Error setting cache key ${key}:`, error);
