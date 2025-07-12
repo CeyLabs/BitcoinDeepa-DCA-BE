@@ -10,10 +10,12 @@ import { RedisService } from './redis.service';
         try {
           let redisConfig: any = {
             maxRetriesPerRequest: 3,
-            retryDelayOnFailover: 1000,
             enableReadyCheck: true,
-            connectTimeout: 10000,
-            commandTimeout: 5000,
+            connectTimeout: 30000,
+            commandTimeout: 10000,
+            lazyConnect: true,
+            enableOfflineQueue: false,
+            keepAlive: 30000,
           };
 
           // Parse REDIS_URL if provided, otherwise fall back to individual config values
@@ -21,7 +23,7 @@ import { RedisService } from './redis.service';
             // For Railway Redis, use the external hostname for local development
             let redisUrl = process.env.REDIS_URL;
             if (redisUrl.includes('redis.railway.internal')) {
-              redisUrl = redisUrl.replace('redis.railway.internal', 'centerbeam.proxy.rlwy.net');
+              redisUrl = redisUrl.replace('redis.railway.internal', 'centerbeam.proxy.rlwy.net'); // cspell:disable-line
             }
             
             const url = new URL(redisUrl);

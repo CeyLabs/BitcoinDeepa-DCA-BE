@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
@@ -15,7 +15,7 @@ export interface Package {
 }
 
 @Injectable()
-export class PackageService {
+export class PackageService implements OnModuleDestroy {
   private redis: Redis;
 
   constructor(
@@ -25,8 +25,20 @@ export class PackageService {
     // Create direct Redis connection for reliable caching
     this.redis = new Redis(process.env.REDIS_URL!, {
       maxRetriesPerRequest: 3,
-      connectTimeout: 10000,
-      commandTimeout: 5000,
+      connectTimeout: 30000,
+      commandTimeout: 10000,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      keepAlive: 30000,
+    });
+
+    // Handle Redis connection errors gracefully
+    this.redis.on('error', (error) => {
+      console.warn('Redis connection error in PackageService:', error.message);
+    });
+
+    this.redis.on('connect', () => {
+      console.log('Redis connected in PackageService');
     });
   }
 
@@ -96,6 +108,13 @@ export class PackageService {
       }
     } catch (error) {
       // Silently ignore cache invalidation failures
+    }
+  }
+
+  onModuleDestroy() {
+    // Gracefully disconnect Redis when service is destroyed
+    if (this.redis) {
+      this.redis.disconnect();
     }
   }
 }
