@@ -9,18 +9,22 @@ import { RedisService } from './redis.service';
       useFactory: async () => {
         try {
           let redisConfig: any = {
-            ttl: parseInt(process.env.REDIS_TTL_DEFAULT || '300') * 1000, // Convert to milliseconds
-            retryAttempts: 3,
-            retryDelay: 1000,
             maxRetriesPerRequest: 3,
-            lazyConnect: true,
+            retryDelayOnFailover: 1000,
             enableReadyCheck: true,
-            maxMemoryPolicy: 'allkeys-lru',
+            connectTimeout: 10000,
+            commandTimeout: 5000,
           };
 
           // Parse REDIS_URL if provided, otherwise fall back to individual config values
           if (process.env.REDIS_URL) {
-            const url = new URL(process.env.REDIS_URL);
+            // For Railway Redis, use the external hostname for local development
+            let redisUrl = process.env.REDIS_URL;
+            if (redisUrl.includes('redis.railway.internal')) {
+              redisUrl = redisUrl.replace('redis.railway.internal', 'centerbeam.proxy.rlwy.net');
+            }
+            
+            const url = new URL(redisUrl);
             redisConfig = {
               ...redisConfig,
               host: url.hostname,
@@ -56,13 +60,11 @@ import { RedisService } from './redis.service';
 
           const store = await redisStore(redisConfig);
           
-          console.log('Redis store created successfully');
           return {
             store,
             ttl: parseInt(process.env.REDIS_TTL_DEFAULT || '300') * 1000,
           };
         } catch (error) {
-          console.error('Failed to create Redis store:', error);
           // Fallback to memory store if Redis is not available
           return {
             ttl: parseInt(process.env.REDIS_TTL_DEFAULT || '300') * 1000,

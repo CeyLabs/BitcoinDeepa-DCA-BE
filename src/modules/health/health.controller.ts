@@ -7,6 +7,7 @@ import {
 } from '@nestjs/terminus';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
+import Redis from 'ioredis';
 
 @Controller('health')
 export class HealthController {
@@ -61,4 +62,5 @@ export class HealthController {
       environment: process.env.NODE_ENV || 'development',
     };
   }
+
 }

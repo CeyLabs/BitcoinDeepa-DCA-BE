@@ -20,13 +20,19 @@ export class RedisService {
     setTimeout(() => {
       try {
         const store = (this.cacheManager as any).store;
-        if (store && store.client) {
+        // Try different ways to access Redis client
+        if (store?.client) {
           this.redis = store.client;
           this.setupEventHandlers();
-          this.logger.log('Redis direct client access enabled');
+        } else if (store?.redis) {
+          this.redis = store.redis;
+          this.setupEventHandlers();
+        } else if (store?.connection) {
+          this.redis = store.connection;
+          this.setupEventHandlers();
         }
       } catch (error) {
-        this.logger.debug('Redis direct client not available, using cache manager only');
+        // Redis direct client not available, using cache manager only
       }
     }, 1000);
   }
@@ -229,14 +235,14 @@ export class RedisService {
     
     try {
       const info = await this.redis.info('stats');
-      const keyspace = await this.redis.info('keyspace');
+      const keyspace = await this.redis.info('keyspace'); // cspell:disable-line
       const memory = await this.redis.info('memory');
 
       // Parse info strings
-      const statsMatch = info.match(/keyspace_hits:(\d+)/);
-      const missesMatch = info.match(/keyspace_misses:(\d+)/);
+      const statsMatch = info.match(/keyspace_hits:(\d+)/); // cspell:disable-line
+      const missesMatch = info.match(/keyspace_misses:(\d+)/); // cspell:disable-line
       const memoryMatch = memory.match(/used_memory_human:([^\r\n]+)/);
-      const keysMatch = keyspace.match(/keys=(\d+)/);
+      const keysMatch = keyspace.match(/keys=(\d+)/); // cspell:disable-line
 
       return {
         keys: keysMatch ? parseInt(keysMatch[1]) : 0,
