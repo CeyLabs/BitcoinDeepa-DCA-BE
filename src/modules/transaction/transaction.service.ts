@@ -38,6 +38,8 @@ export interface Transaction {
   price_currency?: string;
   coingecko_timestamp?: Date;
   settled?: boolean;
+  retry_count?: number;
+  last_retry_at?: Date;
   created_at?: Date;
   updated_at?: Date;
 }
@@ -197,6 +199,7 @@ export class TransactionService {
           payhere_pay_id: payment_id,
           payhere_sub_id: subscription_id,
           status,
+          retry_count: 0,
         };
 
         // Add pre-fetched Bitcoin data if available
@@ -214,16 +217,12 @@ export class TransactionService {
       }
 
       const satoshis =
-          bitcoinDataForUpdate?.satoshis_purchased ||
-          bitcoinDataForNew?.satoshis_purchased;
+        bitcoinDataForUpdate?.satoshis_purchased ||
+        bitcoinDataForNew?.satoshis_purchased;
 
       // Call external fund transfer API for successful transactions with satoshis
       let fundTransferSuccess = false;
-      if (
-        status === 'SUCCESS' &&
-        user_id &&
-        satoshis
-      ) {
+      if (status === 'SUCCESS' && user_id && satoshis) {
         await this.dbLogger.info(
           `Attempting fund transfer for payment_id ${payment_id}: ${satoshis} satoshis to user ${user_id}`,
         );

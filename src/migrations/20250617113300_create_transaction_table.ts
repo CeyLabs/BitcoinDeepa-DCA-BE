@@ -28,12 +28,21 @@ export async function up(knex: Knex): Promise<void> {
     table.string('price_currency', 3).nullable();
     table.timestamp('coingecko_timestamp').nullable();
     table.boolean('settled').defaultTo(false).notNullable();
+
+    // Settlement retry tracking fields
+    table.integer('retry_count').defaultTo(0).notNullable();
+    table.timestamp('last_retry_at').nullable();
+
     table.timestamps(true, true);
+
+    // Performance indexes for settlement queries
+    table.index(['status', 'settled', 'retry_count'], 'idx_transaction_settlement_retry');
+    table.index(['last_retry_at'], 'idx_transaction_last_retry_at');
   });
 }
 
 export async function down(knex: Knex): Promise<void> {
   await knex.schema
     .dropTableIfExists(tableName)
-    .raw('DROP TYPE enum_transaction_status;');
+    .raw('DROP TYPE IF EXISTS enum_transaction_status;');
 }

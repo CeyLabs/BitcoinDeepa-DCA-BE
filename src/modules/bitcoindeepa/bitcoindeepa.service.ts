@@ -76,7 +76,7 @@ export class BitcoinDeepaService {
       };
 
       await this.dbLogger.info(
-        `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.endpoint}`
+        `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.endpoint}`,
       );
 
       const response = await axios.post<FundTransferResponse>(
@@ -89,13 +89,13 @@ export class BitcoinDeepaService {
       );
 
       await this.dbLogger.info(
-        `BitcoinDeepaService.transferFunds: Fund transfer successful - ${amount} satoshis to user ${toTelegramId}, status: ${response.status}`
+        `BitcoinDeepaService.transferFunds: Fund transfer successful - ${amount} satoshis to user ${toTelegramId}, status: ${response.status}`,
       );
 
       return response.data;
     } catch (error: any) {
       await this.dbLogger.error(
-        `BitcoinDeepaService.transferFunds: Fund transfer failed for ${amount} satoshis to user ${toTelegramId}: ${error.message}`
+        `BitcoinDeepaService.transferFunds: Fund transfer failed for ${amount} satoshis to user ${toTelegramId}: ${error.message}`,
       );
 
       // Return a standardized error response
