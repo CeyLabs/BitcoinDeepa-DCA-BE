@@ -12,7 +12,7 @@ export class SettlementService {
     private readonly dbLogger: DatabaseLoggerService,
   ) {}
 
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CronExpression.EVERY_SECOND)
   async retryUnsettledTransactions() {
     if (!this.bitcoinDeepaService.isConfigured()) {
       await this.dbLogger.warn(
@@ -106,7 +106,7 @@ export class SettlementService {
       );
 
       // Perform the external fund transfer
-      const memo = `DCA Purchase Retry #${currentRetryCount} - PayHere Payment ${payhere_pay_id}: ${satoshis_purchased} sats`;
+      const memo = `DCA Purchase of ${satoshis_purchased} sats. (Ref: ${payhere_pay_id})`;
       const transferResult = await this.bitcoinDeepaService.transferFunds(
         satoshis_purchased,
         telegram_id,
