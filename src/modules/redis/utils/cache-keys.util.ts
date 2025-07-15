@@ -12,23 +12,26 @@ export class CacheKeys {
 
   // User-related cache keys
   static user = {
-    profile: (userId: string): string => `${CacheKeys.PREFIX}:user:profile:${userId}`,
-    subscription: (userId: string): string => `${CacheKeys.PREFIX}:subscription:user:${userId}`,
+    profile: (userId: string): string =>
+      `${CacheKeys.PREFIX}:user:profile:${userId}`,
+    subscription: (userId: string): string =>
+      `${CacheKeys.PREFIX}:subscription:user:${userId}`,
   };
 
   // Transaction-related cache keys
   static transaction = {
-    list: (userId: string, page: number, limit: number): string => 
+    list: (userId: string, page: number, limit: number): string =>
       `${CacheKeys.PREFIX}:transactions:user:${userId}:page:${page}:limit:${limit}`,
-    latest: (userId: string): string => 
+    latest: (userId: string): string =>
       `${CacheKeys.PREFIX}:transaction:latest:user:${userId}`,
-    dcaSummary: (userId: string): string => 
+    dcaSummary: (userId: string): string =>
       `${CacheKeys.PREFIX}:dca:summary:user:${userId}`,
   };
 
   // Bitcoin price cache keys
   static bitcoin = {
-    price: (currency: string): string => `${CacheKeys.PREFIX}:btc:price:${currency}`,
+    price: (currency: string): string =>
+      `${CacheKeys.PREFIX}:btc:price:${currency}`,
     usdLkr: (): string => `${CacheKeys.PREFIX}:exchange:usd:lkr`,
   };
 
@@ -39,8 +42,10 @@ export class CacheKeys {
 
   // Pattern generators for bulk operations
   static patterns = {
-    userAll: (userId: string): string => `${CacheKeys.PREFIX}:*:user:${userId}*`,
-    userTransactions: (userId: string): string => `${CacheKeys.PREFIX}:transaction*:user:${userId}*`,
+    userAll: (userId: string): string =>
+      `${CacheKeys.PREFIX}:*:user:${userId}*`,
+    userTransactions: (userId: string): string =>
+      `${CacheKeys.PREFIX}:transaction*:user:${userId}*`,
     allPackages: (): string => `${CacheKeys.PREFIX}:packages:*`,
     allBitcoinPrices: (): string => `${CacheKeys.PREFIX}:btc:*`,
   };

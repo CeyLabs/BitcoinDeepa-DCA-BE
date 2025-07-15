@@ -42,7 +42,9 @@ export class ConditionalAuthGuard implements CanActivate {
         telegram_id: mockUserId,
         username: 'dev-username',
       };
-      await this.dbLogger.info(`Development mode: Authentication bypassed for mock user ${mockUserId}`);
+      await this.dbLogger.info(
+        `Development mode: Authentication bypassed for mock user ${mockUserId}`,
+      );
       return true;
     }
 
@@ -53,15 +55,21 @@ export class ConditionalAuthGuard implements CanActivate {
   private async validateRequest(request: RequestWithUser): Promise<void> {
     const token = this.extractTokenFromHeader(request);
     if (!token) {
-      await this.dbLogger.warn('Unauthorized access attempt: No Bearer token provided');
+      await this.dbLogger.warn(
+        'Unauthorized access attempt: No Bearer token provided',
+      );
       throw new UnauthorizedException();
     }
     try {
       const payload = this.jwtService.verify<JwtPayload>(token);
       request.user = payload;
-      await this.dbLogger.info(`Successful JWT validation for user: ${payload.telegram_id}`);
+      await this.dbLogger.info(
+        `Successful JWT validation for user: ${payload.telegram_id}`,
+      );
     } catch (error) {
-      await this.dbLogger.warn(`JWT verification failed in guard: ${error.message}`);
+      await this.dbLogger.warn(
+        `JWT verification failed in guard: ${error.message}`,
+      );
       throw new UnauthorizedException();
     }
   }

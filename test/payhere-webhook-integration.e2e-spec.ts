@@ -170,7 +170,9 @@ describe('PayHere Webhook Integration (e2e)', () => {
       console.log(`Integration test results:`);
       console.log(`BTC Price in LKR: ${btcPrice}`);
       console.log(`Satoshis purchased for 2500 LKR: ${satoshis}`);
-      console.log(`Timestamp: ${transaction.coingecko_timestamp?.toString() || 'null'}`);
+      console.log(
+        `Timestamp: ${transaction.coingecko_timestamp?.toString() || 'null'}`,
+      );
 
       // Test cache status
       const cacheStatus = bitcoinPriceService.getCacheStatus();

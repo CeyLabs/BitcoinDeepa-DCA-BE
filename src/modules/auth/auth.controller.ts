@@ -29,20 +29,29 @@ export class AuthController {
   ) {}
 
   @Post('telegram')
-  async validateTelegramAuth(@Body() body: TelegramAuthDto): Promise<AuthResponse> {
+  async validateTelegramAuth(
+    @Body() body: TelegramAuthDto,
+  ): Promise<AuthResponse> {
     const { initData } = body;
 
     // Get bot token from environment variable
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     if (!botToken) {
-      await this.dbLogger.error('Bot token not configured - authentication failed');
+      await this.dbLogger.error(
+        'Bot token not configured - authentication failed',
+      );
       throw new UnauthorizedException('Bot token not configured');
     }
 
     // Verify the init data
-    const isValid = await this.authService.verifyTelegramInitData(initData, botToken);
+    const isValid = await this.authService.verifyTelegramInitData(
+      initData,
+      botToken,
+    );
     if (!isValid) {
-      await this.dbLogger.warn('Invalid Telegram init data provided during authentication');
+      await this.dbLogger.warn(
+        'Invalid Telegram init data provided during authentication',
+      );
       throw new UnauthorizedException('Invalid Telegram init data');
     }
 
@@ -58,7 +67,9 @@ export class AuthController {
     try {
       userData = JSON.parse(parsedData.user) as TelegramUser;
     } catch {
-      await this.dbLogger.warn('Invalid user data format in Telegram authentication');
+      await this.dbLogger.warn(
+        'Invalid user data format in Telegram authentication',
+      );
       throw new UnauthorizedException('Invalid user data format');
     }
 
@@ -72,7 +83,9 @@ export class AuthController {
     // Generate JWT token
     const token = await this.authService.generateJwt(payload);
 
-    await this.dbLogger.info(`Successful Telegram authentication for user: ${userData.id} (${userData.username || 'no username'})`);
+    await this.dbLogger.info(
+      `Successful Telegram authentication for user: ${userData.id} (${userData.username || 'no username'})`,
+    );
 
     return {
       token,

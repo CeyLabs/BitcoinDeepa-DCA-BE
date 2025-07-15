@@ -15,7 +15,7 @@ export class RedisService {
 
   constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {
     this.logger.log('Redis service initialized with cache manager');
-    
+
     // Try to get Redis client for advanced operations (optional)
     setTimeout(() => {
       try {
@@ -79,7 +79,7 @@ export class RedisService {
       this.logger.debug(`Cache not available for key: ${key}`);
       return null;
     }
-    
+
     try {
       const value = await this.cacheManager.get<T>(key);
       if (value) {
@@ -102,11 +102,13 @@ export class RedisService {
       this.logger.debug(`Cache not available for key: ${key}`);
       return;
     }
-    
+
     try {
       const ttl = options?.ttl ? options.ttl * 1000 : undefined; // Convert to milliseconds
       await this.cacheManager.set(key, value, ttl);
-      this.logger.debug(`Cache SET for key: ${key}, TTL: ${options?.ttl || 'default'}`);
+      this.logger.debug(
+        `Cache SET for key: ${key}, TTL: ${options?.ttl || 'default'}`,
+      );
     } catch (error) {
       this.logger.error(`Error setting cache key ${key}:`, error);
     }
@@ -120,7 +122,7 @@ export class RedisService {
       this.logger.debug(`Cache not available for key: ${key}`);
       return;
     }
-    
+
     try {
       await this.cacheManager.del(key);
       this.logger.debug(`Cache DEL for key: ${key}`);
@@ -134,7 +136,7 @@ export class RedisService {
    */
   async mget<T>(keys: string[]): Promise<(T | null)[]> {
     try {
-      const values = await Promise.all(keys.map(key => this.get<T>(key)));
+      const values = await Promise.all(keys.map((key) => this.get<T>(key)));
       this.logger.debug(`Cache MGET for keys: ${keys.join(', ')}`);
       return values;
     } catch (error) {
@@ -146,12 +148,16 @@ export class RedisService {
   /**
    * Set multiple key-value pairs
    */
-  async mset<T>(pairs: Array<{ key: string; value: T; ttl?: number }>): Promise<void> {
+  async mset<T>(
+    pairs: Array<{ key: string; value: T; ttl?: number }>,
+  ): Promise<void> {
     try {
       await Promise.all(
-        pairs.map(pair => this.set(pair.key, pair.value, { ttl: pair.ttl }))
+        pairs.map((pair) => this.set(pair.key, pair.value, { ttl: pair.ttl })),
       );
-      this.logger.debug(`Cache MSET for keys: ${pairs.map(p => p.key).join(', ')}`);
+      this.logger.debug(
+        `Cache MSET for keys: ${pairs.map((p) => p.key).join(', ')}`,
+      );
     } catch (error) {
       this.logger.error(`Error setting multiple cache keys:`, error);
     }
@@ -162,7 +168,7 @@ export class RedisService {
    */
   async exists(key: string): Promise<boolean> {
     if (!this.isRedisAvailable()) return false;
-    
+
     try {
       const result = await this.redis.exists(key);
       return result === 1;
@@ -177,12 +183,15 @@ export class RedisService {
    */
   async expire(key: string, seconds: number): Promise<void> {
     if (!this.isRedisAvailable()) return;
-    
+
     try {
       await this.redis.expire(key, seconds);
       this.logger.debug(`Cache EXPIRE for key: ${key}, seconds: ${seconds}`);
     } catch (error) {
-      this.logger.error(`Error setting expiration for cache key ${key}:`, error);
+      this.logger.error(
+        `Error setting expiration for cache key ${key}:`,
+        error,
+      );
     }
   }
 
@@ -191,17 +200,22 @@ export class RedisService {
    */
   async delByPattern(pattern: string): Promise<number> {
     if (!this.isRedisAvailable()) return 0;
-    
+
     try {
       const keys = await this.redis.keys(pattern);
       if (keys.length > 0) {
         const deleted = await this.redis.del(...keys);
-        this.logger.debug(`Cache DEL by pattern: ${pattern}, deleted ${deleted} keys`);
+        this.logger.debug(
+          `Cache DEL by pattern: ${pattern}, deleted ${deleted} keys`,
+        );
         return deleted;
       }
       return 0;
     } catch (error) {
-      this.logger.error(`Error deleting cache keys by pattern ${pattern}:`, error);
+      this.logger.error(
+        `Error deleting cache keys by pattern ${pattern}:`,
+        error,
+      );
       return 0;
     }
   }
@@ -211,7 +225,7 @@ export class RedisService {
    */
   async clear(): Promise<void> {
     if (!this.isRedisAvailable()) return;
-    
+
     try {
       await this.redis.flushdb();
       this.logger.warn('Cache cleared (FLUSHDB)');
@@ -232,7 +246,7 @@ export class RedisService {
     if (!this.isRedisAvailable()) {
       return { keys: 0, memoryUsage: '0B', hits: 0, misses: 0 };
     }
-    
+
     try {
       const info = await this.redis.info('stats');
       const keyspace = await this.redis.info('keyspace'); // cspell:disable-line
@@ -282,7 +296,9 @@ export class RedisService {
         totalDeleted += deleted;
       }
 
-      this.logger.log(`Invalidated ${totalDeleted} cache entries for user ${userId}`);
+      this.logger.log(
+        `Invalidated ${totalDeleted} cache entries for user ${userId}`,
+      );
     } catch (error) {
       this.logger.error(`Error invalidating user cache for ${userId}:`, error);
     }

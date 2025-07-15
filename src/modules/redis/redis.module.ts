@@ -23,9 +23,12 @@ import { RedisService } from './redis.service';
             // For Railway Redis, use the external hostname for local development
             let redisUrl = process.env.REDIS_URL;
             if (redisUrl.includes('redis.railway.internal')) {
-              redisUrl = redisUrl.replace('redis.railway.internal', 'centerbeam.proxy.rlwy.net'); // cspell:disable-line
+              redisUrl = redisUrl.replace(
+                'redis.railway.internal',
+                'centerbeam.proxy.rlwy.net',
+              ); // cspell:disable-line
             }
-            
+
             const url = new URL(redisUrl);
             redisConfig = {
               ...redisConfig,
@@ -54,14 +57,14 @@ import { RedisService } from './redis.service';
             if (process.env.REDIS_PASSWORD) {
               redisConfig.password = process.env.REDIS_PASSWORD;
             }
-            
+
             if (process.env.REDIS_USERNAME) {
               redisConfig.username = process.env.REDIS_USERNAME;
             }
           }
 
           const store = await redisStore(redisConfig);
-          
+
           return {
             store,
             ttl: parseInt(process.env.REDIS_TTL_DEFAULT || '300') * 1000,

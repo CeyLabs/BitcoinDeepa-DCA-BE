@@ -27,7 +27,7 @@ export async function up(knex: Knex): Promise<void> {
     table.bigint('satoshis_purchased').nullable();
     table.string('price_currency', 3).nullable();
     table.timestamp('coingecko_timestamp').nullable();
-
+    table.boolean('settled').defaultTo(false).notNullable();
     table.timestamps(true, true);
   });
 }

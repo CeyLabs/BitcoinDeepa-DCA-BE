@@ -83,7 +83,9 @@ export class KnexService implements OnModuleInit, OnModuleDestroy {
     });
 
     // Log database setup completion
-    this.logger.log(`Database connection pool configured (min: ${poolConfig.min}, max: ${poolConfig.max})`);
+    this.logger.log(
+      `Database connection pool configured (min: ${poolConfig.min}, max: ${poolConfig.max})`,
+    );
   }
 
   async onModuleDestroy(): Promise<void> {
