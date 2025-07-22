@@ -44,7 +44,7 @@ export class PackageService implements OnModuleDestroy {
 
   async getAllPackages(): Promise<Package[]> {
     const cacheKey = CacheKeys.packages.all();
-    
+
     try {
       // Try to get from Redis cache first
       const cached = await this.redis.get(cacheKey);
@@ -56,21 +56,23 @@ export class PackageService implements OnModuleDestroy {
     }
 
     // If not in cache, fetch from database
-    const packages = await this.knexService.knex<Package>('package').select('*');
-    
+    const packages = await this.knexService
+      .knex<Package>('package')
+      .select('*');
+
     try {
       // Cache the result for 1 hour (3600 seconds) in Redis
       await this.redis.setex(cacheKey, 3600, JSON.stringify(packages));
     } catch (error) {
       // Silently ignore cache write failures
     }
-    
+
     return packages;
   }
 
   async getPackageById(id: string): Promise<Package | undefined> {
     const cacheKey = CacheKeys.packages.byId(id);
-    
+
     try {
       // Try to get from Redis cache first
       const cached = await this.redis.get(cacheKey);
@@ -82,8 +84,11 @@ export class PackageService implements OnModuleDestroy {
     }
 
     // If not in cache, fetch from database
-    const package_ = await this.knexService.knex<Package>('package').where('id', id).first();
-    
+    const package_ = await this.knexService
+      .knex<Package>('package')
+      .where('id', id)
+      .first();
+
     if (package_) {
       try {
         // Cache the result for 1 hour (3600 seconds) in Redis
@@ -92,7 +97,7 @@ export class PackageService implements OnModuleDestroy {
         // Silently ignore cache write failures
       }
     }
-    
+
     return package_;
   }
 

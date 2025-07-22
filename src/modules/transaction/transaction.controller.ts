@@ -31,14 +31,20 @@ export class TransactionController {
     @Body() body: PayHereNotificationParams,
     @Res() res: Response,
   ) {
-    await this.dbLogger.info(`PayHere webhook received: order_id=${body.order_id}, status=${body.status_code}, amount=${body.payhere_amount} ${body.payhere_currency}`);
-    
+    await this.dbLogger.info(
+      `PayHere webhook received: order_id=${body.order_id}, status=${body.status_code}, amount=${body.payhere_amount} ${body.payhere_currency}`,
+    );
+
     try {
       await this.transactionService.handlePayHereNotification(body);
-      await this.dbLogger.info(`PayHere webhook processed successfully for order_id: ${body.order_id}`);
+      await this.dbLogger.info(
+        `PayHere webhook processed successfully for order_id: ${body.order_id}`,
+      );
       return res.status(HttpStatus.OK).send('OK');
     } catch (error) {
-      await this.dbLogger.error(`PayHere webhook processing failed for order_id ${body.order_id}: ${error.message}`);
+      await this.dbLogger.error(
+        `PayHere webhook processing failed for order_id ${body.order_id}: ${error.message}`,
+      );
       return res.status(HttpStatus.OK).send('OK');
     }
   }
@@ -52,30 +58,42 @@ export class TransactionController {
   ) {
     const pageNum = page ? parseInt(page, 10) : 1;
     const limitNum = limit ? parseInt(limit, 10) : 10;
-    
-    await this.dbLogger.info(`User ${user.telegram_id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`);
-    
-    const result = await this.transactionService.getTransactionsByUserIdPaginated(
-      user.user_id,
-      pageNum,
-      limitNum,
+
+    await this.dbLogger.info(
+      `User ${user.telegram_id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`,
     );
-    
-    await this.dbLogger.info(`Returned ${result.transactions.length} transactions for user ${user.telegram_id} (page ${pageNum}/${result.total_pages})`);
+
+    const result =
+      await this.transactionService.getTransactionsByUserIdPaginated(
+        user.user_id,
+        pageNum,
+        limitNum,
+      );
+
+    await this.dbLogger.info(
+      `Returned ${result.transactions.length} transactions for user ${user.telegram_id} (page ${pageNum}/${result.total_pages})`,
+    );
     return result;
   }
 
   @Get('latest')
   @UseGuards(ConditionalAuthGuard)
   async getLatestTransaction(@CurrentUser() user: JwtPayload) {
-    await this.dbLogger.info(`User ${user.telegram_id} requesting latest transaction`);
-    const transaction = await this.transactionService.getLatestTransactionForUser(user.user_id);
-    
+    await this.dbLogger.info(
+      `User ${user.telegram_id} requesting latest transaction`,
+    );
+    const transaction =
+      await this.transactionService.getLatestTransactionForUser(user.user_id);
+
     if (transaction) {
-      await this.dbLogger.info(`Latest transaction found for user ${user.telegram_id}: ${transaction.payhere_pay_id}, status: ${transaction.status}`);
+      await this.dbLogger.info(
+        `Latest transaction found for user ${user.telegram_id}: ${transaction.payhere_pay_id}, status: ${transaction.status}`,
+      );
       return transaction;
     } else {
-      await this.dbLogger.warn(`No transactions found for user ${user.telegram_id} with active subscription`);
+      await this.dbLogger.warn(
+        `No transactions found for user ${user.telegram_id} with active subscription`,
+      );
       throw new NotFoundException('No transactions found');
     }
   }
@@ -84,14 +102,20 @@ export class TransactionController {
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
     await this.dbLogger.info(`User ${user.telegram_id} requesting DCA summary`);
-    const summary = await this.transactionService.getDCASummaryForUser(user.user_id);
-    
+    const summary = await this.transactionService.getDCASummaryForUser(
+      user.user_id,
+    );
+
     if (summary) {
-      await this.dbLogger.info(`DCA summary calculated for user ${user.telegram_id}: ${summary.total_satoshis_purchased} sats, ${summary.successful_transactions} transactions`);
+      await this.dbLogger.info(
+        `DCA summary calculated for user ${user.telegram_id}: ${summary.total_satoshis_purchased} sats, ${summary.successful_transactions} transactions`,
+      );
     } else {
-      await this.dbLogger.info(`No DCA summary data available for user ${user.telegram_id}`);
+      await this.dbLogger.info(
+        `No DCA summary data available for user ${user.telegram_id}`,
+      );
     }
-    
+
     return summary;
   }
 }

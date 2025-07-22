@@ -30,21 +30,28 @@ export class AuthService {
     private readonly dbLogger: DatabaseLoggerService,
   ) {}
 
-  async verifyTelegramInitData(initData: string, botToken: string): Promise<boolean> {
+  async verifyTelegramInitData(
+    initData: string,
+    botToken: string,
+  ): Promise<boolean> {
     try {
       const parsed = new URLSearchParams(initData);
       const hash = parsed.get('hash');
       const authDate = parsed.get('auth_date');
 
       if (!hash || !authDate) {
-        await this.dbLogger.warn('Missing hash or auth_date in Telegram init data verification');
+        await this.dbLogger.warn(
+          'Missing hash or auth_date in Telegram init data verification',
+        );
         return false;
       }
 
       // Validate timestamp to prevent replay attacks
       const authTimestamp = parseInt(authDate, 10);
       if (isNaN(authTimestamp)) {
-        await this.dbLogger.warn('Invalid timestamp format in Telegram init data');
+        await this.dbLogger.warn(
+          'Invalid timestamp format in Telegram init data',
+        );
         return false;
       }
 
@@ -53,7 +60,9 @@ export class AuthService {
       const maxAge = 24; // 24 hours
 
       if (currentTime.diff(authTime, 'hour') > maxAge) {
-        await this.dbLogger.warn(`Expired Telegram auth data - age: ${currentTime.diff(authTime, 'hour')} hours (max: ${maxAge})`);
+        await this.dbLogger.warn(
+          `Expired Telegram auth data - age: ${currentTime.diff(authTime, 'hour')} hours (max: ${maxAge})`,
+        );
         return false;
       }
 
@@ -77,12 +86,16 @@ export class AuthService {
 
       const isValid = computedHash === hash;
       if (!isValid) {
-        await this.dbLogger.warn('Hash verification failed for Telegram init data');
+        await this.dbLogger.warn(
+          'Hash verification failed for Telegram init data',
+        );
       }
 
       return isValid;
     } catch (error) {
-      await this.dbLogger.error(`Exception during Telegram init data verification: ${error.message}`);
+      await this.dbLogger.error(
+        `Exception during Telegram init data verification: ${error.message}`,
+      );
       return false;
     }
   }
@@ -110,14 +123,18 @@ export class AuthService {
 
   async generateJwt(payload: JwtPayload): Promise<string> {
     const token = this.jwtService.sign(payload);
-    await this.dbLogger.info(`JWT token generated for user: ${payload.telegram_id}`);
+    await this.dbLogger.info(
+      `JWT token generated for user: ${payload.telegram_id}`,
+    );
     return token;
   }
 
   async verifyJwt(token: string): Promise<JwtPayload> {
     try {
       const payload = this.jwtService.verify(token);
-      await this.dbLogger.info(`JWT token verified for user: ${payload.telegram_id}`);
+      await this.dbLogger.info(
+        `JWT token verified for user: ${payload.telegram_id}`,
+      );
       return payload;
     } catch (error) {
       await this.dbLogger.warn(`JWT verification failed: ${error.message}`);

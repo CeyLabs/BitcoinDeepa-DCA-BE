@@ -1,7 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
-import { 
-  HealthCheck, 
-  HealthCheckService, 
+import {
+  HealthCheck,
+  HealthCheckService,
   MemoryHealthIndicator,
   DiskHealthIndicator,
 } from '@nestjs/terminus';
@@ -25,7 +25,8 @@ export class HealthController {
     return this.health.check([
       () => this.memory.checkHeap('memory_heap', 150 * 1024 * 1024),
       () => this.memory.checkRSS('memory_rss', 150 * 1024 * 1024),
-      () => this.disk.checkStorage('storage', { path: '/', thresholdPercent: 0.9 }),
+      () =>
+        this.disk.checkStorage('storage', { path: '/', thresholdPercent: 0.9 }),
       async () => {
         try {
           await this.knexService.knex.raw('SELECT 1');
@@ -40,7 +41,7 @@ export class HealthController {
           await this.redisService.set(testKey, 'ok', { ttl: 10 });
           const value = await this.redisService.get(testKey);
           await this.redisService.del(testKey);
-          
+
           if (value === 'ok') {
             return { redis: { status: 'up' } };
           } else {
@@ -62,5 +63,4 @@ export class HealthController {
       environment: process.env.NODE_ENV || 'development',
     };
   }
-
 }

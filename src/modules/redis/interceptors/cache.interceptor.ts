@@ -8,7 +8,10 @@ import { Reflector } from '@nestjs/core';
 import { Observable, of } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import { RedisService } from '../redis.service';
-import { CACHE_KEY_METADATA, CACHE_TTL_METADATA } from '../decorators/cache.decorator';
+import {
+  CACHE_KEY_METADATA,
+  CACHE_TTL_METADATA,
+} from '../decorators/cache.decorator';
 
 @Injectable()
 export class CacheInterceptor implements NestInterceptor {
@@ -40,7 +43,7 @@ export class CacheInterceptor implements NestInterceptor {
 
     const request = context.switchToHttp().getRequest();
     const args = [request.params, request.query, request.body].filter(Boolean);
-    
+
     let finalKey: string;
     if (keyGenerator) {
       finalKey = keyGenerator(...args);

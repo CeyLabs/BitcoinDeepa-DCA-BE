@@ -7,7 +7,12 @@ import { KnexModule } from '../knex/knex.module';
 import { RedisModule } from '../redis/redis.module';
 
 @Module({
-  imports: [BitcoinPriceModule, AuthModule, KnexModule, RedisModule],
+  imports: [
+    BitcoinPriceModule,
+    AuthModule,
+    KnexModule,
+    RedisModule,
+  ],
   controllers: [TransactionController],
   providers: [TransactionService],
 })

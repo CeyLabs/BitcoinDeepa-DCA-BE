@@ -30,15 +30,17 @@ export class SubscriptionService {
     user_id: string,
   ): Promise<SubscriptionDetails | undefined> {
     const cacheKey = CacheKeys.user.subscription(user_id);
-    
+
     // Try to get from cache first
     const cached = await this.redisService.get<SubscriptionDetails>(cacheKey);
     if (cached) {
       return cached;
     }
 
-    await this.dbLogger.info(`Cache MISS for user subscription: ${user_id}, fetching from database`);
-    
+    await this.dbLogger.info(
+      `Cache MISS for user subscription: ${user_id}, fetching from database`,
+    );
+
     const result = await this.knexService
       .knex('subscription as s')
       .select(
@@ -50,7 +52,7 @@ export class SubscriptionService {
         's.updated_at',
         'p.name as package_name',
         'p.frequency',
-        'p.amount as dca_price'
+        'p.amount as dca_price',
       )
       .join('package as p', 's.package_id', 'p.id')
       .where('s.user_id', user_id)
@@ -64,17 +66,19 @@ export class SubscriptionService {
 
     // Calculate subscription start date (use created_at of subscription)
     const subscriptionStartDate = new Date(result.created_at);
-    
+
     // Calculate next billing date based on frequency and start date
     let nextBillingDate: Date;
     const now = dayjs();
     const startDate = dayjs(subscriptionStartDate);
-    
+
     if (result.frequency === 'weekly') {
       // Find the next weekly billing date
       const daysSinceStart = now.diff(startDate, 'day');
       const weeksSinceStart = Math.floor(daysSinceStart / 7);
-      nextBillingDate = startDate.add((weeksSinceStart + 1) * 7, 'day').toDate();
+      nextBillingDate = startDate
+        .add((weeksSinceStart + 1) * 7, 'day')
+        .toDate();
     } else {
       // Monthly frequency
       const monthsSinceStart = now.diff(startDate, 'month');
@@ -97,64 +101,76 @@ export class SubscriptionService {
 
     // Cache the result for 5 minutes (300 seconds)
     await this.redisService.set(cacheKey, subscriptionDetails, { ttl: 300 });
-    
+
     return subscriptionDetails;
   }
 
   async cancelPayHereSubscription(payhere_sub_id: string): Promise<void> {
     const trx = await this.knexService.knex.transaction();
-    
+
     try {
-      await this.dbLogger.info(`Starting atomic cancellation for subscription: ${payhere_sub_id}`);
-      
+      await this.dbLogger.info(
+        `Starting atomic cancellation for subscription: ${payhere_sub_id}`,
+      );
+
       // First, get the subscription to verify it exists and get user_id
       const subscription = await trx('subscription')
         .where('payhere_sub_id', payhere_sub_id)
         .first();
-      
+
       if (!subscription) {
         throw new BadRequestException('Subscription not found');
       }
-      
+
       // Call PayHere API to cancel subscription
-      await this.dbLogger.info(`Attempting PayHere API cancellation for subscription: ${payhere_sub_id}`);
-      const result = await this.payHereService.cancelSubscription(payhere_sub_id);
-      
+      await this.dbLogger.info(
+        `Attempting PayHere API cancellation for subscription: ${payhere_sub_id}`,
+      );
+      const result =
+        await this.payHereService.cancelSubscription(payhere_sub_id);
+
       // Check if PayHere cancellation was successful
       if (!result || result.status !== 1) {
-        throw new BadRequestException(`PayHere cancellation failed, status: ${result?.status || 'unknown'}`);
+        throw new BadRequestException(
+          `PayHere cancellation failed, status: ${result?.status || 'unknown'}`,
+        );
       }
-      
+
       // If PayHere API call succeeded, update database
       await trx('subscription')
-        .update({ 
+        .update({
           is_active: false,
-          updated_at: this.knexService.knex.fn.now()
+          updated_at: this.knexService.knex.fn.now(),
         })
         .where('payhere_sub_id', payhere_sub_id);
-      
+
       // Commit transaction
       await trx.commit();
-      
+
       // Invalidate cache after successful commit (non-critical operation)
       try {
         await this.invalidateUserSubscriptionCache(subscription.user_id);
       } catch (cacheError) {
         // Log cache error but don't fail the operation since DB operation succeeded
-        await this.dbLogger.warn(`Failed to invalidate cache after successful cancellation of ${payhere_sub_id}: ${cacheError.message}`);
+        await this.dbLogger.warn(
+          `Failed to invalidate cache after successful cancellation of ${payhere_sub_id}: ${cacheError.message}`,
+        );
       }
-      
-      await this.dbLogger.info(`Subscription ${payhere_sub_id} successfully cancelled atomically`);
-      
+
+      await this.dbLogger.info(
+        `Subscription ${payhere_sub_id} successfully cancelled atomically`,
+      );
     } catch (error) {
       // Rollback transaction on any error
       await trx.rollback();
-      await this.dbLogger.error(`Atomic cancellation failed for subscription ${payhere_sub_id}: ${error.message}`);
-      
+      await this.dbLogger.error(
+        `Atomic cancellation failed for subscription ${payhere_sub_id}: ${error.message}`,
+      );
+
       if (error instanceof BadRequestException) {
         throw error;
       }
-      
+
       throw new BadRequestException('Subscription cancellation failed');
     }
   }
@@ -165,6 +181,8 @@ export class SubscriptionService {
   async invalidateUserSubscriptionCache(user_id: string): Promise<void> {
     const cacheKey = CacheKeys.user.subscription(user_id);
     await this.redisService.del(cacheKey);
-    await this.dbLogger.info(`Invalidated subscription cache for user: ${user_id}`);
+    await this.dbLogger.info(
+      `Invalidated subscription cache for user: ${user_id}`,
+    );
   }
 }

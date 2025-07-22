@@ -7,7 +7,13 @@ import { DatabaseLoggerInitializer } from './database-logger-initializer.service
 
 @Global()
 @Module({
-  providers: [KnexService, KnexConnectionManager, DatabaseLoggerService, DatabaseSystemLogger, DatabaseLoggerInitializer],
+  providers: [
+    KnexService,
+    KnexConnectionManager,
+    DatabaseLoggerService,
+    DatabaseSystemLogger,
+    DatabaseLoggerInitializer,
+  ],
   exports: [KnexService, DatabaseLoggerService, DatabaseSystemLogger],
 })
 export class KnexModule {}

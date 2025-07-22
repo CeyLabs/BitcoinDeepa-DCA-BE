@@ -63,7 +63,9 @@ export class PayHereService {
     duration,
     type = 'checkout',
   }: IGetLinkParams): Promise<string> {
-    await this.dbLogger.info(`Generating PayHere payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}, package: ${package_id}`);
+    await this.dbLogger.info(
+      `Generating PayHere payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}, package: ${package_id}`,
+    );
     const hashedSecret = md5String(
       String(process.env.PAYHERE_MERCHANT_SECRET),
     ).toUpperCase();
@@ -104,20 +106,24 @@ export class PayHereService {
     };
 
     const link = `${this.getBaseUrl()}/pay/${type}?${new URLSearchParams(params).toString()}`;
-    await this.dbLogger.info(`PayHere payment link generated successfully for order: ${order_id}`);
+    await this.dbLogger.info(
+      `PayHere payment link generated successfully for order: ${order_id}`,
+    );
     return link;
   }
 
   async getAccessToken(): Promise<string> {
     await this.dbLogger.info('Requesting PayHere OAuth token');
-    
+
     const appId = process.env.PAYHERE_APP_ID;
     const appSecret = process.env.PAYHERE_APP_SECRET;
     if (!appId || !appSecret) {
-      await this.dbLogger.error('PayHere App ID/Secret not configured - OAuth token generation failed');
+      await this.dbLogger.error(
+        'PayHere App ID/Secret not configured - OAuth token generation failed',
+      );
       throw new Error('PayHere App ID/Secret not set');
     }
-    
+
     try {
       const authCode = Buffer.from(`${appId}:${appSecret}`).toString('base64');
       const url = `${this.getBaseUrl()}/merchant/v1/oauth/token`;
@@ -137,11 +143,15 @@ export class PayHereService {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
       });
-      
-      await this.dbLogger.info(`PayHere OAuth token generated successfully (expires in ${response.data.expires_in}s)`);
+
+      await this.dbLogger.info(
+        `PayHere OAuth token generated successfully (expires in ${response.data.expires_in}s)`,
+      );
       return response.data.access_token;
     } catch (error) {
-      await this.dbLogger.error(`PayHere OAuth token generation failed: ${error.message}`);
+      await this.dbLogger.error(
+        `PayHere OAuth token generation failed: ${error.message}`,
+      );
       throw error;
     }
   }
@@ -149,12 +159,14 @@ export class PayHereService {
   async cancelSubscription(
     payhere_sub_id: string,
   ): Promise<CancelSubscriptionResponse> {
-    await this.dbLogger.info(`Requesting PayHere subscription cancellation for: ${payhere_sub_id}`);
-    
+    await this.dbLogger.info(
+      `Requesting PayHere subscription cancellation for: ${payhere_sub_id}`,
+    );
+
     try {
       const accessToken = await this.getAccessToken();
       const url = `${this.getBaseUrl()}/merchant/v1/subscription/cancel`;
-      
+
       const response: { data: CancelSubscriptionResponse } = await axios.post(
         url,
         { subscription_id: payhere_sub_id },
@@ -165,11 +177,15 @@ export class PayHereService {
           },
         },
       );
-      
-      await this.dbLogger.info(`PayHere subscription cancellation response for ${payhere_sub_id}: status=${response.data.status}, message=${response.data.msg}`);
+
+      await this.dbLogger.info(
+        `PayHere subscription cancellation response for ${payhere_sub_id}: status=${response.data.status}, message=${response.data.msg}`,
+      );
       return response.data;
     } catch (error) {
-      await this.dbLogger.error(`PayHere subscription cancellation failed for ${payhere_sub_id}: ${error.message}`);
+      await this.dbLogger.error(
+        `PayHere subscription cancellation failed for ${payhere_sub_id}: ${error.message}`,
+      );
       throw error;
     }
   }

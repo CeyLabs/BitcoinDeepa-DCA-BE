@@ -9,7 +9,14 @@ import { PayHereModule } from '../payhere/payhere.module';
 import { RedisModule } from '../redis/redis.module';
 
 @Module({
-  imports: [KnexModule, AuthModule, UserModule, PackageModule, PayHereModule, RedisModule],
+  imports: [
+    KnexModule,
+    AuthModule,
+    UserModule,
+    PackageModule,
+    PayHereModule,
+    RedisModule,
+  ],
   providers: [SubscriptionService],
   exports: [SubscriptionService],
   controllers: [SubscriptionController],
