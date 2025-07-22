@@ -1,5 +1,8 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
+  "variables": {
+    "NODE_VERSION": "22.12.0"
+  },
   "build": {
     "builder": "NIXPACKS",
     "buildCommand": "npm run build",
@@ -23,7 +26,8 @@
     "production": {
       "variables": {
         "NODE_ENV": "production",
-        "ENABLE_AUTH": "true"
+        "ENABLE_AUTH": "true",
+        "NODE_VERSION": "22.12.0"
       }
     }
   }
