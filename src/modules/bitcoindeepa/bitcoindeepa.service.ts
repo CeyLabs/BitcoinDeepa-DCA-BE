@@ -52,11 +52,11 @@ export class BitcoinDeepaService {
   ): Promise<FundTransferResponse> {
     try {
       const url = `${this.apiUrl}${this.endpoint}`;
-      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const timestamp = Math.floor(Date.now() / 1000);
       const httpMethod = 'POST';
 
       const requestBody: FundTransferRequest = {
-        amount,
+        amount: Number(amount),
         to: toTelegramId,
         memo,
       };
@@ -65,19 +65,20 @@ export class BitcoinDeepaService {
       const signature = this.generateHmacSignature(
         httpMethod,
         this.endpoint,
-        timestamp,
+        timestamp.toString(),
         bodyString,
       );
 
       const headers = {
         'Content-Type': 'application/json',
         'X-HMAC-Signature': signature,
-        'X-Timestamp': timestamp,
+        'X-Timestamp': timestamp.toString(),
       };
 
       await this.dbLogger.info(
         `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.endpoint}`,
       );
+
 
       const response = await axios.post<FundTransferResponse>(
         url,

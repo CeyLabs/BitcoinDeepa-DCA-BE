@@ -229,7 +229,7 @@ export class TransactionService {
 
         try {
           if (this.bitcoinDeepaService.isConfigured()) {
-            const memo = `DCA Purchase - PayHere Payment ${payment_id}: ${satoshis} sats`;
+            const memo = await this.generateTransferMemo(payment_id, subscription_id, trx);
             const transferResult = await this.bitcoinDeepaService.transferFunds(
               satoshis,
               user_id,
@@ -823,6 +823,36 @@ export class TransactionService {
       `Transaction inserted atomically: ${transaction.payhere_pay_id}`,
     );
     return result[0] as Transaction;
+  }
+
+  /**
+   * Generate memo for fund transfer with package name
+   */
+  private async generateTransferMemo(
+    payhere_pay_id: string,
+    subscription_id: string,
+    trx?: any,
+  ): Promise<string> {
+    let memo = `DCA Purchase (Ref: ${payhere_pay_id})`;
+    
+    try {
+      const knexInstance = trx || this.knexService.knex;
+      const subscriptionWithPackage = await knexInstance('subscription as s')
+        .select('p.name as package_name')
+        .join('package as p', 's.package_id', 'p.id')
+        .where('s.payhere_sub_id', subscription_id)
+        .first();
+      
+      if (subscriptionWithPackage?.package_name) {
+        memo = `${subscriptionWithPackage.package_name} DCA plan (Ref: ${payhere_pay_id})`;
+      }
+    } catch (packageError) {
+      await this.dbLogger.warn(
+        `Could not fetch package name for subscription ${subscription_id}: ${packageError.message}`
+      );
+    }
+    
+    return memo;
   }
 
   /**

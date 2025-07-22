@@ -12,7 +12,7 @@ export class SettlementService {
     private readonly dbLogger: DatabaseLoggerService,
   ) {}
 
-  @Cron(CronExpression.EVERY_SECOND)
+  @Cron(CronExpression.EVERY_10_SECONDS)
   async retryUnsettledTransactions() {
     if (!this.bitcoinDeepaService.isConfigured()) {
       await this.dbLogger.warn(
@@ -64,6 +64,7 @@ export class SettlementService {
   private async retryTransactionSettlement(transaction: any) {
     const {
       payhere_pay_id,
+      payhere_sub_id,
       telegram_id,
       satoshis_purchased,
       retry_count = 0,
@@ -106,7 +107,7 @@ export class SettlementService {
       );
 
       // Perform the external fund transfer
-      const memo = `DCA Purchase of ${satoshis_purchased} sats. (Ref: ${payhere_pay_id})`;
+      const memo = await this.generateTransferMemo(payhere_pay_id, payhere_sub_id);
       const transferResult = await this.bitcoinDeepaService.transferFunds(
         satoshis_purchased,
         telegram_id,
@@ -172,5 +173,34 @@ export class SettlementService {
         );
       }
     }
+  }
+
+  /**
+   * Generate memo for fund transfer with package name
+   */
+  private async generateTransferMemo(
+    payhere_pay_id: string,
+    subscription_id: string,
+  ): Promise<string> {
+    let memo = `DCA Purchase (Ref: ${payhere_pay_id})`;
+    
+    try {
+      const subscriptionWithPackage = await this.knexService
+        .knex('subscription as s')
+        .select('p.name as package_name')
+        .join('package as p', 's.package_id', 'p.id')
+        .where('s.payhere_sub_id', subscription_id)
+        .first();
+      
+      if (subscriptionWithPackage?.package_name) {
+        memo = `${subscriptionWithPackage.package_name} DCA plan (Ref: ${payhere_pay_id})`;
+      }
+    } catch (packageError) {
+      await this.dbLogger.warn(
+        `Could not fetch package name for subscription ${subscription_id}: ${packageError.message}`
+      );
+    }
+    
+    return memo;
   }
 }
