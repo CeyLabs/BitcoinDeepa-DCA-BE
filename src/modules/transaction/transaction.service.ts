@@ -11,7 +11,6 @@ import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
-import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 import Big from 'big.js';
 
 export interface PayHereNotificationParams {
@@ -55,7 +54,6 @@ export class TransactionService {
     private readonly bitcoinPriceService: BitcoinPriceService,
     private readonly dbLogger: DatabaseLoggerService,
     private readonly redisService: RedisService,
-    private readonly bitcoinDeepaService: BitcoinDeepaService,
   ) {}
 
   private readonly logger = new Logger(TransactionService.name);
@@ -216,58 +214,8 @@ export class TransactionService {
         );
       }
 
-      const satoshis =
-        bitcoinDataForUpdate?.satoshis_purchased ||
-        bitcoinDataForNew?.satoshis_purchased;
-
-      // Call external fund transfer API for successful transactions with satoshis
-      let fundTransferSuccess = false;
-      if (status === 'SUCCESS' && user_id && satoshis) {
-        await this.dbLogger.info(
-          `Attempting fund transfer for payment_id ${payment_id}: ${satoshis} satoshis to user ${user_id}`,
-        );
-
-        try {
-          if (this.bitcoinDeepaService.isConfigured()) {
-            const memo = await this.generateTransferMemo(payment_id, subscription_id, trx);
-            const transferResult = await this.bitcoinDeepaService.transferFunds(
-              satoshis,
-              user_id,
-              memo,
-            );
-
-            if (transferResult.success) {
-              fundTransferSuccess = true;
-              await this.dbLogger.info(
-                `Fund transfer successful for payment_id ${payment_id}: ${satoshis} satoshis transferred to user ${user_id}`,
-              );
-            } else {
-              await this.dbLogger.warn(
-                `Fund transfer failed for payment_id ${payment_id}: ${transferResult.message}`,
-              );
-            }
-          } else {
-            await this.dbLogger.warn(
-              `BitcoinDeepa service not configured - skipping fund transfer for payment_id ${payment_id}`,
-            );
-          }
-        } catch (error) {
-          await this.dbLogger.error(
-            `Fund transfer error for payment_id ${payment_id}: ${error.message}`,
-          );
-        }
-      }
-
-      // Update transaction with settled status if fund transfer was successful
-      if (fundTransferSuccess) {
-        await trx('transaction')
-          .update({ settled: true })
-          .where('payhere_pay_id', payment_id);
-
-        await this.dbLogger.info(
-          `Transaction ${payment_id} marked as settled after successful fund transfer`,
-        );
-      }
+      // All successful transactions with Bitcoin data will be picked up by Settlement Service
+      // No fund transfer is attempted here to keep webhook processing fast and reliable
 
       // Commit all database operations
       await trx.commit();
@@ -823,36 +771,6 @@ export class TransactionService {
       `Transaction inserted atomically: ${transaction.payhere_pay_id}`,
     );
     return result[0] as Transaction;
-  }
-
-  /**
-   * Generate memo for fund transfer with package name
-   */
-  private async generateTransferMemo(
-    payhere_pay_id: string,
-    subscription_id: string,
-    trx?: any,
-  ): Promise<string> {
-    let memo = `DCA Purchase (Ref: ${payhere_pay_id})`;
-    
-    try {
-      const knexInstance = trx || this.knexService.knex;
-      const subscriptionWithPackage = await knexInstance('subscription as s')
-        .select('p.name as package_name')
-        .join('package as p', 's.package_id', 'p.id')
-        .where('s.payhere_sub_id', subscription_id)
-        .first();
-      
-      if (subscriptionWithPackage?.package_name) {
-        memo = `${subscriptionWithPackage.package_name} DCA plan (Ref: ${payhere_pay_id})`;
-      }
-    } catch (packageError) {
-      await this.dbLogger.warn(
-        `Could not fetch package name for subscription ${subscription_id}: ${packageError.message}`
-      );
-    }
-    
-    return memo;
   }
 
   /**

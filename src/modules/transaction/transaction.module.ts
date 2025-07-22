@@ -5,7 +5,6 @@ import { BitcoinPriceModule } from '../bitcoin-price/bitcoin-price.module';
 import { AuthModule } from '../auth/auth.module';
 import { KnexModule } from '../knex/knex.module';
 import { RedisModule } from '../redis/redis.module';
-import { BitcoinDeepaModule } from '../bitcoindeepa/bitcoindeepa.module';
 
 @Module({
   imports: [
@@ -13,7 +12,6 @@ import { BitcoinDeepaModule } from '../bitcoindeepa/bitcoindeepa.module';
     AuthModule,
     KnexModule,
     RedisModule,
-    BitcoinDeepaModule,
   ],
   controllers: [TransactionController],
   providers: [TransactionService],
