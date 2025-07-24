@@ -45,7 +45,7 @@ export class TransactionController {
       await this.dbLogger.error(
         `PayHere webhook processing failed for order_id ${body.order_id}: ${error.message}`,
       );
-      return res.status(HttpStatus.OK).send('OK');
+      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send();
     }
   }
 
