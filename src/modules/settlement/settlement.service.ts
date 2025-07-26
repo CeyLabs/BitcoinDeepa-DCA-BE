@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 
 @Injectable()
 export class SettlementService {
@@ -10,6 +11,7 @@ export class SettlementService {
     private readonly knexService: KnexService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
     private readonly dbLogger: DatabaseLoggerService,
+    private readonly telegramLogger: TelegramLoggerService,
   ) {}
 
   @Cron(CronExpression.EVERY_10_SECONDS)
@@ -125,6 +127,14 @@ export class SettlementService {
 
         await this.dbLogger.info(
           `Settlement retry successful for transaction ${payhere_pay_id} on attempt ${currentRetryCount}: ${satoshis_purchased} satoshis transferred to user ${telegram_id}`,
+        );
+
+        // Send Telegram notification for successful settlement
+        await this.telegramLogger.logSettlementSuccess(
+          payhere_pay_id,
+          satoshis_purchased,
+          telegram_id,
+          currentRetryCount,
         );
       } else {
         // Commit the retry count update even on transfer failure

@@ -18,12 +18,14 @@ import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 
 @Controller('transaction')
 export class TransactionController {
   constructor(
     private readonly transactionService: TransactionService,
     private readonly dbLogger: DatabaseLoggerService,
+    private readonly telegramLoggerService: TelegramLoggerService,
   ) {}
 
   @Post('payhere-webhook')
@@ -40,6 +42,15 @@ export class TransactionController {
       await this.dbLogger.info(
         `PayHere webhook processed successfully for order_id: ${body.order_id}`,
       );
+      
+      if (body.status_code === '2') {
+        await this.telegramLoggerService.logNewTransaction(
+          body.order_id,
+          body.payhere_amount,
+          body.custom_1!, // user telegram ID
+        );
+      }
+      
       return res.status(HttpStatus.OK).send('OK');
     } catch (error) {
       await this.dbLogger.error(
