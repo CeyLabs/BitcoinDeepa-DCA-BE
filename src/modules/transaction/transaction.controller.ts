@@ -47,6 +47,7 @@ export class TransactionController {
         await this.telegramLoggerService.logNewTransaction(
           body.order_id,
           body.payhere_amount,
+          body.custom_1!, // user telegram ID
         );
       }
       

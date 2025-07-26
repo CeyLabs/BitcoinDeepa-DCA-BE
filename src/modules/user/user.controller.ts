@@ -29,9 +29,9 @@ export class UserController {
       id: user.user_id,
       ...createUserDto,
     });
-    
-    await this.telegramLoggerService.logUserRegistration(user.username, user.telegram_id || user.user_id);
-    
+
+    await this.telegramLoggerService.logUserRegistration(user.username!, user.telegram_id || user.user_id);
+
     return result;
   }
 

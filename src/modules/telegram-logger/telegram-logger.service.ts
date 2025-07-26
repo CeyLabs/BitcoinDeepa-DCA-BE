@@ -13,12 +13,33 @@ export class TelegramLoggerService {
     this.logTopicId = process.env.LOG_TOPIC_ID;
   }
 
-  async logUserRegistration(tgUsername: string = '--', tgUserId: string): Promise<void> {
-    await this.sendMessage(`New user registered: @${tgUsername} (ID: ${tgUserId})`);
+  async logUserRegistration(tgUsername: string, tgUserId: string): Promise<void> {
+    const usernameDisplay = tgUsername ? `@${tgUsername}` : 'Unknown';
+    const message = `🟢 New user registered!\n` +
+      `Username: <b>${usernameDisplay}</b>\n` +
+      `User ID: <b>${tgUserId}</b>`;
+    await this.sendMessage(message);
   }
 
-  async logNewTransaction(payhereId: string, amount: string): Promise<void> {
-    const message = `New transaction ${payhereId} of ${amount} LKR`;
+  async logNewTransaction(payhereId: string, amount: string, telegramId: string): Promise<void> {
+    const message = `💰 New transaction!\n` +
+      `Transaction: <b>${payhereId}</b>\n` +
+      `Amount: <b>${amount} LKR</b>\n` +
+      `User: <b>${telegramId}</b>`;
+    await this.sendMessage(message);
+  }
+
+  async logSettlementSuccess(
+    payhereId: string,
+    satoshis: number,
+    telegramId: string,
+    attemptNumber: number,
+  ): Promise<void> {
+    const message = `🟢 Settlement successful!\n` +
+      `Transaction: <b>${payhereId}</b>\n` +
+      `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
+      `User: <b>${telegramId}</b>\n` +
+      `Attempt: <b>${attemptNumber}</b>`;
     await this.sendMessage(message);
   }
 
