@@ -45,7 +45,7 @@ export class TransactionController {
       
       if (body.status_code === '2') {
         await this.telegramLoggerService.logNewTransaction(
-          body.order_id,
+          body.payment_id,
           body.payhere_amount,
           body.custom_1!, // user telegram ID
         );

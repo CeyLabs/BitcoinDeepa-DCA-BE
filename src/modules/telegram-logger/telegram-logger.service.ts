@@ -23,7 +23,7 @@ export class TelegramLoggerService {
 
   async logNewTransaction(payhereId: string, amount: string, telegramId: string): Promise<void> {
     const message = `💰 New transaction!\n` +
-      `Transaction: <b>${payhereId}</b>\n` +
+      `Transaction: <b>#PH${payhereId}</b>\n` +
       `Amount: <b>${amount} LKR</b>\n` +
       `User ID: <b>#ID${telegramId}</b>`;
     await this.sendMessage(message);
@@ -36,7 +36,7 @@ export class TelegramLoggerService {
     attemptNumber: number,
   ): Promise<void> {
     const message = `🟢 Settlement successful!\n` +
-      `Transaction: <b>${payhereId}</b>\n` +
+      `Transaction: <b>#PH${payhereId}</b>\n` +
       `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
       `User ID: <b>#ID${telegramId}</b>\n` +
       `Attempt: <b>${attemptNumber}</b>`;
