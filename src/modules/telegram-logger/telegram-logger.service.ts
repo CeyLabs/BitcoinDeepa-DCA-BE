@@ -17,7 +17,7 @@ export class TelegramLoggerService {
     const usernameDisplay = tgUsername ? `@${tgUsername}` : 'Unknown';
     const message = `🟢 New user registered!\n` +
       `Username: <b>${usernameDisplay}</b>\n` +
-      `User ID: <b>${tgUserId}</b>`;
+      `User ID: <b>#ID${tgUserId}</b>`;
     await this.sendMessage(message);
   }
 
@@ -25,7 +25,7 @@ export class TelegramLoggerService {
     const message = `💰 New transaction!\n` +
       `Transaction: <b>${payhereId}</b>\n` +
       `Amount: <b>${amount} LKR</b>\n` +
-      `User: <b>${telegramId}</b>`;
+      `User ID: <b>#ID${telegramId}</b>`;
     await this.sendMessage(message);
   }
 
@@ -38,7 +38,7 @@ export class TelegramLoggerService {
     const message = `🟢 Settlement successful!\n` +
       `Transaction: <b>${payhereId}</b>\n` +
       `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
-      `User: <b>${telegramId}</b>\n` +
+      `User ID: <b>#ID${telegramId}</b>\n` +
       `Attempt: <b>${attemptNumber}</b>`;
     await this.sendMessage(message);
   }
