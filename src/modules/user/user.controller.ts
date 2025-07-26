@@ -4,10 +4,14 @@ import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CreateUserDto } from './dto/create-user.dto';
+import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 
 @Controller('user')
 export class UserController {
-  constructor(private readonly userService: UserService) {}
+  constructor(
+    private readonly userService: UserService,
+    private readonly telegramLoggerService: TelegramLoggerService,
+  ) {}
 
   @Post()
   @UseGuards(ConditionalAuthGuard)
@@ -21,10 +25,14 @@ export class UserController {
     @CurrentUser() user: JwtPayload,
     @Body() createUserDto: CreateUserDto,
   ) {
-    return await this.userService.createUser({
+    const result = await this.userService.createUser({
       id: user.user_id,
       ...createUserDto,
     });
+    
+    await this.telegramLoggerService.logUserRegistration(user.username, user.telegram_id || user.user_id);
+    
+    return result;
   }
 
   @Get('exists/:telegramId')

@@ -5,6 +5,7 @@ import { BitcoinPriceModule } from '../bitcoin-price/bitcoin-price.module';
 import { AuthModule } from '../auth/auth.module';
 import { KnexModule } from '../knex/knex.module';
 import { RedisModule } from '../redis/redis.module';
+import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module';
 
 @Module({
   imports: [
@@ -12,6 +13,7 @@ import { RedisModule } from '../redis/redis.module';
     AuthModule,
     KnexModule,
     RedisModule,
+    TelegramLoggerModule,
   ],
   controllers: [TransactionController],
   providers: [TransactionService],
