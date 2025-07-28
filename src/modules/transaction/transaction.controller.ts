@@ -44,6 +44,7 @@ export class TransactionController {
         body.payhere_amount,
         body.custom_1!, // user telegram ID
         mappedStatus,
+        body.status_message || '--',
       );
 
       await this.transactionService.handlePayHereNotification(body);

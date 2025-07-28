@@ -29,13 +29,15 @@ export class TelegramLoggerService {
     amount: string,
     telegramId: string,
     status: string,
+    statusMessage: string,
   ): Promise<TgMessage | null> {
     const message =
       `Action: <b>New Transaction</b>\n` +
       `User ID: <b>#UID${telegramId}</b>\n` +
       `Transaction ID: <b>#TRX${payhereId}</b>\n` +
       `Amount: <b>${amount} LKR</b>\n` +
-      `Status: <b>${status}</b>`;
+      `Status: <b>${status}</b>\n` +
+      `Status Message: <b>${statusMessage}</b>`;
     return await this.sendMessage(message);
   }
 

@@ -25,6 +25,7 @@ export interface PayHereNotificationParams {
   md5sig: string;
   custom_1?: string; // user_id
   custom_2?: string; // package_id (if we add it)
+  status_message: string;
 }
 
 type Status = 'SUCCESS' | 'PENDING' | 'CANCELLED' | 'FAILED' | 'CHARGEBACK';
@@ -75,6 +76,8 @@ export class TransactionService {
       custom_1: user_id,
       custom_2: package_id,
     } = data;
+
+    console.log(data);
 
     const merchant_secret = String(process.env.PAYHERE_MERCHANT_SECRET);
     const local_md5sig = md5String(
