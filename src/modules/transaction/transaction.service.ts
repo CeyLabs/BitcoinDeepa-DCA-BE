@@ -711,15 +711,9 @@ export class TransactionService {
 
         if (_package) {
           // Create user object for telegram logging
-          const userForLogging = {
-            id: user_id,
-            telegram_id: user_id,
-            username: undefined, // We don't have username in webhook data
-          };
-
           await this.telegramLoggerService.logSubscriptionCreated(
             payhere_sub_id,
-            userForLogging,
+            user_id,
             _package
           );
         } else {

@@ -39,30 +39,29 @@ export class TelegramLoggerService {
     return await this.sendMessage(message);
   }
 
-  async logSettlementSuccess(
+  async logSettlement(
     payhereId: string,
     satoshis: number,
     telegramId: string,
     attemptNumber: number,
-  ): Promise<void> {
+  ): Promise<TgMessage | null> {
     const message =
-      `Action: <b>Settlement</b>\n` +
+      `Action: <b>Settlement Attempt</b>\n` +
       `User ID: <b>#ID${telegramId}</b>\n` +
       `Transaction ID: <b>#PH${payhereId}</b>\n` +
       `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
       `Attempt #: <b>${attemptNumber}</b>`;
-    await this.sendMessage(message, true);
+    return await this.sendMessage(message);
   }
 
   async logSubscriptionCreated(
     subscriptionId: string,
-    user: JwtPayload,
+    userId: string,
     _package: Package,
   ): Promise<void> {
     const message =
       `Action: <b>New Subscription</b>\n` +
-      `Username: <b>${this.formatUsername(user)}</b>\n` +
-      `User ID: <b>#ID${user.id}</b>\n` +
+      `User ID: <b>#ID${userId}</b>\n` +
       `Subscription ID: <b>#SUB${subscriptionId}</b>\n` +
       `Package: <b>${_package.name}</b>\n` +
       `Amount: <b>${_package.amount} LKR</b>`;

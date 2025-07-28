@@ -54,7 +54,7 @@ export class SettlementService {
       );
 
       for (const transaction of unsettledTransactions) {
-        await this.retryTransactionSettlement(transaction);
+        await this.tryTransactionSettlement(transaction);
       }
     } catch (error) {
       await this.dbLogger.error(
@@ -63,7 +63,7 @@ export class SettlementService {
     }
   }
 
-  private async retryTransactionSettlement(transaction: any) {
+  private async tryTransactionSettlement(transaction: any) {
     const {
       payhere_pay_id,
       payhere_sub_id,
@@ -90,6 +90,13 @@ export class SettlementService {
 
     const currentRetryCount = retry_count + 1;
     const trx = await this.knexService.knex.transaction();
+
+    const logMessage = await this.telegramLogger.logSettlement(
+      payhere_pay_id,
+      satoshis_purchased,
+      telegram_id,
+      currentRetryCount,
+    );
 
     try {
       await this.dbLogger.info(
@@ -133,16 +140,11 @@ export class SettlementService {
         );
 
         // Send Telegram notification for successful settlement
-        await this.telegramLogger.logSettlementSuccess(
-          payhere_pay_id,
-          satoshis_purchased,
-          telegram_id,
-          currentRetryCount,
-        );
+        await this.telegramLogger.setMessageReaction(logMessage);
       } else {
         // Commit the retry count update even on transfer failure
         await trx.commit();
-
+        
         if (currentRetryCount >= 5) {
           await this.dbLogger.error(
             `Settlement retry permanently failed for transaction ${payhere_pay_id} after ${currentRetryCount} attempts: ${transferResult.message}`,
