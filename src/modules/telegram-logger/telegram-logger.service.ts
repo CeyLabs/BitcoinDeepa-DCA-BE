@@ -44,9 +44,9 @@ export class TelegramLoggerService {
     await this.sendMessage(message);
   }
 
-  async logUserAction(pageName: string, user: JwtPayload): Promise<void> {
+  async logUserAction(action: string, user: JwtPayload): Promise<void> {
     const usernameDisplay = user.username ? `@${user.username}` : 'Unknown';
-    const message = `📱 Action: <b>${pageName}</b>\n` +
+    const message = `📱 Action: <b>${action}</b>\n` +
       `Username: <b>${usernameDisplay}</b>\n` +
       `User ID: <b>#ID${user.id}</b>`;
     await this.sendMessage(message);
