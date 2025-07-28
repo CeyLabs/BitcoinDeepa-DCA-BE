@@ -18,8 +18,7 @@ export interface TelegramInitData {
 }
 
 export interface JwtPayload {
-  user_id: string;
-  telegram_id?: string;
+  id: string;
   username?: string;
 }
 
@@ -124,7 +123,7 @@ export class AuthService {
   async generateJwt(payload: JwtPayload): Promise<string> {
     const token = this.jwtService.sign(payload);
     await this.dbLogger.info(
-      `JWT token generated for user: ${payload.telegram_id}`,
+      `JWT token generated for user: ${payload.id}`,
     );
     return token;
   }

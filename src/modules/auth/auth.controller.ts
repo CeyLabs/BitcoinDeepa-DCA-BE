@@ -75,8 +75,7 @@ export class AuthController {
 
     // Generate JWT payload
     const payload: JwtPayload = {
-      user_id: userData.id.toString(),
-      telegram_id: userData.id.toString(),
+      id: userData.id.toString(),
       username: userData.username,
     };
 

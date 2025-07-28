@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { JwtPayload } from 'jsonwebtoken';
 
 @Injectable()
 export class TelegramLoggerService {
@@ -13,11 +14,11 @@ export class TelegramLoggerService {
     this.logTopicId = process.env.LOG_TOPIC_ID;
   }
 
-  async logUserRegistration(tgUsername: string, tgUserId: string): Promise<void> {
-    const usernameDisplay = tgUsername ? `@${tgUsername}` : 'Unknown';
+  async logUserRegistration(user: JwtPayload): Promise<void> {
+    const usernameDisplay = user.username ? `@${user.username}` : 'Unknown';
     const message = `🟢 New user registered!\n` +
       `Username: <b>${usernameDisplay}</b>\n` +
-      `User ID: <b>#ID${tgUserId}</b>`;
+      `User ID: <b>#ID${user.id}</b>`;
     await this.sendMessage(message);
   }
 
@@ -40,6 +41,14 @@ export class TelegramLoggerService {
       `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
       `User ID: <b>#ID${telegramId}</b>\n` +
       `Attempt: <b>${attemptNumber}</b>`;
+    await this.sendMessage(message);
+  }
+
+  async logUserAction(action: string, user: JwtPayload): Promise<void> {
+    const usernameDisplay = user.username ? `@${user.username}` : 'Unknown';
+    const message = `📱 Action: <b>${action}</b>\n` +
+      `Username: <b>${usernameDisplay}</b>\n` +
+      `User ID: <b>#ID${user.id}</b>`;
     await this.sendMessage(message);
   }
 

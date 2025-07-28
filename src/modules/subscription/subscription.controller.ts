@@ -17,6 +17,7 @@ import { PackageService } from '../package/package.service';
 import { UserService } from '../user/user.service';
 import { randomUUID } from 'crypto';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 
 @Controller('subscription')
 export class SubscriptionController {
@@ -26,6 +27,7 @@ export class SubscriptionController {
     private readonly userService: UserService,
     private readonly dbLogger: DatabaseLoggerService,
     private readonly payHereService: PayHereService,
+    private readonly telegramLoggerService: TelegramLoggerService,
   ) {}
 
   @Get('current')
@@ -33,24 +35,26 @@ export class SubscriptionController {
   async getCurrentSubscription(
     @CurrentUser() user: JwtPayload,
   ): Promise<SubscriptionDetails> {
+    await this.telegramLoggerService.logUserAction('Current Subscription (/subscription/current)', user);
+
     await this.dbLogger.info(
-      `User ${user.telegram_id} retrieving current subscription`,
+      `User ${user.id} retrieving current subscription`,
     );
 
     const subscription =
       await this.subscriptionService.getCurrentSubscriptionDetailsForUser(
-        user.user_id,
+        user.id,
       );
 
     if (!subscription) {
       await this.dbLogger.warn(
-        `No subscription found for user ${user.telegram_id}`,
+        `No subscription found for user ${user.id}`,
       );
       throw new NotFoundException('Subscription not found');
     }
 
     await this.dbLogger.info(
-      `Subscription retrieved for user ${user.telegram_id}: ${subscription.payhere_sub_id}`,
+      `Subscription retrieved for user ${user.id}: ${subscription.payhere_sub_id}`,
     );
     return subscription;
   }
@@ -61,18 +65,20 @@ export class SubscriptionController {
     @CurrentUser() user: JwtPayload,
     @Body() body: { package_id: string },
   ): Promise<{ link: string }> {
+    await this.telegramLoggerService.logUserAction('Generate PayHere Link (/subscription/payhere-link)', user);
+
     await this.dbLogger.info(
-      `User ${user.telegram_id} requesting payment link for package ${body.package_id}`,
+      `User ${user.id} requesting payment link for package ${body.package_id}`,
     );
 
     // Check if user already has an active subscription
     const existingSubscription =
       await this.subscriptionService.getCurrentSubscriptionForUser(
-        user.user_id,
+        user.id,
       );
     if (existingSubscription && existingSubscription.is_active) {
       await this.dbLogger.warn(
-        `User ${user.telegram_id} attempted to create new subscription while having active subscription ${existingSubscription.payhere_sub_id}`,
+        `User ${user.id} attempted to create new subscription while having active subscription ${existingSubscription.payhere_sub_id}`,
       );
       throw new ConflictException('User already has an active subscription');
     }
@@ -80,22 +86,22 @@ export class SubscriptionController {
     const _package = await this.packageService.getPackageById(body.package_id);
     if (!_package) {
       await this.dbLogger.warn(
-        `Package not found: ${body.package_id} for user ${user.telegram_id}`,
+        `Package not found: ${body.package_id} for user ${user.id}`,
       );
       throw new NotFoundException('Package not found');
     }
 
-    const _user = await this.userService.getUserById(user.user_id);
+    const _user = await this.userService.getUserById(user.id);
     if (!_user) {
       await this.dbLogger.error(
-        `User not found in database: ${user.user_id} (${user.telegram_id})`,
+        `User not found in database: ${user.id}`,
       );
       throw new NotFoundException('User not found');
     }
 
     const orderId = randomUUID();
     const link = await this.payHereService.getLink({
-      user_id: user.user_id,
+      user_id: user.id,
       package_id: _package.id,
       order_id: orderId,
       amount: String(_package.amount),
@@ -114,7 +120,7 @@ export class SubscriptionController {
     });
 
     await this.dbLogger.info(
-      `Payment link generated for user ${user.telegram_id}, package: ${_package.name} (${_package.amount} ${_package.currency}), order: ${orderId}`,
+      `Payment link generated for user ${user.id}, package: ${_package.name} (${_package.amount} ${_package.currency}), order: ${orderId}`,
     );
     return { link };
   }
@@ -122,13 +128,15 @@ export class SubscriptionController {
   @Post('cancel')
   @UseGuards(ConditionalAuthGuard)
   async cancelCurrentSubscription(@CurrentUser() user: JwtPayload) {
+    await this.telegramLoggerService.logUserAction('Cancel Subscription (/subscription/cancel)', user);
+
     await this.dbLogger.info(
-      `User ${user.telegram_id} requesting subscription cancellation`,
+      `User ${user.id} requesting subscription cancellation`,
     );
 
     const subscription =
       await this.subscriptionService.getCurrentSubscriptionForUser(
-        user.user_id,
+        user.id,
       );
 
     if (
@@ -137,20 +145,20 @@ export class SubscriptionController {
       !subscription.is_active
     ) {
       await this.dbLogger.warn(
-        `Subscription cancellation failed - no active subscription found for user ${user.telegram_id}`,
+        `Subscription cancellation failed - no active subscription found for user ${user.id}`,
       );
       throw new NotFoundException('Subscription not found');
     }
 
     await this.dbLogger.info(
-      `Cancelling subscription ${subscription.payhere_sub_id} for user ${user.telegram_id}`,
+      `Cancelling subscription ${subscription.payhere_sub_id} for user ${user.id}`,
     );
     await this.subscriptionService.cancelPayHereSubscription(
       subscription.payhere_sub_id,
     );
 
     await this.dbLogger.info(
-      `Subscription ${subscription.payhere_sub_id} successfully cancelled for user ${user.telegram_id}`,
+      `Subscription ${subscription.payhere_sub_id} successfully cancelled for user ${user.id}`,
     );
     return { message: 'Subscription cancelled successfully' };
   }
