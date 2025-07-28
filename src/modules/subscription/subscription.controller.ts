@@ -35,7 +35,7 @@ export class SubscriptionController {
   async getCurrentSubscription(
     @CurrentUser() user: JwtPayload,
   ): Promise<SubscriptionDetails> {
-    const logMessageId = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logUserAction(
       'Current Subscription (/subscription/current)',
       user,
     );
@@ -55,7 +55,7 @@ export class SubscriptionController {
     await this.dbLogger.info(
       `Subscription retrieved for user ${user.id}: ${subscription.payhere_sub_id}`,
     );
-    await this.telegramLoggerService.setMessageReaction(logMessageId);
+    await this.telegramLoggerService.setMessageReaction(logMessage);
     return subscription;
   }
 
@@ -65,7 +65,7 @@ export class SubscriptionController {
     @CurrentUser() user: JwtPayload,
     @Body() body: { package_id: string },
   ): Promise<{ link: string }> {
-    const logMessageId = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logUserAction(
       'Generate PayHere Link (/subscription/payhere-link)',
       user,
     );
@@ -122,14 +122,14 @@ export class SubscriptionController {
       `Payment link generated for user ${user.id}, package: ${_package.name} (${_package.amount} ${_package.currency}), order: ${orderId}`,
     );
 
-    await this.telegramLoggerService.setMessageReaction(logMessageId)
+    await this.telegramLoggerService.setMessageReaction(logMessage)
     return { link };
   }
 
   @Post('cancel')
   @UseGuards(ConditionalAuthGuard)
   async cancelCurrentSubscription(@CurrentUser() user: JwtPayload) {
-    const logMessageId = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logUserAction(
       'Cancel Subscription (/subscription/cancel)',
       user,
     );
@@ -152,6 +152,8 @@ export class SubscriptionController {
       throw new NotFoundException('Subscription not found');
     }
 
+    await this.telegramLoggerService.appendToMessage(logMessage, `Subscription ID: <b>#SUB${subscription.payhere_sub_id}</b>`);
+
     await this.dbLogger.info(
       `Cancelling subscription ${subscription.payhere_sub_id} for user ${user.id}`,
     );
@@ -159,16 +161,12 @@ export class SubscriptionController {
       subscription.payhere_sub_id,
     );
 
+    await this.telegramLoggerService.setMessageReaction(logMessage);
+
     await this.dbLogger.info(
       `Subscription ${subscription.payhere_sub_id} successfully cancelled for user ${user.id}`,
     );
 
-    await this.telegramLoggerService.logSubscriptionCancelled(
-      subscription.payhere_sub_id,
-      user,
-    );
-
-    await this.telegramLoggerService.setMessageReaction(logMessageId);
     return { message: 'Subscription cancelled successfully' };
   }
 }

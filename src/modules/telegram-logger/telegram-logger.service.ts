@@ -2,6 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { JwtPayload } from 'jsonwebtoken';
 import { Package } from '../package/package.service';
 
+interface TgMessage {
+  id: number | null;
+  text: string;
+}
+
 @Injectable()
 export class TelegramLoggerService {
   private readonly logger = new Logger(TelegramLoggerService.name);
@@ -19,24 +24,16 @@ export class TelegramLoggerService {
     return user.username ? `@${user.username}` : 'Unknown';
   }
 
-  async logUserRegistration(user: JwtPayload): Promise<void> {
-    const message =
-      `🟢 New user registered!\n` +
-      `Username: <b>${this.formatUsername(user)}</b>\n` +
-      `User ID: <b>#ID${user.id}</b>`;
-    await this.sendMessage(message);
-  }
-
   async logNewTransaction(
     payhereId: string,
     amount: string,
     telegramId: string,
   ): Promise<void> {
     const message =
-      `💰 New transaction!\n` +
-      `Transaction: <b>#PH${payhereId}</b>\n` +
-      `Amount: <b>${amount} LKR</b>\n` +
-      `User ID: <b>#ID${telegramId}</b>`;
+      `Action: New transaction\n` +
+      `User ID: <b>#ID${telegramId}</b>\n` +
+      `Transaction ID: <b>#PH${payhereId}</b>\n` +
+      `Amount: <b>${amount} LKR</b>`;
     await this.sendMessage(message);
   }
 
@@ -47,29 +44,17 @@ export class TelegramLoggerService {
     attemptNumber: number,
   ): Promise<void> {
     const message =
-      `🟢 Settlement successful!\n` +
-      `Transaction: <b>#PH${payhereId}</b>\n` +
-      `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
+      `Action: Settlement success\n` +
       `User ID: <b>#ID${telegramId}</b>\n` +
-      `Attempt: <b>${attemptNumber}</b>`;
+      `Transaction ID: <b>#PH${payhereId}</b>\n` +
+      `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
+      `Attempt #: <b>${attemptNumber}</b>`;
     await this.sendMessage(message);
   }
 
-  async logSubscriptionCancelled(
-    subscriptionId: string,
-    user: JwtPayload,
-  ): Promise<void> {
+  async logUserAction(action: string, user: JwtPayload): Promise<TgMessage | null> {
     const message =
-      `🟢 Subscription cancelled!\n` +
-      `Subscription: <b>#SUB${subscriptionId}</b>\n` +
-      `Username: <b>${this.formatUsername(user)}</b>\n` +
-      `User ID: <b>#ID${user.id}</b>`;
-    await this.sendMessage(message);
-  }
-
-  async logUserAction(action: string, user: JwtPayload): Promise<number | null> {
-    const message =
-      `📱 Action: <b>${action}</b>\n` +
+      `Action: <b>${action}</b>\n` +
       `Username: <b>${this.formatUsername(user)}</b>\n` +
       `User ID: <b>#ID${user.id}</b>`;
     return await this.sendMessage(message);
@@ -81,17 +66,58 @@ export class TelegramLoggerService {
     _package: Package,
   ): Promise<void> {
     const message =
-      `🟢 New subscription created!\n` +
-      `Subscription: <b>#SUB${subscriptionId}</b>\n` +
+      `Action: New subscription\n` +
       `Username: <b>${this.formatUsername(user)}</b>\n` +
       `User ID: <b>#ID${user.id}</b>\n` +
+      `Subscription ID: <b>#SUB${subscriptionId}</b>\n` +
       `Package: <b>${_package.name}</b>\n` +
       `Amount: <b>${_package.amount} LKR</b>`;
     await this.sendMessage(message);
   }
 
-  async setMessageReaction(messageId: number | null): Promise<void> {
-    if (!this.botToken || !this.logGroupId || !messageId) {
+  async appendToMessage(message: TgMessage | null, appendText: string): Promise<void> {
+    if (!this.botToken || !this.logGroupId || !message || !message.id) {
+      this.logger.warn(
+        'Bot token, log group ID, or message ID not provided, skipping message append',
+      );
+      return;
+    }
+
+    try {
+      const editUrl = `https://api.telegram.org/bot${this.botToken}/editMessageText`;
+      const editPayload: any = {
+        chat_id: this.logGroupId,
+        message_id: message.id.toString(),
+        text: `${message.text}\n${appendText}`,
+        parse_mode: 'HTML',
+      };
+
+      if (this.logTopicId) {
+        editPayload.message_thread_id = this.logTopicId;
+      }
+
+      const response = await fetch(editUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(editPayload),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        this.logger.error('Failed to append to Telegram message:', errorData);
+      } else {
+        // Update the message text in the TgMessage object
+        message.text = `${message.text}\n${appendText}`;
+      }
+    } catch (error) {
+      this.logger.error('Error appending to Telegram message:', error);
+    }
+  }
+
+  async setMessageReaction(message: TgMessage | null): Promise<void> {
+    if (!this.botToken || !this.logGroupId || !message || !message.id) {
       this.logger.warn(
         'Bot token or log group ID not configured, skipping Telegram reaction',
       );
@@ -102,7 +128,7 @@ export class TelegramLoggerService {
       const url = `https://api.telegram.org/bot${this.botToken}/setMessageReaction`;
       const reactionPayload: any = {
         chat_id: this.logGroupId,
-        message_id: messageId.toString(),
+        message_id: message.id.toString(),
         reaction: [{ type: 'emoji', emoji: '👍' }],
         is_big: true,
       };
@@ -128,7 +154,7 @@ export class TelegramLoggerService {
     }
   }
 
-  private async sendMessage(text: string): Promise<number | null> {
+  private async sendMessage(text: string): Promise<TgMessage | null> {
     if (!this.botToken || !this.logGroupId) {
       this.logger.warn(
         'Bot token or log group ID not configured, skipping Telegram log',
@@ -163,7 +189,10 @@ export class TelegramLoggerService {
       }
 
       const responseData = await response.json();
-      return responseData.result?.message_id || null;
+      return {
+        text,
+        id: responseData.result?.message_id || null
+      }
     } catch (error) {
       this.logger.error('Error sending Telegram log message:', error);
       return null;

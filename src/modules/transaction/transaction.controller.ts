@@ -70,7 +70,7 @@ export class TransactionController {
     const pageNum = page ? parseInt(page, 10) : 1;
     const limitNum = limit ? parseInt(limit, 10) : 10;
 
-    const logMessageId = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logUserAction(
       'Transaction List (/transaction/list)',
       user,
     );
@@ -89,7 +89,7 @@ export class TransactionController {
     await this.dbLogger.info(
       `Returned ${result.transactions.length} transactions for user ${user.id} (page ${pageNum}/${result.total_pages})`,
     );
-    await this.telegramLoggerService.setMessageReaction(logMessageId);
+    await this.telegramLoggerService.setMessageReaction(logMessage);
     return result;
   }
 
@@ -116,7 +116,7 @@ export class TransactionController {
   @Get('dca-summary')
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
-    const logMessageId = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logUserAction(
       'Main balance (/transaction/dca-summary)',
       user,
     );
@@ -134,7 +134,7 @@ export class TransactionController {
       );
     }
 
-    await this.telegramLoggerService.setMessageReaction(logMessageId);
+    await this.telegramLoggerService.setMessageReaction(logMessage);
     return summary;
   }
 }
