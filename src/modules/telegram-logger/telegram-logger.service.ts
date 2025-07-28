@@ -32,8 +32,8 @@ export class TelegramLoggerService {
   ): Promise<TgMessage | null> {
     const message =
       `Action: <b>New Transaction</b>\n` +
-      `User ID: <b>#ID${telegramId}</b>\n` +
-      `Transaction ID: <b>#PH${payhereId}</b>\n` +
+      `User ID: <b>#UID${telegramId}</b>\n` +
+      `Transaction ID: <b>#TRX${payhereId}</b>\n` +
       `Amount: <b>${amount} LKR</b>\n` +
       `Status: <b>${status}</b>`;
     return await this.sendMessage(message);
@@ -47,10 +47,10 @@ export class TelegramLoggerService {
   ): Promise<TgMessage | null> {
     const message =
       `Action: <b>Settlement Attempt</b>\n` +
-      `User ID: <b>#ID${telegramId}</b>\n` +
-      `Transaction ID: <b>#PH${payhereId}</b>\n` +
+      `User ID: <b>#UID${telegramId}</b>\n` +
+      `Transaction ID: <b>#TRX${payhereId}</b>\n` +
       `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
-      `Attempt #: <b>${attemptNumber}</b>`;
+      `Attempt: <b>#${attemptNumber}</b>`;
     return await this.sendMessage(message);
   }
 
@@ -61,7 +61,7 @@ export class TelegramLoggerService {
   ): Promise<void> {
     const message =
       `Action: <b>New Subscription</b>\n` +
-      `User ID: <b>#ID${userId}</b>\n` +
+      `User ID: <b>#UID${userId}</b>\n` +
       `Subscription ID: <b>#SUB${subscriptionId}</b>\n` +
       `Package: <b>${_package.name}</b>\n` +
       `Amount: <b>${_package.amount} LKR</b>`;
@@ -72,7 +72,7 @@ export class TelegramLoggerService {
     const message =
       `Action: <b>${action}</b>\n` +
       `Username: <b>${this.formatUsername(user)}</b>\n` +
-      `User ID: <b>#ID${user.id}</b>`;
+      `User ID: <b>#UID${user.id}</b>`;
     return await this.sendMessage(message);
   }
 
