@@ -7,6 +7,7 @@ import { UserModule } from '../user/user.module';
 import { PackageModule } from '../package/package.module';
 import { PayHereModule } from '../payhere/payhere.module';
 import { RedisModule } from '../redis/redis.module';
+import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { RedisModule } from '../redis/redis.module';
     PackageModule,
     PayHereModule,
     RedisModule,
+    TelegramLoggerModule,
   ],
   providers: [SubscriptionService],
   exports: [SubscriptionService],

@@ -26,17 +26,18 @@ export class UserController {
     @Body() createUserDto: CreateUserDto,
   ) {
     const result = await this.userService.createUser({
-      id: user.user_id,
+      id: user.id,
       ...createUserDto,
     });
 
-    await this.telegramLoggerService.logUserRegistration(user.username!, user.telegram_id || user.user_id);
+    await this.telegramLoggerService.logUserRegistration(user);
 
     return result;
   }
 
   @Get('exists/:telegramId')
   async checkUserExists(@Param('telegramId') telegramId: string) {
+    await this.telegramLoggerService.logUserAction('Initial app load (/user/exists/:telegramId)', { id: telegramId });
     const exists = await this.userService.userExists(telegramId);
     return { registered: exists };
   }

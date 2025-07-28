@@ -38,8 +38,7 @@ export class ConditionalAuthGuard implements CanActivate {
       // If auth is disabled in development, create a mock user
       const mockUserId = process.env.MOCK_TG_ID || 'dev-user-123';
       request.user = {
-        user_id: mockUserId,
-        telegram_id: mockUserId,
+        id: mockUserId,
         username: 'dev-username',
       };
       await this.dbLogger.info(
@@ -64,7 +63,7 @@ export class ConditionalAuthGuard implements CanActivate {
       const payload = this.jwtService.verify<JwtPayload>(token);
       request.user = payload;
       await this.dbLogger.info(
-        `Successful JWT validation for user: ${payload.telegram_id}`,
+        `Successful JWT validation for user: ${payload.id}`,
       );
     } catch (error) {
       await this.dbLogger.warn(

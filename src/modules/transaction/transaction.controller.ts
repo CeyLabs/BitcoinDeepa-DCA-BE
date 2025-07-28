@@ -70,19 +70,21 @@ export class TransactionController {
     const pageNum = page ? parseInt(page, 10) : 1;
     const limitNum = limit ? parseInt(limit, 10) : 10;
 
+    await this.telegramLoggerService.logUserAction('Transaction List (/transaction/list)', user);
+
     await this.dbLogger.info(
-      `User ${user.telegram_id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`,
+      `User ${user.id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`,
     );
 
     const result =
       await this.transactionService.getTransactionsByUserIdPaginated(
-        user.user_id,
+        user.id,
         pageNum,
         limitNum,
       );
 
     await this.dbLogger.info(
-      `Returned ${result.transactions.length} transactions for user ${user.telegram_id} (page ${pageNum}/${result.total_pages})`,
+      `Returned ${result.transactions.length} transactions for user ${user.id} (page ${pageNum}/${result.total_pages})`,
     );
     return result;
   }
@@ -91,19 +93,19 @@ export class TransactionController {
   @UseGuards(ConditionalAuthGuard)
   async getLatestTransaction(@CurrentUser() user: JwtPayload) {
     await this.dbLogger.info(
-      `User ${user.telegram_id} requesting latest transaction`,
+      `User ${user.id} requesting latest transaction`,
     );
     const transaction =
-      await this.transactionService.getLatestTransactionForUser(user.user_id);
+      await this.transactionService.getLatestTransactionForUser(user.id);
 
     if (transaction) {
       await this.dbLogger.info(
-        `Latest transaction found for user ${user.telegram_id}: ${transaction.payhere_pay_id}, status: ${transaction.status}`,
+        `Latest transaction found for user ${user.id}: ${transaction.payhere_pay_id}, status: ${transaction.status}`,
       );
       return transaction;
     } else {
       await this.dbLogger.warn(
-        `No transactions found for user ${user.telegram_id} with active subscription`,
+        `No transactions found for user ${user.id} with active subscription`,
       );
       throw new NotFoundException('No transactions found');
     }
@@ -112,18 +114,20 @@ export class TransactionController {
   @Get('dca-summary')
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
-    await this.dbLogger.info(`User ${user.telegram_id} requesting DCA summary`);
+    await this.telegramLoggerService.logUserAction('Main balance (/transaction/dca-summary)', user);
+
+    await this.dbLogger.info(`User ${user.id} requesting DCA summary`);
     const summary = await this.transactionService.getDCASummaryForUser(
-      user.user_id,
+      user.id,
     );
 
     if (summary) {
       await this.dbLogger.info(
-        `DCA summary calculated for user ${user.telegram_id}: ${summary.total_satoshis_purchased} sats, ${summary.successful_transactions} transactions`,
+        `DCA summary calculated for user ${user.id}: ${summary.total_satoshis_purchased} sats, ${summary.successful_transactions} transactions`,
       );
     } else {
       await this.dbLogger.info(
-        `No DCA summary data available for user ${user.telegram_id}`,
+        `No DCA summary data available for user ${user.id}`,
       );
     }
 
