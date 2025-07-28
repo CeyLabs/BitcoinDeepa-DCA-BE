@@ -643,7 +643,6 @@ export class TransactionService {
 
       // Fetch total balance from BitcoinDeepa API
       let totalBalanceFromAPI = 0;
-      let LKRPerSAT = 0;
       let balanceResponse = {} as UserBalanceResponse;
       try {
         if (this.bitcoinDeepaService.isConfigured()) {
@@ -652,7 +651,6 @@ export class TransactionService {
           );
           if (balanceResponse.success && balanceResponse.balance) {
             totalBalanceFromAPI = balanceResponse.balance;
-            LKRPerSAT = parseFloat(balanceResponse.balance_lkr!) / balanceResponse.balance;
           }
         }
       } catch (error) {
