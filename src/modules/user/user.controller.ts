@@ -48,10 +48,6 @@ export class UserController {
 
   @Get('exists/:telegramId')
   async checkUserExists(@Param('telegramId') telegramId: string) {
-    await this.telegramLoggerService.logUserAction(
-      'Initial app load (/user/exists/:telegramId)',
-      { id: telegramId },
-    );
     const exists = await this.userService.userExists(telegramId);
     return { registered: exists };
   }
