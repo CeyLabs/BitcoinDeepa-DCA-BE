@@ -265,7 +265,7 @@ export class TransactionService {
     }
   }
 
-  private getPayHereStatusMapped(status_code: string): Status {
+  getPayHereStatusMapped(status_code: string): Status {
     const statusMap: Record<string, Status> = {
       '2': 'SUCCESS',
       '0': 'PENDING',

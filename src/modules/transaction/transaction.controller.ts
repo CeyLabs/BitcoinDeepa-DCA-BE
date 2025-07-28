@@ -38,18 +38,20 @@ export class TransactionController {
     );
 
     try {
+      const mappedStatus = this.transactionService.getPayHereStatusMapped(body.status_code);
+      const logMessage = await this.telegramLoggerService.logNewTransaction(
+        body.payment_id,
+        body.payhere_amount,
+        body.custom_1!, // user telegram ID
+        mappedStatus,
+      );
+
       await this.transactionService.handlePayHereNotification(body);
       await this.dbLogger.info(
         `PayHere webhook processed successfully for order_id: ${body.order_id}`,
       );
 
-      if (body.status_code === '2') {
-        await this.telegramLoggerService.logNewTransaction(
-          body.payment_id,
-          body.payhere_amount,
-          body.custom_1!, // user telegram ID
-        );
-      }
+      await this.telegramLoggerService.setMessageReaction(logMessage);
 
       return res.status(HttpStatus.OK).send('OK');
     } catch (error) {
