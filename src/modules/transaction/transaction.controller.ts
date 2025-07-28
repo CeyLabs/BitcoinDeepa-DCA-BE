@@ -42,7 +42,7 @@ export class TransactionController {
       await this.dbLogger.info(
         `PayHere webhook processed successfully for order_id: ${body.order_id}`,
       );
-      
+
       if (body.status_code === '2') {
         await this.telegramLoggerService.logNewTransaction(
           body.payment_id,
@@ -50,7 +50,7 @@ export class TransactionController {
           body.custom_1!, // user telegram ID
         );
       }
-      
+
       return res.status(HttpStatus.OK).send('OK');
     } catch (error) {
       await this.dbLogger.error(
@@ -70,7 +70,10 @@ export class TransactionController {
     const pageNum = page ? parseInt(page, 10) : 1;
     const limitNum = limit ? parseInt(limit, 10) : 10;
 
-    await this.telegramLoggerService.logUserAction('Transaction List (/transaction/list)', user);
+    await this.telegramLoggerService.logUserAction(
+      'Transaction List (/transaction/list)',
+      user,
+    );
 
     await this.dbLogger.info(
       `User ${user.id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`,
@@ -92,9 +95,7 @@ export class TransactionController {
   @Get('latest')
   @UseGuards(ConditionalAuthGuard)
   async getLatestTransaction(@CurrentUser() user: JwtPayload) {
-    await this.dbLogger.info(
-      `User ${user.id} requesting latest transaction`,
-    );
+    await this.dbLogger.info(`User ${user.id} requesting latest transaction`);
     const transaction =
       await this.transactionService.getLatestTransactionForUser(user.id);
 
@@ -114,12 +115,13 @@ export class TransactionController {
   @Get('dca-summary')
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
-    await this.telegramLoggerService.logUserAction('Main balance (/transaction/dca-summary)', user);
+    await this.telegramLoggerService.logUserAction(
+      'Main balance (/transaction/dca-summary)',
+      user,
+    );
 
     await this.dbLogger.info(`User ${user.id} requesting DCA summary`);
-    const summary = await this.transactionService.getDCASummaryForUser(
-      user.id,
-    );
+    const summary = await this.transactionService.getDCASummaryForUser(user.id);
 
     if (summary) {
       await this.dbLogger.info(

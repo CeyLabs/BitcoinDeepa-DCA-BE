@@ -1,4 +1,10 @@
-import { IsEmail, IsString, IsNotEmpty, Length, Matches } from 'class-validator';
+import {
+  IsEmail,
+  IsString,
+  IsNotEmpty,
+  Length,
+  Matches,
+} from 'class-validator';
 
 export class CreateUserDto {
   @IsString()
@@ -18,7 +24,7 @@ export class CreateUserDto {
   @IsString()
   @IsNotEmpty()
   @Matches(/^\+94\d{9}$/, {
-    message: 'Please provide a valid phone number (e.g., +94771234567)'
+    message: 'Please provide a valid phone number (e.g., +94771234567)',
   })
   phone: string;
 

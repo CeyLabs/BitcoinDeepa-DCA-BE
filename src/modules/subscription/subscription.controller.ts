@@ -35,11 +35,12 @@ export class SubscriptionController {
   async getCurrentSubscription(
     @CurrentUser() user: JwtPayload,
   ): Promise<SubscriptionDetails> {
-    await this.telegramLoggerService.logUserAction('Current Subscription (/subscription/current)', user);
-
-    await this.dbLogger.info(
-      `User ${user.id} retrieving current subscription`,
+    await this.telegramLoggerService.logUserAction(
+      'Current Subscription (/subscription/current)',
+      user,
     );
+
+    await this.dbLogger.info(`User ${user.id} retrieving current subscription`);
 
     const subscription =
       await this.subscriptionService.getCurrentSubscriptionDetailsForUser(
@@ -47,9 +48,7 @@ export class SubscriptionController {
       );
 
     if (!subscription) {
-      await this.dbLogger.warn(
-        `No subscription found for user ${user.id}`,
-      );
+      await this.dbLogger.warn(`No subscription found for user ${user.id}`);
       throw new NotFoundException('Subscription not found');
     }
 
@@ -65,7 +64,10 @@ export class SubscriptionController {
     @CurrentUser() user: JwtPayload,
     @Body() body: { package_id: string },
   ): Promise<{ link: string }> {
-    await this.telegramLoggerService.logUserAction('Generate PayHere Link (/subscription/payhere-link)', user);
+    await this.telegramLoggerService.logUserAction(
+      'Generate PayHere Link (/subscription/payhere-link)',
+      user,
+    );
 
     await this.dbLogger.info(
       `User ${user.id} requesting payment link for package ${body.package_id}`,
@@ -73,9 +75,7 @@ export class SubscriptionController {
 
     // Check if user already has an active subscription
     const existingSubscription =
-      await this.subscriptionService.getCurrentSubscriptionForUser(
-        user.id,
-      );
+      await this.subscriptionService.getCurrentSubscriptionForUser(user.id);
     if (existingSubscription && existingSubscription.is_active) {
       await this.dbLogger.warn(
         `User ${user.id} attempted to create new subscription while having active subscription ${existingSubscription.payhere_sub_id}`,
@@ -93,9 +93,7 @@ export class SubscriptionController {
 
     const _user = await this.userService.getUserById(user.id);
     if (!_user) {
-      await this.dbLogger.error(
-        `User not found in database: ${user.id}`,
-      );
+      await this.dbLogger.error(`User not found in database: ${user.id}`);
       throw new NotFoundException('User not found');
     }
 
@@ -128,16 +126,17 @@ export class SubscriptionController {
   @Post('cancel')
   @UseGuards(ConditionalAuthGuard)
   async cancelCurrentSubscription(@CurrentUser() user: JwtPayload) {
-    await this.telegramLoggerService.logUserAction('Cancel Subscription (/subscription/cancel)', user);
+    await this.telegramLoggerService.logUserAction(
+      'Cancel Subscription (/subscription/cancel)',
+      user,
+    );
 
     await this.dbLogger.info(
       `User ${user.id} requesting subscription cancellation`,
     );
 
     const subscription =
-      await this.subscriptionService.getCurrentSubscriptionForUser(
-        user.id,
-      );
+      await this.subscriptionService.getCurrentSubscriptionForUser(user.id);
 
     if (
       !subscription ||
@@ -160,6 +159,12 @@ export class SubscriptionController {
     await this.dbLogger.info(
       `Subscription ${subscription.payhere_sub_id} successfully cancelled for user ${user.id}`,
     );
+
+    await this.telegramLoggerService.logSubscriptionCancelled(
+      subscription.payhere_sub_id,
+      user,
+    );
+
     return { message: 'Subscription cancelled successfully' };
   }
 }

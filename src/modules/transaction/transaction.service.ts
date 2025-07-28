@@ -11,6 +11,7 @@ import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
+import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import Big from 'big.js';
 
 export interface PayHereNotificationParams {
@@ -54,6 +55,7 @@ export class TransactionService {
     private readonly bitcoinPriceService: BitcoinPriceService,
     private readonly dbLogger: DatabaseLoggerService,
     private readonly redisService: RedisService,
+    private readonly telegramLoggerService: TelegramLoggerService,
   ) {}
 
   private readonly logger = new Logger(TransactionService.name);
@@ -663,54 +665,6 @@ export class TransactionService {
     }
   }
 
-  private async ensureSubscriptionExists(
-    payhere_sub_id: string,
-    user_id?: string,
-    package_id?: string,
-  ): Promise<void> {
-    try {
-      // Check if subscription already exists
-      const existingSubscription = await this.knexService
-        .knex<Subscription>('subscription')
-        .where('payhere_sub_id', payhere_sub_id)
-        .first();
-
-      if (existingSubscription) {
-        await this.dbLogger.info(
-          `Subscription ${payhere_sub_id} already exists`,
-        );
-        return;
-      }
-
-      // Create new subscription if we have the required data
-      if (user_id && package_id) {
-        await this.dbLogger.info(
-          `Creating new subscription: ${payhere_sub_id} for user ${user_id}, package ${package_id}`,
-        );
-
-        await this.knexService.knex('subscription').insert({
-          payhere_sub_id,
-          user_id,
-          package_id,
-          is_active: true,
-        });
-
-        await this.dbLogger.info(
-          `New subscription ${payhere_sub_id} created successfully`,
-        );
-      } else {
-        await this.dbLogger.warn(
-          `Cannot create subscription ${payhere_sub_id}: missing user_id (${user_id}) or package_id (${package_id})`,
-        );
-      }
-    } catch (error) {
-      await this.dbLogger.error(
-        `Error ensuring subscription exists for ${payhere_sub_id}: ${error.message}`,
-      );
-      // Don't throw error here as we still want to process the transaction
-    }
-  }
-
   /**
    * Atomic version of ensureSubscriptionExists for use within transactions
    */
@@ -748,6 +702,37 @@ export class TransactionService {
       await this.dbLogger.info(
         `New subscription ${payhere_sub_id} created successfully (atomic)`,
       );
+
+      // Fetch package details for Telegram logging
+      try {
+        const _package = await trx('package')
+          .where('id', package_id)
+          .first();
+
+        if (_package) {
+          // Create user object for telegram logging
+          const userForLogging = {
+            id: user_id,
+            telegram_id: user_id,
+            username: undefined, // We don't have username in webhook data
+          };
+
+          await this.telegramLoggerService.logSubscriptionCreated(
+            payhere_sub_id,
+            userForLogging,
+            _package
+          );
+        } else {
+          await this.dbLogger.warn(
+            `Package ${package_id} not found for Telegram logging`,
+          );
+        }
+      } catch (telegramError) {
+        // Don't fail subscription creation if Telegram logging fails
+        await this.dbLogger.error(
+          `Failed to log subscription creation to Telegram: ${telegramError.message}`,
+        );
+      }
     } else {
       await this.dbLogger.warn(
         `Cannot create subscription ${payhere_sub_id}: missing user_id (${user_id}) or package_id (${package_id}) (atomic)`,

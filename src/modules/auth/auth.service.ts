@@ -122,9 +122,7 @@ export class AuthService {
 
   async generateJwt(payload: JwtPayload): Promise<string> {
     const token = this.jwtService.sign(payload);
-    await this.dbLogger.info(
-      `JWT token generated for user: ${payload.id}`,
-    );
+    await this.dbLogger.info(`JWT token generated for user: ${payload.id}`);
     return token;
   }
 

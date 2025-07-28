@@ -79,7 +79,6 @@ export class BitcoinDeepaService {
         `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.endpoint}`,
       );
 
-
       const response = await axios.post<FundTransferResponse>(
         url,
         requestBody,

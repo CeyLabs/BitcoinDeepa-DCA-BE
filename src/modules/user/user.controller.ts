@@ -1,4 +1,13 @@
-import { Controller, Post, Body, UseGuards, Get, Param, UsePipes, ValidationPipe } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  UseGuards,
+  Get,
+  Param,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import { User, UserService } from './user.service';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
@@ -15,12 +24,14 @@ export class UserController {
 
   @Post()
   @UseGuards(ConditionalAuthGuard)
-  @UsePipes(new ValidationPipe({ 
-    whitelist: true, 
-    forbidNonWhitelisted: true,
-    transform: true,
-    transformOptions: { enableImplicitConversion: true } 
-  }))
+  @UsePipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+      transformOptions: { enableImplicitConversion: true },
+    }),
+  )
   async createUser(
     @CurrentUser() user: JwtPayload,
     @Body() createUserDto: CreateUserDto,
@@ -37,7 +48,10 @@ export class UserController {
 
   @Get('exists/:telegramId')
   async checkUserExists(@Param('telegramId') telegramId: string) {
-    await this.telegramLoggerService.logUserAction('Initial app load (/user/exists/:telegramId)', { id: telegramId });
+    await this.telegramLoggerService.logUserAction(
+      'Initial app load (/user/exists/:telegramId)',
+      { id: telegramId },
+    );
     const exists = await this.userService.userExists(telegramId);
     return { registered: exists };
   }

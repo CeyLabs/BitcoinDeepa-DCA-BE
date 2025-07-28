@@ -36,7 +36,10 @@ export async function up(knex: Knex): Promise<void> {
     table.timestamps(true, true);
 
     // Performance indexes for settlement queries
-    table.index(['status', 'settled', 'retry_count'], 'idx_transaction_settlement_retry');
+    table.index(
+      ['status', 'settled', 'retry_count'],
+      'idx_transaction_settlement_retry',
+    );
     table.index(['last_retry_at'], 'idx_transaction_last_retry_at');
   });
 }
