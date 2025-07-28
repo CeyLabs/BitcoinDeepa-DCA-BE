@@ -70,7 +70,7 @@ export class TransactionController {
     const pageNum = page ? parseInt(page, 10) : 1;
     const limitNum = limit ? parseInt(limit, 10) : 10;
 
-    const logMessage = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logGenericAction(
       'Transaction List (/transaction/list)',
       user,
     );
@@ -116,7 +116,7 @@ export class TransactionController {
   @Get('dca-summary')
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
-    const logMessage = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logGenericAction(
       'Main balance (/transaction/dca-summary)',
       user,
     );

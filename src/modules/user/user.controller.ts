@@ -36,7 +36,7 @@ export class UserController {
     @CurrentUser() user: JwtPayload,
     @Body() createUserDto: CreateUserDto,
   ) {
-    const logMessage = await this.telegramLoggerService.logUserAction("User Registration", user);
+    const logMessage = await this.telegramLoggerService.logGenericAction("User Registration", user);
 
     const result = await this.userService.createUser({
       id: user.id,

@@ -35,7 +35,7 @@ export class SubscriptionController {
   async getCurrentSubscription(
     @CurrentUser() user: JwtPayload,
   ): Promise<SubscriptionDetails> {
-    const logMessage = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logGenericAction(
       'Current Subscription (/subscription/current)',
       user,
     );
@@ -65,7 +65,7 @@ export class SubscriptionController {
     @CurrentUser() user: JwtPayload,
     @Body() body: { package_id: string },
   ): Promise<{ link: string }> {
-    const logMessage = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logGenericAction(
       'Generate PayHere Link (/subscription/payhere-link)',
       user,
     );
@@ -129,7 +129,7 @@ export class SubscriptionController {
   @Post('cancel')
   @UseGuards(ConditionalAuthGuard)
   async cancelCurrentSubscription(@CurrentUser() user: JwtPayload) {
-    const logMessage = await this.telegramLoggerService.logUserAction(
+    const logMessage = await this.telegramLoggerService.logGenericAction(
       'Cancel Subscription (/subscription/cancel)',
       user,
     );

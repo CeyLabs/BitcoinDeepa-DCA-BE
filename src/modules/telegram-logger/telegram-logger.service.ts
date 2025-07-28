@@ -30,11 +30,11 @@ export class TelegramLoggerService {
     telegramId: string,
   ): Promise<void> {
     const message =
-      `Action: New transaction\n` +
+      `Action: <b>New Transaction<b>\n` +
       `User ID: <b>#ID${telegramId}</b>\n` +
       `Transaction ID: <b>#PH${payhereId}</b>\n` +
       `Amount: <b>${amount} LKR</b>`;
-    await this.sendMessage(message);
+    await this.sendMessage(message, true);
   }
 
   async logSettlementSuccess(
@@ -44,20 +44,12 @@ export class TelegramLoggerService {
     attemptNumber: number,
   ): Promise<void> {
     const message =
-      `Action: Settlement success\n` +
+      `Action: <b>Settlement<b>\n` +
       `User ID: <b>#ID${telegramId}</b>\n` +
       `Transaction ID: <b>#PH${payhereId}</b>\n` +
       `Satoshis: <b>${satoshis.toLocaleString()}</b>\n` +
       `Attempt #: <b>${attemptNumber}</b>`;
-    await this.sendMessage(message);
-  }
-
-  async logUserAction(action: string, user: JwtPayload): Promise<TgMessage | null> {
-    const message =
-      `Action: <b>${action}</b>\n` +
-      `Username: <b>${this.formatUsername(user)}</b>\n` +
-      `User ID: <b>#ID${user.id}</b>`;
-    return await this.sendMessage(message);
+    await this.sendMessage(message, true);
   }
 
   async logSubscriptionCreated(
@@ -66,13 +58,21 @@ export class TelegramLoggerService {
     _package: Package,
   ): Promise<void> {
     const message =
-      `Action: New subscription\n` +
+      `Action: <b>New Subscription<b>\n` +
       `Username: <b>${this.formatUsername(user)}</b>\n` +
       `User ID: <b>#ID${user.id}</b>\n` +
       `Subscription ID: <b>#SUB${subscriptionId}</b>\n` +
       `Package: <b>${_package.name}</b>\n` +
       `Amount: <b>${_package.amount} LKR</b>`;
-    await this.sendMessage(message);
+    await this.sendMessage(message, true);
+  }
+
+  async logGenericAction(action: string, user: JwtPayload): Promise<TgMessage | null> {
+    const message =
+      `Action: <b>${action}</b>\n` +
+      `Username: <b>${this.formatUsername(user)}</b>\n` +
+      `User ID: <b>#ID${user.id}</b>`;
+    return await this.sendMessage(message);
   }
 
   async appendToMessage(message: TgMessage | null, appendText: string): Promise<void> {
@@ -154,7 +154,7 @@ export class TelegramLoggerService {
     }
   }
 
-  private async sendMessage(text: string): Promise<TgMessage | null> {
+  private async sendMessage(text: string, addReaction: boolean = false): Promise<TgMessage | null> {
     if (!this.botToken || !this.logGroupId) {
       this.logger.warn(
         'Bot token or log group ID not configured, skipping Telegram log',
@@ -189,10 +189,17 @@ export class TelegramLoggerService {
       }
 
       const responseData = await response.json();
-      return {
+      const tgMessage: TgMessage = {
         text,
         id: responseData.result?.message_id || null
+      };
+
+      // Add reaction if requested
+      if (addReaction && tgMessage.id) {
+        await this.setMessageReaction(tgMessage);
       }
+
+      return tgMessage;
     } catch (error) {
       this.logger.error('Error sending Telegram log message:', error);
       return null;
