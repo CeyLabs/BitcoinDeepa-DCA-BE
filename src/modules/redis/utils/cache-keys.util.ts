@@ -33,6 +33,7 @@ export class CacheKeys {
     price: (currency: string): string =>
       `${CacheKeys.PREFIX}:btc:price:${currency}`,
     usdLkr: (): string => `${CacheKeys.PREFIX}:exchange:usd:lkr`,
+    price24HrChange: (): string => `${CacheKeys.PREFIX}:btc:24hr_change`,
   };
 
   // PayHere-related cache keys

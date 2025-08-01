@@ -38,7 +38,9 @@ export class TransactionController {
     );
 
     try {
-      const mappedStatus = this.transactionService.getPayHereStatusMapped(body.status_code);
+      const mappedStatus = this.transactionService.getPayHereStatusMapped(
+        body.status_code,
+      );
       const logMessage = await this.telegramLoggerService.logNewTransaction(
         body.payment_id,
         body.payhere_amount,

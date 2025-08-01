@@ -17,6 +17,13 @@ interface CoinGeckoResponse {
   };
 }
 
+interface CoinGecko24HrChangeResponse {
+  bitcoin: {
+    lkr: number;
+    lkr_24h_change: number;
+  };
+}
+
 interface CeylonCashResponse {
   description: string;
   buying_rate: number;
@@ -241,6 +248,72 @@ export class BitcoinPriceService {
   async clearCache(): Promise<void> {
     await this.redisService.delByPattern(CacheKeys.patterns.allBitcoinPrices());
     this.logger.log('Bitcoin price cache cleared from Redis');
+  }
+
+  async getBitcoin24HrChange(): Promise<number | null> {
+    try {
+      // Check Redis cache first (10 minutes TTL)
+      const cacheKey = CacheKeys.bitcoin.price24HrChange();
+      const cached = await this.redisService.get<{
+        change: number;
+        timestamp: Date;
+      }>(cacheKey);
+
+      if (cached && this.is24HrCacheValid(cached.timestamp)) {
+        this.logger.debug(
+          `Using cached 24hr change from Redis: ${cached.change}%`,
+        );
+        return cached.change;
+      }
+
+      const apiKey = process.env.COINGECKO_API_KEY;
+      const baseUrl = apiKey
+        ? 'https://pro-api.coingecko.com/api/v3'
+        : 'https://api.coingecko.com/api/v3';
+
+      const url = `${baseUrl}/simple/price`;
+      const params = {
+        ids: 'bitcoin',
+        vs_currencies: 'LKR',
+        include_24hr_change: 'true',
+      };
+
+      const headers = apiKey ? { 'x-cg-pro-api-key': apiKey } : {};
+
+      const response: AxiosResponse<CoinGecko24HrChangeResponse> =
+        await axios.get(url, {
+          params,
+          headers,
+          timeout: 10000, // 10 second timeout
+        });
+
+      const change = response.data?.bitcoin?.lkr_24h_change;
+
+      if (typeof change !== 'number') {
+        this.logger.warn(
+          `Invalid 24hr change received from CoinGecko: ${String(change)}`,
+        );
+        return null;
+      }
+
+      // Cache the result in Redis for 10 minutes (600 seconds)
+      const cacheData = { change, timestamp: new Date() };
+      await this.redisService.set(cacheKey, cacheData, {
+        ttl: 600, // 10 minutes
+      });
+      this.logger.log(`Fetched fresh 24hr change: ${change}%`);
+
+      return change;
+    } catch (error) {
+      this.logger.error('CoinGecko API error for 24hr change:', error);
+      return null;
+    }
+  }
+
+  private is24HrCacheValid(timestamp: Date): boolean {
+    const now = dayjs();
+    const cacheTime = dayjs(timestamp);
+    return now.diff(cacheTime, 'second') < 600; // 10 minutes
   }
 
   // Get cache status for debugging

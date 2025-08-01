@@ -12,7 +12,10 @@ import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
-import { BitcoinDeepaService, UserBalanceResponse } from '../bitcoindeepa/bitcoindeepa.service';
+import {
+  BitcoinDeepaService,
+  UserBalanceResponse,
+} from '../bitcoindeepa/bitcoindeepa.service';
 import Big from 'big.js';
 
 export interface PayHereNotificationParams {
@@ -538,6 +541,7 @@ export class TransactionService {
     total_balance: number;
     total_lkr: string | undefined;
     currency: string;
+    '24_hr_change': number;
   } | null> {
     try {
       const cacheKey = CacheKeys.transaction.dcaSummary(user_id);
@@ -552,6 +556,7 @@ export class TransactionService {
         total_balance: number;
         total_lkr: string | undefined;
         currency: string;
+        '24_hr_change': number;
       }>(cacheKey);
 
       if (cached) {
@@ -603,6 +608,7 @@ export class TransactionService {
           total_balance: 0,
           total_lkr: '0.00',
           currency: 'LKR',
+          '24_hr_change': 0,
         };
 
         // Cache empty result for 5 minutes
@@ -636,11 +642,6 @@ export class TransactionService {
           ? totalSpent.div(totalSatoshis.div(100_000_000))
           : new Big(0);
 
-      const dates = transactions
-        .map((tx) => tx.created_at)
-        .filter((date) => date)
-        .sort();
-
       // Fetch total balance from BitcoinDeepa API
       let totalBalanceFromAPI = 0;
       let balanceResponse = {} as UserBalanceResponse;
@@ -659,6 +660,19 @@ export class TransactionService {
         );
       }
 
+      // Fetch 24hr change from CoinGecko
+      let bitcoin24HrChange = 0;
+      try {
+        const change = await this.bitcoinPriceService.getBitcoin24HrChange();
+        if (typeof change === 'number') {
+          bitcoin24HrChange = change;
+        }
+      } catch (error) {
+        await this.dbLogger.warn(
+          `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error.message}`,
+        );
+      }
+
       // Convert Big.js values to numbers for the response
       const summary = {
         dca: {
@@ -669,6 +683,7 @@ export class TransactionService {
         total_balance: totalBalanceFromAPI,
         total_lkr: balanceResponse.balance_lkr,
         currency: 'LKR',
+        '24_hr_change': bitcoin24HrChange,
       };
 
       // Cache the result for 5 minutes (300 seconds)
@@ -726,16 +741,14 @@ export class TransactionService {
 
       // Fetch package details for Telegram logging
       try {
-        const _package = await trx('package')
-          .where('id', package_id)
-          .first();
+        const _package = await trx('package').where('id', package_id).first();
 
         if (_package) {
           // Create user object for telegram logging
           await this.telegramLoggerService.logSubscriptionCreated(
             payhere_sub_id,
             user_id,
-            _package
+            _package,
           );
         } else {
           await this.dbLogger.warn(

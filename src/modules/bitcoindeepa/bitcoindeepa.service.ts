@@ -157,14 +157,10 @@ export class BitcoinDeepaService {
         `BitcoinDeepaService.getUserBalance: Fetching balance for user ${telegramId} at ${this.balanceEndpoint}`,
       );
 
-      const response = await axios.post<UserBalanceResponse>(
-        url,
-        requestBody,
-        {
-          headers,
-          timeout: this.timeout,
-        },
-      );
+      const response = await axios.post<UserBalanceResponse>(url, requestBody, {
+        headers,
+        timeout: this.timeout,
+      });
 
       await this.dbLogger.info(
         `BitcoinDeepaService.getUserBalance: Balance fetch successful for user ${telegramId}, status: ${response.status}`,
