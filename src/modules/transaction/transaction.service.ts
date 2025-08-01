@@ -538,6 +538,13 @@ export class TransactionService {
     total_balance: number;
     total_lkr: string | undefined;
     currency: string;
+    graph_data: Array<{
+      date: string;
+      cumulative_satoshis: number;
+      satoshis_purchased: number;
+      amount_spent: number;
+      btc_price: number;
+    }>;
   } | null> {
     try {
       const cacheKey = CacheKeys.transaction.dcaSummary(user_id);
@@ -552,6 +559,13 @@ export class TransactionService {
         total_balance: number;
         total_lkr: string | undefined;
         currency: string;
+        graph_data: Array<{
+          date: string;
+          cumulative_satoshis: number;
+          satoshis_purchased: number;
+          amount_spent: number;
+          btc_price: number;
+        }>;
       }>(cacheKey);
 
       if (cached) {
@@ -603,6 +617,7 @@ export class TransactionService {
           total_balance: 0,
           total_lkr: '0.00',
           currency: 'LKR',
+          graph_data: [],
         };
 
         // Cache empty result for 5 minutes
@@ -636,10 +651,44 @@ export class TransactionService {
           ? totalSpent.div(totalSatoshis.div(100_000_000))
           : new Big(0);
 
-      const dates = transactions
-        .map((tx) => tx.created_at)
-        .filter((date) => date)
-        .sort();
+      // Generate graph data for most recent 10 transactions
+      const allSortedTransactions = transactions
+        .filter((tx) => tx.created_at && tx.satoshis_purchased && tx.btc_price_at_purchase)
+        .sort((a, b) => new Date(a.created_at!).getTime() - new Date(b.created_at!).getTime());
+
+      // Get most recent 10 transactions for graph
+      const recentTransactions = allSortedTransactions.slice(-10);
+
+      // Calculate cumulative satoshis up to each point
+      let runningTotal = new Big(0);
+      const allCumulativeData = allSortedTransactions.map((tx) => {
+        const satoshis = new Big(tx.satoshis_purchased!);
+        runningTotal = runningTotal.plus(satoshis);
+        return {
+          transaction: tx,
+          cumulative: Number(runningTotal.toString()),
+        };
+      });
+
+      // Create graph data for the most recent 10 transactions
+      const graphData = recentTransactions.map((tx) => {
+        const cumulativeEntry = allCumulativeData.find(
+          (entry) => entry.transaction.payhere_pay_id === tx.payhere_pay_id
+        );
+        
+        // Calculate amount spent for this transaction
+        const satoshisBig = new Big(tx.satoshis_purchased!);
+        const btcAmount = satoshisBig.div(100_000_000);
+        const amountSpent = btcAmount.times(tx.btc_price_at_purchase!);
+
+        return {
+          date: tx.created_at!.toISOString().split('T')[0], // Format as YYYY-MM-DD
+          cumulative_satoshis: cumulativeEntry?.cumulative || 0,
+          satoshis_purchased: tx.satoshis_purchased!,
+          amount_spent: Number(amountSpent.toString()),
+          btc_price: tx.btc_price_at_purchase!,
+        };
+      });
 
       // Fetch total balance from BitcoinDeepa API
       let totalBalanceFromAPI = 0;
@@ -669,6 +718,7 @@ export class TransactionService {
         total_balance: totalBalanceFromAPI,
         total_lkr: balanceResponse.balance_lkr,
         currency: 'LKR',
+        graph_data: graphData,
       };
 
       // Cache the result for 5 minutes (300 seconds)
