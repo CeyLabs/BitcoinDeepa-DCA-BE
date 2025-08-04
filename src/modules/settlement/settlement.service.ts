@@ -144,7 +144,7 @@ export class SettlementService {
       } else {
         // Commit the retry count update even on transfer failure
         await trx.commit();
-        
+
         if (currentRetryCount >= 5) {
           await this.dbLogger.error(
             `Settlement retry permanently failed for transaction ${payhere_pay_id} after ${currentRetryCount} attempts: ${transferResult.message}`,

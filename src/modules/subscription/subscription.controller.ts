@@ -122,7 +122,7 @@ export class SubscriptionController {
       `Payment link generated for user ${user.id}, package: ${_package.name} (${_package.amount} ${_package.currency}), order: ${orderId}`,
     );
 
-    await this.telegramLoggerService.setMessageReaction(logMessage)
+    await this.telegramLoggerService.setMessageReaction(logMessage);
     return { link };
   }
 
@@ -152,7 +152,10 @@ export class SubscriptionController {
       throw new NotFoundException('Subscription not found');
     }
 
-    await this.telegramLoggerService.appendToMessage(logMessage, `Subscription ID: <b>#SUB${subscription.payhere_sub_id}</b>`);
+    await this.telegramLoggerService.appendToMessage(
+      logMessage,
+      `Subscription ID: <b>#SUB${subscription.payhere_sub_id}</b>`,
+    );
 
     await this.dbLogger.info(
       `Cancelling subscription ${subscription.payhere_sub_id} for user ${user.id}`,

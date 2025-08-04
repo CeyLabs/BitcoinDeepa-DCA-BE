@@ -15,12 +15,29 @@ export interface FundTransferResponse {
   transaction_id?: string;
 }
 
+export interface UserBalanceRequest {
+  telegram_id: number;
+}
+
+export interface UserBalanceResponse {
+  success: boolean;
+  message?: string;
+  telegram_id?: number;
+  balance?: number; // balance in satoshis
+  balance_lkr?: string;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  created_at?: string;
+}
+
 @Injectable()
 export class BitcoinDeepaService {
   private readonly apiUrl: string;
   private readonly hmacSecret: string;
   private readonly timeout: number;
-  private readonly endpoint = '/api/v1/send';
+  private readonly sendEndpoint = '/api/v1/send';
+  private readonly balanceEndpoint = '/api/v1/userbalance';
 
   constructor(private readonly dbLogger: DatabaseLoggerService) {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
@@ -51,7 +68,7 @@ export class BitcoinDeepaService {
     memo: string,
   ): Promise<FundTransferResponse> {
     try {
-      const url = `${this.apiUrl}${this.endpoint}`;
+      const url = `${this.apiUrl}${this.sendEndpoint}`;
       const timestamp = Math.floor(Date.now() / 1000);
       const httpMethod = 'POST';
 
@@ -64,7 +81,7 @@ export class BitcoinDeepaService {
       const bodyString = JSON.stringify(requestBody);
       const signature = this.generateHmacSignature(
         httpMethod,
-        this.endpoint,
+        this.sendEndpoint,
         timestamp.toString(),
         bodyString,
       );
@@ -76,7 +93,7 @@ export class BitcoinDeepaService {
       };
 
       await this.dbLogger.info(
-        `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.endpoint}`,
+        `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.sendEndpoint}`,
       );
 
       const response = await axios.post<FundTransferResponse>(
@@ -112,6 +129,59 @@ export class BitcoinDeepaService {
   /**
    * Validate configuration on service initialization
    */
+  async getUserBalance(telegramId: number): Promise<UserBalanceResponse> {
+    try {
+      const url = `${this.apiUrl}${this.balanceEndpoint}`;
+      const timestamp = Math.floor(Date.now() / 1000);
+      const httpMethod = 'POST';
+
+      const requestBody: UserBalanceRequest = {
+        telegram_id: telegramId,
+      };
+
+      const bodyString = JSON.stringify(requestBody);
+      const signature = this.generateHmacSignature(
+        httpMethod,
+        this.balanceEndpoint,
+        timestamp.toString(),
+        bodyString,
+      );
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'X-HMAC-Signature': signature,
+        'X-Timestamp': timestamp.toString(),
+      };
+
+      await this.dbLogger.info(
+        `BitcoinDeepaService.getUserBalance: Fetching balance for user ${telegramId} at ${this.balanceEndpoint}`,
+      );
+
+      const response = await axios.post<UserBalanceResponse>(url, requestBody, {
+        headers,
+        timeout: this.timeout,
+      });
+
+      await this.dbLogger.info(
+        `BitcoinDeepaService.getUserBalance: Balance fetch successful for user ${telegramId}, status: ${response.status}`,
+      );
+
+      return response.data;
+    } catch (error: any) {
+      await this.dbLogger.error(
+        `BitcoinDeepaService.getUserBalance: Balance fetch failed for user ${telegramId}: ${error.message}`,
+      );
+
+      return {
+        success: false,
+        message:
+          error.response?.data?.message ||
+          error.message ||
+          'Balance fetch failed',
+      };
+    }
+  }
+
   isConfigured(): boolean {
     return !!(this.apiUrl && this.hmacSecret);
   }
