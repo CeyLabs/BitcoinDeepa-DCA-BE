@@ -6,6 +6,7 @@ import { AuthModule } from '../auth/auth.module';
 import { KnexModule } from '../knex/knex.module';
 import { RedisModule } from '../redis/redis.module';
 import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module';
+import { BitcoinDeepaModule } from '../bitcoindeepa/bitcoindeepa.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module'
     KnexModule,
     RedisModule,
     TelegramLoggerModule,
+    BitcoinDeepaModule,
   ],
   controllers: [TransactionController],
   providers: [TransactionService],

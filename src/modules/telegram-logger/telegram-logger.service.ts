@@ -68,7 +68,10 @@ export class TelegramLoggerService {
     await this.sendMessage(message, true);
   }
 
-  async logGenericAction(action: string, user: JwtPayload): Promise<TgMessage | null> {
+  async logGenericAction(
+    action: string,
+    user: JwtPayload,
+  ): Promise<TgMessage | null> {
     const message =
       `Action: <b>${action}</b>\n` +
       `Username: <b>${this.formatUsername(user)}</b>\n` +
@@ -76,7 +79,10 @@ export class TelegramLoggerService {
     return await this.sendMessage(message);
   }
 
-  async appendToMessage(message: TgMessage | null, appendText: string): Promise<void> {
+  async appendToMessage(
+    message: TgMessage | null,
+    appendText: string,
+  ): Promise<void> {
     if (!this.botToken || !this.logGroupId || !message || !message.id) {
       this.logger.warn(
         'Bot token, log group ID, or message ID not provided, skipping message append',
@@ -148,14 +154,20 @@ export class TelegramLoggerService {
 
       if (!response.ok) {
         const errorData = await response.json();
-        this.logger.error('Failed to set Telegram message reaction:', errorData);
+        this.logger.error(
+          'Failed to set Telegram message reaction:',
+          errorData,
+        );
       }
     } catch (error) {
       this.logger.error('Error setting Telegram message reaction:', error);
     }
   }
 
-  private async sendMessage(text: string, addReaction: boolean = false): Promise<TgMessage | null> {
+  private async sendMessage(
+    text: string,
+    addReaction: boolean = false,
+  ): Promise<TgMessage | null> {
     if (!this.botToken || !this.logGroupId) {
       this.logger.warn(
         'Bot token or log group ID not configured, skipping Telegram log',
@@ -192,7 +204,7 @@ export class TelegramLoggerService {
       const responseData = await response.json();
       const tgMessage: TgMessage = {
         text,
-        id: responseData.result?.message_id || null
+        id: responseData.result?.message_id || null,
       };
 
       // Add reaction if requested

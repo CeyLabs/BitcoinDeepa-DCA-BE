@@ -38,7 +38,9 @@ export class TransactionController {
     );
 
     try {
-      const mappedStatus = this.transactionService.getPayHereStatusMapped(body.status_code);
+      const mappedStatus = this.transactionService.getPayHereStatusMapped(
+        body.status_code,
+      );
       const logMessage = await this.telegramLoggerService.logNewTransaction(
         body.payment_id,
         body.payhere_amount,
@@ -128,7 +130,7 @@ export class TransactionController {
 
     if (summary) {
       await this.dbLogger.info(
-        `DCA summary calculated for user ${user.id}: ${summary.total_satoshis_purchased} sats, ${summary.successful_transactions} transactions`,
+        `DCA summary calculated for user ${user.id}: ${summary.dca.balance} sats, total balance: ${summary.total_balance}`,
       );
     } else {
       await this.dbLogger.info(
