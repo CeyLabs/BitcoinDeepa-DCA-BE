@@ -574,9 +574,55 @@ export class TransactionService {
 
       if (subscriptions.length === 0) {
         await this.dbLogger.info(
-          `No subscriptions found for user ${user_id} - returning null DCA summary`,
+          `No subscriptions found for user ${user_id} - returning empty DCA summary`,
         );
-        return null;
+        
+        // Fetch total balance from BitcoinDeepa API even without subscriptions
+        let totalBalanceFromAPI = 0;
+        let balanceResponse = {} as UserBalanceResponse;
+        try {
+          if (this.bitcoinDeepaService.isConfigured()) {
+            balanceResponse = await this.bitcoinDeepaService.getUserBalance(
+              parseInt(user_id, 10),
+            );
+            if (balanceResponse.success && balanceResponse.balance) {
+              totalBalanceFromAPI = balanceResponse.balance;
+            }
+          }
+        } catch (error) {
+          await this.dbLogger.warn(
+            `Failed to fetch balance from BitcoinDeepa API for user ${user_id}: ${error.message}`,
+          );
+        }
+
+        // Fetch 24hr change from CoinGecko even without subscriptions
+        let bitcoin24HrChange = 0;
+        try {
+          const change = await this.bitcoinPriceService.getBitcoin24HrChange();
+          if (typeof change === 'number') {
+            bitcoin24HrChange = change;
+          }
+        } catch (error) {
+          await this.dbLogger.warn(
+            `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error.message}`,
+          );
+        }
+
+        const emptyResult = {
+          dca: {
+            balance: 0,
+            spent: 0,
+            avg_btc_price: 0,
+          },
+          total_balance: totalBalanceFromAPI,
+          total_lkr: balanceResponse.balance_lkr || '0.00',
+          currency: 'LKR',
+          '24_hr_change': bitcoin24HrChange,
+        };
+
+        // Cache empty result for 5 minutes
+        await this.redisService.set(cacheKey, emptyResult, { ttl: 300 });
+        return emptyResult;
       }
 
       const subscriptionIds = subscriptions.map((sub) => sub.payhere_sub_id);
