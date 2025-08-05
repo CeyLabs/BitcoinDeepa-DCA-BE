@@ -58,11 +58,17 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Price caching with configurable TTL (20 seconds default)
    - Support for multiple currencies (LKR, USD, etc.)
 
+9. **Didit KYC Module** (`src/modules/didit/`)
+   - KYC (Know Your Customer) verification integration via Didit API
+   - Verification session management and webhook handling
+   - ID verification, liveness detection, face matching, and AML screening
+   - Automatic user KYC status updates via webhooks
+
 ### Database Schema
 
 **Tables:**
 - `package`: Subscription packages (UUID PK, name, frequency, amount, currency)
-- `user`: User profiles (Telegram ID as PK, personal info, address)
+- `user`: User profiles (Telegram ID as PK, personal info, address, KYC status and verification data)
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
 - `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, timestamps)
 
@@ -127,6 +133,12 @@ COINGECKO_API_KEY=your_coingecko_pro_api_key  # Optional, for better rate limits
 ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
 BITCOIN_PRICE_CACHE_TTL=20  # Cache duration in seconds (default: 20)
 
+# Didit KYC Integration
+DIDIT_API_KEY=your_didit_api_key  # Required for KYC verification
+DIDIT_BASE_URL=https://api.didit.me  # Didit API base URL (sandbox: https://sandbox.api.didit.me)
+DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Optional, for webhook signature verification
+BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
+
 # Server
 PORT=3000
 ```
@@ -143,14 +155,19 @@ PORT=3000
 
 ### User Management
 - `POST /user` - Create user profile (authenticated)
+- `POST /user/kyc/initiate` - Initiate KYC verification process (authenticated)
+- `GET /user/kyc/status` - Get current KYC verification status (authenticated)
 
 ### Packages
 - `GET /package` - List available subscription packages
 
 ### Subscriptions
 - `GET /subscription/current` - Get user's current subscription (authenticated)
-- `POST /subscription/payhere-link` - Generate PayHere payment link (authenticated)
+- `POST /subscription/payhere-link` - Generate PayHere payment link (authenticated, **requires KYC verification**)
 - `POST /subscription/cancel` - Cancel active subscription (authenticated)
+
+### KYC Verification
+- `POST /didit/webhook` - Didit webhook for KYC status updates (public)
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public)
@@ -165,8 +182,17 @@ PORT=3000
 @UseGuards(ConditionalAuthGuard)
 @Get('protected-endpoint')
 async protectedEndpoint(@CurrentUser() user: JwtPayload) {
-  // user.telegram_id contains Telegram user ID
+  // user.id contains Telegram user ID
   // When ENABLE_AUTH=false, mock user is provided
+}
+
+// Require KYC verification for sensitive operations
+@UseGuards(ConditionalAuthGuard, KycVerifiedGuard)
+@RequireKyc()
+@Post('kyc-required-endpoint')
+async kycRequiredEndpoint(@CurrentUser() user: JwtPayload) {
+  // This endpoint requires the user to have completed KYC verification
+  // Will return 403 if KYC is not verified with appropriate error message
 }
 ```
 
@@ -190,6 +216,13 @@ try {
 - Handle subscription status updates properly
 - Use OAuth tokens for API operations
 - Test with sandbox environment first
+
+### KYC Integration (Didit)
+- KYC verification is required before creating new subscriptions
+- Webhook signatures should be verified when `DIDIT_WEBHOOK_SECRET` is configured
+- Handle various verification statuses: pending, verified, rejected, expired
+- Store Didit session IDs for tracking verification progress
+- Use ID verification + liveness detection as minimum requirements
 
 ### Error Handling
 - Return appropriate HTTP status codes

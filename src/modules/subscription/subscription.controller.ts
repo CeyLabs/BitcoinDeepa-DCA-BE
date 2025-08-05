@@ -10,6 +10,8 @@ import {
 import { SubscriptionService } from './subscription.service';
 import { SubscriptionDetails } from '../../models/subscription';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
+import { KycVerifiedGuard } from '../auth/kyc-verified.guard';
+import { RequireKyc } from '../auth/require-kyc.decorator';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { PayHereService } from '../payhere/payhere.service';
@@ -60,7 +62,8 @@ export class SubscriptionController {
   }
 
   @Post('payhere-link')
-  @UseGuards(ConditionalAuthGuard)
+  @UseGuards(ConditionalAuthGuard, KycVerifiedGuard)
+  @RequireKyc()
   async getPayHereLink(
     @CurrentUser() user: JwtPayload,
     @Body() body: { package_id: string },
