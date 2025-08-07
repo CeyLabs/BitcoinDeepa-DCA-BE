@@ -105,8 +105,7 @@ export class UserController {
 
       return {
         session_id: session.session_id,
-        verification_url: session.verification_url,
-        expires_at: session.expires_at,
+        url: session.url,
       };
     } catch (error) {
       await this.telegramLoggerService.setMessageReaction(logMessage);

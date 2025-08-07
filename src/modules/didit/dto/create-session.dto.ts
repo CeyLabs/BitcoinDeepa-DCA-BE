@@ -9,7 +9,6 @@ export interface CreateSessionDto {
 
 export interface CreateSessionResponse {
   session_id: string;
-  verification_url: string;
-  expires_at: string;
+  url: string;
   status: string;
 }
