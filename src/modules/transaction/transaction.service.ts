@@ -576,7 +576,7 @@ export class TransactionService {
         await this.dbLogger.info(
           `No subscriptions found for user ${user_id} - returning empty DCA summary`,
         );
-        
+
         // Fetch total balance from BitcoinDeepa API even without subscriptions
         let totalBalanceFromAPI = 0;
         let balanceResponse = {} as UserBalanceResponse;
