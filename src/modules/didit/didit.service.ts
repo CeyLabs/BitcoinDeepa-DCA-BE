@@ -139,6 +139,57 @@ export class DiditService {
     }
   }
 
+  async getSessionDetails(sessionId: string): Promise<{ url: string } | null> {
+    if (!this.apiKey) {
+      throw new HttpException(
+        'Didit API not configured',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
+    try {
+      const response = await fetch(`${this.baseUrl}/v2/session/${sessionId}/decision/`, {
+        method: 'GET',
+        headers: {
+          'accept': 'application/json',
+          'x-api-key': this.apiKey,
+        },
+      });
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          this.logger.warn(`Didit session ${sessionId} not found`);
+          return null;
+        }
+        const errorText = await response.text();
+        this.logger.error(
+          `Failed to get Didit session details: ${response.status} ${errorText}`,
+        );
+        throw new HttpException(
+          `Failed to get session details: ${response.statusText}`,
+          response.status,
+        );
+      }
+
+      const result = await response.json();
+      return {
+        url: result.session_url || null
+      };
+    } catch (error) {
+      this.logger.error(
+        `Error getting Didit session details for ${sessionId}:`,
+        error,
+      );
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        'Failed to get session details',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     if (!this.apiKey) {
       throw new HttpException(

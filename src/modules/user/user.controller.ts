@@ -120,6 +120,20 @@ export class UserController {
     if (!status) {
       throw new HttpException('User not found', HttpStatus.NOT_FOUND);
     }
-    return status;
+
+    let url: string | null = null;
+    
+    if (status.session_id) {
+      try {
+        const sessionDetails = await this.diditService.getSessionDetails(status.session_id);
+        url = sessionDetails?.url || null;
+      } catch (error) {
+      }
+    }
+
+    return {
+      ...status,
+      url,
+    };
   }
 }

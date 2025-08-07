@@ -70,6 +70,7 @@ export class UserService {
     status: KycStatusType;
     verified_at?: Date;
     rejection_reason?: string;
+    session_id?: string;
   } | null> {
     const user = await this.getUserById(userId);
     if (!user) {
@@ -80,6 +81,7 @@ export class UserService {
       status: user.kyc_status || KycStatus.NOT_STARTED,
       verified_at: user.kyc_verified_at,
       rejection_reason: user.kyc_rejection_reason,
+      session_id: user.kyc_session_id,
     };
   }
 }
