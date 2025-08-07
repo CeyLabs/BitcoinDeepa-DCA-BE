@@ -17,6 +17,7 @@ import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { CreateUserDto } from './dto/create-user.dto';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { DiditService } from '../didit/didit.service';
+import { KycStatus } from './enums/kyc-status.enum';
 
 @Controller('user')
 export class UserController {
@@ -72,13 +73,13 @@ export class UserController {
 
     // Check if user already has approved KYC or verification in progress
     const currentStatus = await this.userService.getKycStatus(user.id);
-    if (currentStatus?.status === 'Approved') {
+    if (currentStatus?.status === KycStatus.APPROVED) {
       throw new HttpException('KYC already verified', HttpStatus.BAD_REQUEST);
     }
 
     if (
-      currentStatus?.status === 'In Progress' ||
-      currentStatus?.status === 'In Review'
+      currentStatus?.status === KycStatus.IN_PROGRESS ||
+      currentStatus?.status === KycStatus.IN_REVIEW
     ) {
       throw new HttpException(
         'KYC verification already in progress',

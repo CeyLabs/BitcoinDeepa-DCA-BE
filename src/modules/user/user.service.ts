@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
+import { KycStatus, KycStatusType } from './enums/kyc-status.enum';
 
 export interface User {
   id: string;
@@ -10,30 +11,14 @@ export interface User {
   address: string;
   city: string;
   country: string;
-  kyc_status?:
-    | 'Not Started'
-    | 'In Progress'
-    | 'Approved'
-    | 'Declined'
-    | 'Kyc Expired'
-    | 'In Review'
-    | 'Expired'
-    | 'Abandoned';
+  kyc_status?: KycStatusType;
   kyc_session_id?: string;
   kyc_verified_at?: Date;
   kyc_rejection_reason?: string;
 }
 
 export interface KycStatusUpdate {
-  kyc_status:
-    | 'Not Started'
-    | 'In Progress'
-    | 'Approved'
-    | 'Declined'
-    | 'Kyc Expired'
-    | 'In Review'
-    | 'Expired'
-    | 'Abandoned';
+  kyc_status: KycStatusType;
   kyc_verified_at?: Date | null;
   kyc_rejection_reason?: string | null;
 }
@@ -58,7 +43,7 @@ export class UserService {
   async updateKycSessionId(userId: string, sessionId: string): Promise<void> {
     await this.knexService.knex('user').where('id', userId).update({
       kyc_session_id: sessionId,
-      kyc_status: 'In Progress',
+      kyc_status: KycStatus.IN_PROGRESS,
     });
   }
 
@@ -78,19 +63,11 @@ export class UserService {
 
   async isKycVerified(userId: string): Promise<boolean> {
     const user = await this.getUserById(userId);
-    return user?.kyc_status === 'Approved';
+    return user?.kyc_status === KycStatus.APPROVED;
   }
 
   async getKycStatus(userId: string): Promise<{
-    status:
-      | 'Not Started'
-      | 'In Progress'
-      | 'Approved'
-      | 'Declined'
-      | 'Kyc Expired'
-      | 'In Review'
-      | 'Expired'
-      | 'Abandoned';
+    status: KycStatusType;
     verified_at?: Date;
     rejection_reason?: string;
   } | null> {
@@ -100,7 +77,7 @@ export class UserService {
     }
 
     return {
-      status: user.kyc_status || 'Not Started',
+      status: user.kyc_status || KycStatus.NOT_STARTED,
       verified_at: user.kyc_verified_at,
       rejection_reason: user.kyc_rejection_reason,
     };

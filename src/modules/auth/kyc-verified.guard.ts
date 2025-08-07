@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { UserService } from '../user/user.service';
 import { JwtPayload } from './auth.service';
+import { KycStatus } from '../user/enums/kyc-status.enum';
 
 @Injectable()
 export class KycVerifiedGuard implements CanActivate {
@@ -38,22 +39,22 @@ export class KycVerifiedGuard implements CanActivate {
       const kycStatus = await this.userService.getKycStatus(user.id);
 
       let message = 'KYC verification required';
-      if (kycStatus?.status === 'Declined') {
+      if (kycStatus?.status === KycStatus.DECLINED) {
         message = `KYC verification declined: ${kycStatus.rejection_reason || 'Please retry verification'}`;
-      } else if (kycStatus?.status === 'Expired') {
+      } else if (kycStatus?.status === KycStatus.EXPIRED) {
         message = 'KYC verification session has expired. Please verify again';
-      } else if (kycStatus?.status === 'Kyc Expired') {
+      } else if (kycStatus?.status === KycStatus.KYC_EXPIRED) {
         message = 'Previous KYC verification has expired. Please verify again';
-      } else if (kycStatus?.status === 'Abandoned') {
+      } else if (kycStatus?.status === KycStatus.ABANDONED) {
         message =
           'KYC verification was abandoned. Please complete the verification process';
-      } else if (kycStatus?.status === 'Not Started') {
+      } else if (kycStatus?.status === KycStatus.NOT_STARTED) {
         message =
           'KYC verification not started. Please complete the verification process';
-      } else if (kycStatus?.status === 'In Progress') {
+      } else if (kycStatus?.status === KycStatus.IN_PROGRESS) {
         message =
           'KYC verification is in progress. Please complete the verification process';
-      } else if (kycStatus?.status === 'In Review') {
+      } else if (kycStatus?.status === KycStatus.IN_REVIEW) {
         message =
           'KYC verification is under manual review. Please wait for completion';
       }

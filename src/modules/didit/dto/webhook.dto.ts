@@ -1,14 +1,8 @@
+import { DiditStatusType } from '../../user/enums/kyc-status.enum';
+
 export interface WebhookDto {
   session_id: string;
-  status:
-    | 'Not Started'
-    | 'In Progress'
-    | 'Approved'
-    | 'Declined'
-    | 'Kyc Expired'
-    | 'In Review'
-    | 'Expired'
-    | 'Abandoned';
+  status: DiditStatusType;
   verification_results?: {
     id_verification?: {
       status: 'passed' | 'failed';

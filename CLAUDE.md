@@ -63,6 +63,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Verification session management and webhook handling
    - ID verification, liveness detection, face matching, and AML screening
    - Automatic user KYC status updates via webhooks
+   - Uses strongly typed KYC status enum for database consistency
 
 ### Database Schema
 

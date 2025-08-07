@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { DiditService } from './didit.service';
 import { UserService } from '../user/user.service';
 import { WebhookDto } from './dto/webhook.dto';
+import { KycStatus, DiditStatusMapping } from '../user/enums/kyc-status.enum';
 import * as crypto from 'crypto';
 
 @Controller('didit')
@@ -86,23 +87,16 @@ export class DiditController {
     let rejectionReason: string | null = null;
     let verifiedAt: Date | null = null;
 
-    // Use Didit's status directly, but handle 'Approved' specially
-    let kycStatus = webhookData.status;
+    // Map Didit's status to our database enum
+    const dbStatus = DiditStatusMapping[webhookData.status];
+    if (!dbStatus) {
+      this.logger.warn(`Unknown Didit status: ${webhookData.status}`);
+      return;
+    }
 
     if (webhookData.status === 'Approved') {
-      // Check if verification was actually successful
-      const isSuccessful = this.isVerificationSuccessful(webhookData);
-      if (isSuccessful) {
-        verifiedAt = new Date();
-        this.logger.log(`KYC verification successful for user ${userId}`);
-      } else {
-        // If approved but verification checks failed, mark as declined
-        kycStatus = 'Declined';
-        rejectionReason = this.getFailureReason(webhookData);
-        this.logger.log(
-          `KYC verification approved but failed checks for user ${userId}: ${rejectionReason}`,
-        );
-      }
+      verifiedAt = new Date();
+      this.logger.log(`KYC verification successful for user ${userId}`);
     } else {
       // For other statuses - set appropriate rejection reason
       if (webhookData.status === 'Declined') {
@@ -122,27 +116,14 @@ export class DiditController {
       );
     }
 
-    // Update user's KYC status
+    // Update user's KYC status using database enum value
     await this.userService.updateKycStatus(userId, {
-      kyc_status: kycStatus,
+      kyc_status: dbStatus,
       kyc_verified_at: verifiedAt,
       kyc_rejection_reason: rejectionReason,
     });
 
-    this.logger.log(`Updated KYC status for user ${userId} to ${kycStatus}`);
-  }
-
-  private isVerificationSuccessful(webhookData: WebhookDto): boolean {
-    const results = webhookData.verification_results;
-    if (!results) {
-      return false;
-    }
-
-    // Check if all required verifications passed
-    const idVerificationPassed = results.id_verification?.status === 'passed';
-    const livenessPassed = results.liveness_detection?.status === 'passed';
-
-    return idVerificationPassed && livenessPassed;
+    this.logger.log(`Updated KYC status for user ${userId} to ${dbStatus} (from Didit: ${webhookData.status})`);
   }
 
   private getFailureReason(webhookData: WebhookDto): string {
