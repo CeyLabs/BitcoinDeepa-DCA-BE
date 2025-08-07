@@ -12,9 +12,11 @@ export class DiditService {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly workflowId: string;
+  private readonly redirectUrl: string;
 
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('DIDIT_API_KEY') || '';
+    this.redirectUrl = this.configService.get<string>('DIDIT_REDIRECT_URL') || '';
     this.baseUrl =
       this.configService.get<string>('DIDIT_BASE_URL') ||
       'https://verification.didit.me';
@@ -42,6 +44,8 @@ export class DiditService {
 
     const payload = {
       workflow_id: this.workflowId,
+      vendor_data: userId,
+      callback: this.redirectUrl,
       ...options,
     };
 
