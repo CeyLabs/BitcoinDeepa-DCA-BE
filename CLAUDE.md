@@ -137,7 +137,7 @@ BITCOIN_PRICE_CACHE_TTL=20  # Cache duration in seconds (default: 20)
 DIDIT_API_KEY=your_didit_api_key  # Required for KYC verification
 DIDIT_BASE_URL=https://api.didit.me  # Didit API base URL (sandbox: https://sandbox.api.didit.me)
 DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Optional, for webhook signature verification
-BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
+DIDIT_CALLBACK_BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
 
 # Server
 PORT=3000

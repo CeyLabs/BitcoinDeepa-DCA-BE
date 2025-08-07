@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { UserService } from './user.service';
 import { UserController } from './user.controller';
 import { AuthModule } from '../auth/auth.module';
@@ -7,7 +7,7 @@ import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module'
 import { DiditModule } from '../didit/didit.module';
 
 @Module({
-  imports: [AuthModule, KnexModule, TelegramLoggerModule, DiditModule],
+  imports: [AuthModule, KnexModule, TelegramLoggerModule, forwardRef(() => DiditModule)],
   providers: [UserService],
   exports: [UserService],
   controllers: [UserController],

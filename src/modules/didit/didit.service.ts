@@ -11,16 +11,20 @@ export class DiditService {
   private readonly logger = new Logger(DiditService.name);
   private readonly apiKey: string;
   private readonly baseUrl: string;
+  private readonly workflowId: string;
 
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('DIDIT_API_KEY') || '';
     this.baseUrl =
       this.configService.get<string>('DIDIT_BASE_URL') ||
-      'https://api.didit.me';
+      'https://verification.didit.me';
 
-    if (!this.apiKey) {
+      this.workflowId =
+      this.configService.get<string>('DIDIT_WORKFLOW_ID') || ''
+
+    if (!this.apiKey || !this.workflowId) {
       this.logger.warn(
-        'DIDIT_API_KEY not configured - KYC functionality will be disabled',
+        'DIDIT_API_KEY or DIDIT_WORKFLOW_ID not configured - KYC functionality will be disabled',
       );
     }
   }
@@ -29,30 +33,27 @@ export class DiditService {
     userId: string,
     options?: Partial<CreateSessionDto>,
   ): Promise<CreateSessionResponse> {
-    if (!this.apiKey) {
+    if (!this.apiKey || !this.workflowId) {
       throw new HttpException(
         'Didit API not configured',
         HttpStatus.SERVICE_UNAVAILABLE,
       );
     }
 
-    const defaultOptions: CreateSessionDto = {
-      verification_types: ['id_verification', 'liveness_detection'],
-      webhook_url: `${this.configService.get<string>('BASE_URL')}/didit/webhook`,
-      language: 'en',
-      expiry_time: 24 * 60 * 60, // 24 hours
-      reference_id: userId,
+    const payload = {
+      workflow_id: this.workflowId,
       ...options,
     };
 
     try {
-      const response = await fetch(`${this.baseUrl}/v1/sessions`, {
+      const response = await fetch(`${this.baseUrl}/v2/session/`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json',
+          'accept': 'application/json',
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
         },
-        body: JSON.stringify(defaultOptions),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -96,12 +97,15 @@ export class DiditService {
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/v1/sessions/${sessionId}`, {
+      const response = await fetch(`${this.baseUrl}/v2/session/${sessionId}/decision/`, {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          'accept': 'application/json',
+          'x-api-key': this.apiKey,
         },
       });
+
+      console.log(response)
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -143,7 +147,7 @@ export class DiditService {
       const response = await fetch(`${this.baseUrl}/v1/sessions/${sessionId}`, {
         method: 'DELETE',
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          'x-api-key': this.apiKey,
         },
       });
 
