@@ -8,6 +8,7 @@ import { TransactionModule } from './modules/transaction/transaction.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { HealthModule } from './modules/health/health.module';
 import { SettlementModule } from './modules/settlement/settlement.module';
+import { DiditModule } from './modules/didit/didit.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { SettlementModule } from './modules/settlement/settlement.module';
     TransactionModule,
     HealthModule,
     SettlementModule,
+    DiditModule,
   ],
 })
 export class AppModule {}
