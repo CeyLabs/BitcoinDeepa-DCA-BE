@@ -2,10 +2,17 @@ import type { Knex } from 'knex';
 
 export async function up(knex: Knex): Promise<void> {
   const analyticsPassword = process.env.ANALYTICS_READONLY_PASSWORD;
+  const databaseName = process.env.PG_DB;
 
   if (!analyticsPassword) {
     throw new Error(
       'ANALYTICS_READONLY_PASSWORD environment variable is required for this migration',
+    );
+  }
+
+  if (!databaseName) {
+    throw new Error(
+      'PG_DB environment variable is required for this migration',
     );
   }
 
@@ -31,7 +38,7 @@ export async function up(knex: Knex): Promise<void> {
 
   // 3. Grant connect permission to the database
   await knex.raw(`
-    GRANT CONNECT ON DATABASE railway TO analytics_readonly
+    GRANT CONNECT ON DATABASE ${databaseName} TO analytics_readonly
   `);
 
   // 4. Grant usage on the schema
@@ -65,6 +72,14 @@ export async function up(knex: Knex): Promise<void> {
 }
 
 export async function down(knex: Knex): Promise<void> {
+  const databaseName = process.env.PG_DB;
+
+  if (!databaseName) {
+    throw new Error(
+      'PG_DB environment variable is required for this migration rollback',
+    );
+  }
+
   // Revoke all permissions and drop user
   await knex.raw(`
     REVOKE SELECT ON user_public FROM analytics_readonly
@@ -79,7 +94,7 @@ export async function down(knex: Knex): Promise<void> {
   `);
 
   await knex.raw(`
-    REVOKE CONNECT ON DATABASE railway FROM analytics_readonly
+    REVOKE CONNECT ON DATABASE ${databaseName} FROM analytics_readonly
   `);
 
   await knex.raw(`
