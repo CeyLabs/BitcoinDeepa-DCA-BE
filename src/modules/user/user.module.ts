@@ -7,7 +7,12 @@ import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module'
 import { DiditModule } from '../didit/didit.module';
 
 @Module({
-  imports: [AuthModule, KnexModule, TelegramLoggerModule, forwardRef(() => DiditModule)],
+  imports: [
+    AuthModule,
+    KnexModule,
+    TelegramLoggerModule,
+    forwardRef(() => DiditModule),
+  ],
   providers: [UserService],
   exports: [UserService],
   controllers: [UserController],

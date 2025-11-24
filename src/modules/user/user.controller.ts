@@ -122,13 +122,14 @@ export class UserController {
     }
 
     let url: string | null = null;
-    
+
     if (status.session_id) {
       try {
-        const sessionDetails = await this.diditService.getSessionDetails(status.session_id);
+        const sessionDetails = await this.diditService.getSessionDetails(
+          status.session_id,
+        );
         url = sessionDetails?.url || null;
-      } catch (error) {
-      }
+      } catch (error) {}
     }
 
     return {

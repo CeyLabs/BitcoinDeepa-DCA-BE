@@ -13,12 +13,12 @@ export enum KycStatus {
 export const DiditStatusMapping: Record<string, KycStatus> = {
   'Not Started': KycStatus.NOT_STARTED,
   'In Progress': KycStatus.IN_PROGRESS,
-  'Approved': KycStatus.APPROVED,
-  'Declined': KycStatus.DECLINED,
+  Approved: KycStatus.APPROVED,
+  Declined: KycStatus.DECLINED,
   'Kyc Expired': KycStatus.KYC_EXPIRED,
   'In Review': KycStatus.IN_REVIEW,
-  'Expired': KycStatus.EXPIRED,
-  'Abandoned': KycStatus.ABANDONED,
+  Expired: KycStatus.EXPIRED,
+  Abandoned: KycStatus.ABANDONED,
 };
 
 // Reverse mapping from our database values to Didit's API values
@@ -34,4 +34,12 @@ export const DatabaseToDiditMapping: Record<KycStatus, string> = {
 };
 
 export type KycStatusType = `${KycStatus}`;
-export type DiditStatusType = 'Not Started' | 'In Progress' | 'Approved' | 'Declined' | 'Kyc Expired' | 'In Review' | 'Expired' | 'Abandoned';
+export type DiditStatusType =
+  | 'Not Started'
+  | 'In Progress'
+  | 'Approved'
+  | 'Declined'
+  | 'Kyc Expired'
+  | 'In Review'
+  | 'Expired'
+  | 'Abandoned';
