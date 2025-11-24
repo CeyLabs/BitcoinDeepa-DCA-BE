@@ -179,8 +179,28 @@ export class SettlementService {
         }
       }
     } catch (error) {
-      // Rollback if we haven't committed yet
-      await trx.rollback();
+      // Only rollback if transaction hasn't been committed yet
+      // Attempting to rollback an already-committed transaction will throw an error
+      if (!trx.isCompleted()) {
+        try {
+          await trx.rollback();
+          await this.dbLogger.info(
+            `Transaction rolled back for ${payhere_pay_id} due to error before commit`,
+          );
+        } catch (rollbackError) {
+          // Log rollback failure but don't mask the original error
+          await this.dbLogger.error(
+            `Failed to rollback transaction ${payhere_pay_id}: ${rollbackError.message}`,
+          );
+        }
+      } else {
+        // Transaction was already committed - error happened after commit (e.g., during API call)
+        // The retry_count has been incremented, which is correct behavior
+        // The transaction will be retried on the next cron run
+        await this.dbLogger.warn(
+          `Error occurred after commit for transaction ${payhere_pay_id} - retry_count already updated, will retry on next cron run`,
+        );
+      }
 
       await this.dbLogger.error(
         `Settlement retry error for transaction ${payhere_pay_id}: ${error.message}`,
