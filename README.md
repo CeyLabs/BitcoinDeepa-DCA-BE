@@ -184,4 +184,4 @@ Authorization: Bearer <jwt_token>
 
 ---
 
-For more details, see the code and comments in each module. 
+For more details, see the code and comments in each module.

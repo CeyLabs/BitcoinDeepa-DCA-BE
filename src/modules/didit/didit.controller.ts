@@ -123,7 +123,9 @@ export class DiditController {
       kyc_rejection_reason: rejectionReason,
     });
 
-    this.logger.log(`Updated KYC status for user ${userId} to ${dbStatus} (from Didit: ${webhookData.status})`);
+    this.logger.log(
+      `Updated KYC status for user ${userId} to ${dbStatus} (from Didit: ${webhookData.status})`,
+    );
   }
 
   private getFailureReason(webhookData: WebhookDto): string {
