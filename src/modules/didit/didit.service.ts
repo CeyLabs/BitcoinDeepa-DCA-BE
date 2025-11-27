@@ -112,8 +112,6 @@ export class DiditService {
         },
       );
 
-      console.log(response);
-
       if (!response.ok) {
         const errorText = await response.text();
         this.logger.error(
