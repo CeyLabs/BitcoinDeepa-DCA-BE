@@ -21,6 +21,16 @@ import { randomUUID } from 'crypto';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 
+const nameMap = {
+  '🦐⏳ Shrimp Weekly': 'Shrimp Weekly',
+  '🦀⏳ Crab Weekly': 'Crab Weekly',
+  '🦈⏳ Shark Weekly': 'Shark Weekly',
+  '🐳⏳ Whale Weekly': 'Whale Weekly',
+  '🦐📆 Shrimp Monthly': 'Shrimp Monthly',
+  '🦀📆 Crab Monthly': 'Crab Monthly',
+  '🦈📆 Shark Monthly': 'Shark Monthly',
+}
+
 @Controller('subscription')
 export class SubscriptionController {
   constructor(
@@ -115,7 +125,7 @@ export class SubscriptionController {
       address: _user.address,
       city: _user.city,
       country: _user.country,
-      items: _package.name,
+      items: nameMap[_package.name],
       recurrence: _package.frequency === 'weekly' ? '1 Week' : '1 Month',
       duration: 'Forever',
       type: 'checkout',
