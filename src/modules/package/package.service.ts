@@ -59,7 +59,8 @@ export class PackageService implements OnModuleDestroy {
     const packages = await this.knexService
       .knex<Package>('package')
       .select('*')
-      .orderBy('created_at', 'asc');
+      .orderBy('frequency', 'desc')
+      .orderBy('amount', 'asc');
 
     try {
       // Cache the result for 1 hour (3600 seconds) in Redis
