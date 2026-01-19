@@ -26,6 +26,7 @@ const nameMap = {
   '🦀⏳ Crab Weekly': 'Crab Weekly',
   '🦈⏳ Shark Weekly': 'Shark Weekly',
   '🐳⏳ Whale Weekly': 'Whale Weekly',
+  '🐋⏳ Blue Whale Weekly': 'Blue Whale Weekly',
   '🦐📆 Shrimp Monthly': 'Shrimp Monthly',
   '🦀📆 Crab Monthly': 'Crab Monthly',
   '🦈📆 Shark Monthly': 'Shark Monthly',
