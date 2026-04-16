@@ -18,7 +18,7 @@ export async function up(knex: Knex): Promise<void> {
 
   // 1. Create the sanitized view for user table
   await knex.raw(`
-    CREATE VIEW user_public AS
+    CREATE OR REPLACE VIEW user_public AS
     SELECT
         id,
         created_at,
@@ -31,10 +31,16 @@ export async function up(knex: Knex): Promise<void> {
         "user"
   `);
 
-  // 2. Create the analytics readonly user
+  // 2. Create the analytics readonly user (skip if exists)
   await knex.raw(`
-    CREATE USER analytics_readonly WITH PASSWORD ?
-  `, [analyticsPassword]);
+    DO $$
+    BEGIN
+      CREATE USER analytics_readonly WITH PASSWORD '${analyticsPassword}';
+    EXCEPTION WHEN duplicate_object THEN
+      RAISE NOTICE 'User analytics_readonly already exists, skipping';
+    END
+    $$;
+  `);
 
   // 3. Grant connect permission to the database
   await knex.raw(`
