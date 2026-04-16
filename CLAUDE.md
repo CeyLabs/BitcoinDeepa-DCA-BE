@@ -71,7 +71,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - `package`: Subscription packages (UUID PK, name, frequency, amount, currency)
 - `user`: User profiles (Telegram ID as PK, personal info, address, KYC status and verification data)
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
-- `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, timestamps)
+- `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
 
 **Relationships:**
 - Users → Subscriptions (1:many)
@@ -133,6 +133,9 @@ PAYHERE_BASE_URL=https://sandbox.payhere.lk  # or production URL
 COINGECKO_API_KEY=your_coingecko_pro_api_key  # Optional, for better rate limits
 ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
 BITCOIN_PRICE_CACHE_TTL=20  # Cache duration in seconds (default: 20)
+
+# Fee Configuration
+FEE_BASIS_POINTS=100  # Platform fee in basis points (1 bp = 0.01%, 100 = 1%, 250 = 2.5%)
 
 # Didit KYC Integration
 DIDIT_API_KEY=your_didit_api_key  # Required for KYC verification
@@ -255,6 +258,39 @@ try {
 - `CANCELLED`: Payment cancelled by user
 - `FAILED`: Payment failed
 - `CHARGEBACK`: Payment reversed
+
+### Fee System
+
+The platform implements a percentage-based fee system using basis points:
+
+**Configuration:**
+- Fees are configured via `FEE_BASIS_POINTS` environment variable
+- 1 basis point (bp) = 0.01%
+- Default: 100 basis points = 1%
+- Examples: 250 bps = 2.5%, 500 bps = 5%
+
+**Fee Calculation:**
+```typescript
+fee_amount = gross_amount × (fee_basis_points ÷ 10000)
+net_amount = gross_amount - fee_amount
+satoshis_purchased = (net_amount ÷ btc_price) × 100,000,000
+```
+
+**Transaction Fee Fields:**
+- `gross_amount`: Original package amount from PayHere
+- `fee_basis_points`: Fee percentage at transaction time (for historical tracking)
+- `fee_amount`: Calculated fee in LKR
+- `net_amount`: Amount after fee deduction (used for Bitcoin purchase)
+- `satoshis_purchased`: Calculated using net_amount only
+
+**Example:**
+- Package amount: 1000 LKR
+- Fee (100 bps = 1%): 10 LKR
+- Net amount: 990 LKR
+- Bitcoin purchased: 990 LKR worth of satoshis
+
+**Testing:**
+Run `npx ts-node scripts/test-fee-calculation.ts` to see fee calculations with different scenarios.
 
 ## File Organization
 

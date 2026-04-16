@@ -44,6 +44,10 @@ export interface Transaction {
   settled?: boolean;
   retry_count?: number;
   last_retry_at?: Date;
+  gross_amount?: number;
+  fee_basis_points?: number;
+  fee_amount?: number;
+  net_amount?: number;
   created_at?: Date;
   updated_at?: Date;
 }
@@ -234,18 +238,18 @@ export class TransactionService {
       if (user_id) {
         try {
           await this.invalidateUserTransactionCaches(user_id);
-        } catch (cacheError) {
+        } catch (cacheError: unknown) {
           // Log cache error but don't fail the operation since DB operation succeeded
           await this.dbLogger.warn(
-            `Failed to invalidate cache after successful transaction processing ${payment_id}: ${cacheError.message}`,
+            `Failed to invalidate cache after successful transaction processing ${payment_id}: ${cacheError instanceof Error ? cacheError.message : String(cacheError)}`,
           );
         }
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // Rollback all changes on any error
       await trx.rollback();
       await this.dbLogger.error(
-        `Atomic processing failed for payment_id ${payment_id}: ${error.message}`,
+        `Atomic processing failed for payment_id ${payment_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       throw error;
     }
@@ -262,9 +266,9 @@ export class TransactionService {
         `Transaction inserted into database: ${transaction.payhere_pay_id}`,
       );
       return result[0] as Transaction;
-    } catch (error) {
+    } catch (error: unknown) {
       await this.dbLogger.error(
-        `Failed to insert transaction ${transaction.payhere_pay_id}: ${error.message}`,
+        `Failed to insert transaction ${transaction.payhere_pay_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       throw error;
     }
@@ -290,6 +294,10 @@ export class TransactionService {
     satoshis_purchased: number;
     price_currency: string;
     coingecko_timestamp: Date;
+    gross_amount: number;
+    fee_basis_points: number;
+    fee_amount: number;
+    net_amount: number;
   } | null> {
     try {
       // Check if Bitcoin tracking is enabled
@@ -300,21 +308,42 @@ export class TransactionService {
         return null;
       }
 
-      await this.dbLogger.info(
-        `Fetching Bitcoin price for ${amount} ${currency}`,
+      // Get fee configuration from environment (default to 100 basis points = 1%)
+      const feeBasisPoints = parseInt(
+        process.env.FEE_BASIS_POINTS || '100',
+        10,
       );
+
+      // Store gross amount (original package amount)
+      const grossAmount = amount;
+
+      // Calculate fee amount (basis points / 10000)
+      // Example: 100 basis points = 1% = 100/10000 = 0.01
+      const feeAmount = new Big(grossAmount)
+        .times(feeBasisPoints)
+        .div(10000)
+        .toNumber();
+
+      // Calculate net amount after fee
+      const netAmount = new Big(grossAmount).minus(feeAmount).toNumber();
+
+      await this.dbLogger.info(
+        `Calculating Bitcoin for ${grossAmount} ${currency}: fee=${feeAmount} ${currency} (${feeBasisPoints} bps), net=${netAmount} ${currency}`,
+      );
+
+      // Use net amount for satoshi calculation
       const bitcoinCalculation =
-        await this.bitcoinPriceService.calculateSatoshis(amount, currency);
+        await this.bitcoinPriceService.calculateSatoshis(netAmount, currency);
 
       if (!bitcoinCalculation) {
         await this.dbLogger.warn(
-          `Failed to fetch Bitcoin price for ${amount} ${currency} - CoinGecko API may be unavailable`,
+          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - CoinGecko API may be unavailable`,
         );
         return null;
       }
 
       await this.dbLogger.info(
-        `Bitcoin DCA calculation: ${amount} ${currency} = ${bitcoinCalculation.satoshis} satoshis at ${bitcoinCalculation.btc_price} ${currency}/BTC`,
+        `Bitcoin DCA calculation: ${netAmount} ${currency} (after ${feeAmount} ${currency} fee) = ${bitcoinCalculation.satoshis} satoshis at ${bitcoinCalculation.btc_price} ${currency}/BTC`,
       );
 
       return {
@@ -322,10 +351,14 @@ export class TransactionService {
         satoshis_purchased: bitcoinCalculation.satoshis,
         price_currency: bitcoinCalculation.currency,
         coingecko_timestamp: bitcoinCalculation.timestamp,
+        gross_amount: grossAmount,
+        fee_basis_points: feeBasisPoints,
+        fee_amount: feeAmount,
+        net_amount: netAmount,
       };
-    } catch (error) {
+    } catch (error: unknown) {
       await this.dbLogger.error(
-        `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${error.message}`,
+        `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -449,9 +482,9 @@ export class TransactionService {
       );
 
       return result;
-    } catch (error) {
+    } catch (error: unknown) {
       await this.dbLogger.error(
-        `Error fetching paginated transactions for user ${user_id}: ${error.message}`,
+        `Error fetching paginated transactions for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       throw error;
     }
@@ -524,9 +557,9 @@ export class TransactionService {
       }
 
       return result || null;
-    } catch (error) {
+    } catch (error: unknown) {
       await this.dbLogger.error(
-        `Error fetching latest transaction for user ${user_id}: ${error.message}`,
+        `Error fetching latest transaction for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -589,9 +622,9 @@ export class TransactionService {
               totalBalanceFromAPI = balanceResponse.balance;
             }
           }
-        } catch (error) {
+        } catch (error: unknown) {
           await this.dbLogger.warn(
-            `Failed to fetch balance from BitcoinDeepa API for user ${user_id}: ${error.message}`,
+            `Failed to fetch balance from BitcoinDeepa API for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
 
@@ -602,9 +635,9 @@ export class TransactionService {
           if (typeof change === 'number') {
             bitcoin24HrChange = change;
           }
-        } catch (error) {
+        } catch (error: unknown) {
           await this.dbLogger.warn(
-            `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error.message}`,
+            `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
 
@@ -700,9 +733,9 @@ export class TransactionService {
             totalBalanceFromAPI = balanceResponse.balance;
           }
         }
-      } catch (error) {
+      } catch (error: unknown) {
         await this.dbLogger.warn(
-          `Failed to fetch balance from BitcoinDeepa API for user ${user_id}: ${error.message}`,
+          `Failed to fetch balance from BitcoinDeepa API for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
 
@@ -713,9 +746,9 @@ export class TransactionService {
         if (typeof change === 'number') {
           bitcoin24HrChange = change;
         }
-      } catch (error) {
+      } catch (error: unknown) {
         await this.dbLogger.warn(
-          `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error.message}`,
+          `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
 
@@ -739,9 +772,9 @@ export class TransactionService {
         `DCA summary calculated for user ${user_id}: ${totalSatoshis.toString()} total sats, ${totalSpent.toFixed(2)} ${summary.currency} spent, avg price ${averageBTCPrice.toFixed(2)}`,
       );
       return summary;
-    } catch (error) {
+    } catch (error: unknown) {
       await this.dbLogger.error(
-        `Error calculating DCA summary for user ${user_id}: ${error.message}`,
+        `Error calculating DCA summary for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -801,10 +834,10 @@ export class TransactionService {
             `Package ${package_id} not found for Telegram logging`,
           );
         }
-      } catch (telegramError) {
+      } catch (telegramError: unknown) {
         // Don't fail subscription creation if Telegram logging fails
         await this.dbLogger.error(
-          `Failed to log subscription creation to Telegram: ${telegramError.message}`,
+          `Failed to log subscription creation to Telegram: ${telegramError instanceof Error ? telegramError.message : String(telegramError)}`,
         );
       }
     } else {
@@ -851,9 +884,9 @@ export class TransactionService {
       await this.dbLogger.info(
         `Invalidated all transaction caches for user: ${user_id}`,
       );
-    } catch (error) {
+    } catch (error: unknown) {
       await this.dbLogger.error(
-        `Error invalidating transaction caches for user ${user_id}: ${error.message}`,
+        `Error invalidating transaction caches for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
