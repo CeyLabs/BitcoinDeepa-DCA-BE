@@ -33,6 +33,11 @@ export interface PayHereNotificationParams {
 
 type Status = 'SUCCESS' | 'PENDING' | 'CANCELLED' | 'FAILED' | 'CHARGEBACK';
 
+export enum PaymentProcessor {
+  PAYHERE = 'PAYHERE',
+  CEYPAY = 'CEYPAY',
+}
+
 export interface Transaction {
   payhere_pay_id: string;
   payhere_sub_id: string;
@@ -45,8 +50,10 @@ export interface Transaction {
   retry_count?: number;
   last_retry_at?: Date;
   gross_amount?: number;
-  fee_basis_points?: number;
-  fee_amount?: number;
+  payment_processor_fee_basis_points?: number;
+  payment_processor_fee_amount?: number;
+  bitcoindeepa_fee_basis_points?: number;
+  bitcoindeepa_fee_amount?: number;
   net_amount?: number;
   created_at?: Date;
   updated_at?: Date;
@@ -141,6 +148,7 @@ export class TransactionService {
       bitcoinDataForUpdate = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
+        subscription_id,
       );
     }
 
@@ -152,6 +160,7 @@ export class TransactionService {
       bitcoinDataForNew = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
+        subscription_id,
       );
     }
 
@@ -289,14 +298,17 @@ export class TransactionService {
   private async fetchBitcoinDataForTransaction(
     amount: number,
     currency: string,
+    subscription_id: string,
   ): Promise<{
     btc_price_at_purchase: number;
     satoshis_purchased: number;
     price_currency: string;
     coingecko_timestamp: Date;
     gross_amount: number;
-    fee_basis_points: number;
-    fee_amount: number;
+    payment_processor_fee_basis_points: number;
+    payment_processor_fee_amount: number;
+    bitcoindeepa_fee_basis_points: number;
+    bitcoindeepa_fee_amount: number;
     net_amount: number;
   } | null> {
     try {
@@ -308,27 +320,59 @@ export class TransactionService {
         return null;
       }
 
-      // Get fee configuration from environment (default to 100 basis points = 1%)
-      const feeBasisPoints = parseInt(
-        process.env.FEE_BASIS_POINTS || '100',
+      // Get payment processor from subscription
+      const subscription = await this.knexService
+        .knex<Subscription>('subscription')
+        .where('payhere_sub_id', subscription_id)
+        .first();
+
+      if (!subscription) {
+        await this.dbLogger.error(
+          `Subscription ${subscription_id} not found for Bitcoin calculation`,
+        );
+        return null;
+      }
+
+      const paymentProcessor = subscription.payment_processor;
+
+      // Get fee configurations from environment based on payment processor
+      const paymentProcessorFeeBps = parseInt(
+        paymentProcessor === 'PAYHERE'
+          ? process.env.PAYHERE_FEE_BASIS_POINTS || '0'
+          : process.env.CEYPAY_FEE_BASIS_POINTS || '0',
+        10,
+      );
+      const bitcoindeepaFeeBps = parseInt(
+        process.env.BITCOINDEEPA_FEE_BASIS_POINTS || '0',
         10,
       );
 
       // Store gross amount (original package amount)
       const grossAmount = amount;
 
-      // Calculate fee amount (basis points / 10000)
+      // Calculate payment processor fee (basis points / 10000)
       // Example: 100 basis points = 1% = 100/10000 = 0.01
-      const feeAmount = new Big(grossAmount)
-        .times(feeBasisPoints)
+      const paymentProcessorFeeAmount = new Big(grossAmount)
+        .times(paymentProcessorFeeBps)
         .div(10000)
         .toNumber();
 
-      // Calculate net amount after fee
-      const netAmount = new Big(grossAmount).minus(feeAmount).toNumber();
+      // Calculate BitcoinDeepa platform fee
+      const bitcoindeepaFeeAmount = new Big(grossAmount)
+        .times(bitcoindeepaFeeBps)
+        .div(10000)
+        .toNumber();
+
+      // Calculate total fees
+      const totalFees = new Big(paymentProcessorFeeAmount)
+        .plus(bitcoindeepaFeeAmount)
+        .toNumber();
+
+      // Calculate net amount after all fees
+      const netAmount = new Big(grossAmount).minus(totalFees).toNumber();
 
       await this.dbLogger.info(
-        `Calculating Bitcoin for ${grossAmount} ${currency}: fee=${feeAmount} ${currency} (${feeBasisPoints} bps), net=${netAmount} ${currency}`,
+        `Calculating Bitcoin for ${grossAmount} ${currency}: payment_processor_fee=${paymentProcessorFeeAmount} ${currency} (${paymentProcessorFeeBps} bps), bitcoindeepa_fee=${bitcoindeepaFeeAmount} ${currency} (${bitcoindeepaFeeBps} bps), total_fees=${totalFees} ${currency}, net=${netAmount} ${currency}`,
       );
 
       // Use net amount for satoshi calculation
@@ -343,7 +387,7 @@ export class TransactionService {
       }
 
       await this.dbLogger.info(
-        `Bitcoin DCA calculation: ${netAmount} ${currency} (after ${feeAmount} ${currency} fee) = ${bitcoinCalculation.satoshis} satoshis at ${bitcoinCalculation.btc_price} ${currency}/BTC`,
+        `Bitcoin DCA calculation: ${netAmount} ${currency} (after ${totalFees} ${currency} total fees) = ${bitcoinCalculation.satoshis} satoshis at ${bitcoinCalculation.btc_price} ${currency}/BTC`,
       );
 
       return {
@@ -352,8 +396,10 @@ export class TransactionService {
         price_currency: bitcoinCalculation.currency,
         coingecko_timestamp: bitcoinCalculation.timestamp,
         gross_amount: grossAmount,
-        fee_basis_points: feeBasisPoints,
-        fee_amount: feeAmount,
+        payment_processor_fee_basis_points: paymentProcessorFeeBps,
+        payment_processor_fee_amount: paymentProcessorFeeAmount,
+        bitcoindeepa_fee_basis_points: bitcoindeepaFeeBps,
+        bitcoindeepa_fee_amount: bitcoindeepaFeeAmount,
         net_amount: netAmount,
       };
     } catch (error: unknown) {

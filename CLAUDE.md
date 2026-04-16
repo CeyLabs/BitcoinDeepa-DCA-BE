@@ -261,33 +261,46 @@ try {
 
 ### Fee System
 
-The platform implements a percentage-based fee system using basis points:
+The platform implements a dual-fee system with separate payment processor and platform fees using basis points:
 
 **Configuration:**
-- Fees are configured via `FEE_BASIS_POINTS` environment variable
+- Fees are configured via environment variables (each in basis points)
+- `PAYHERE_FEE_BASIS_POINTS`: Fee charged by payment processor (PayHere, CeyPay)
+- `BITCOINDEEPA_FEE_BASIS_POINTS`: Platform fee charged by BitcoinDeepa
 - 1 basis point (bp) = 0.01%
-- Default: 100 basis points = 1%
+- Default: 100 basis points = 1% for each fee
 - Examples: 250 bps = 2.5%, 500 bps = 5%
+
+**Payment Processors:**
+- `PAYHERE`: Default payment processor (Sri Lankan payment gateway)
+- `CEYPAY`: Alternative processor (to be implemented)
 
 **Fee Calculation:**
 ```typescript
-fee_amount = gross_amount × (fee_basis_points ÷ 10000)
-net_amount = gross_amount - fee_amount
+payment_processor_fee = gross_amount × (payment_processor_fee_bps ÷ 10000)
+bitcoindeepa_fee = gross_amount × (bitcoindeepa_fee_bps ÷ 10000)
+total_fees = payment_processor_fee + bitcoindeepa_fee
+net_amount = gross_amount - total_fees
 satoshis_purchased = (net_amount ÷ btc_price) × 100,000,000
 ```
 
 **Transaction Fee Fields:**
-- `gross_amount`: Original package amount from PayHere
-- `fee_basis_points`: Fee percentage at transaction time (for historical tracking)
-- `fee_amount`: Calculated fee in LKR
-- `net_amount`: Amount after fee deduction (used for Bitcoin purchase)
+- `payment_processor`: Enum indicating which processor (PAYHERE or CEYPAY)
+- `gross_amount`: Original package amount from payment processor
+- `payment_processor_fee_basis_points`: Payment processor fee % at transaction time
+- `payment_processor_fee_amount`: Calculated payment processor fee in LKR
+- `bitcoindeepa_fee_basis_points`: Platform fee % at transaction time
+- `bitcoindeepa_fee_amount`: Calculated platform fee in LKR
+- `net_amount`: Amount after all fees (used for Bitcoin purchase)
 - `satoshis_purchased`: Calculated using net_amount only
 
 **Example:**
 - Package amount: 1000 LKR
-- Fee (100 bps = 1%): 10 LKR
-- Net amount: 990 LKR
-- Bitcoin purchased: 990 LKR worth of satoshis
+- Payment processor fee (100 bps = 1%): 10 LKR
+- BitcoinDeepa fee (100 bps = 1%): 10 LKR
+- Total fees: 20 LKR
+- Net amount: 980 LKR
+- Bitcoin purchased: 980 LKR worth of satoshis
 
 **Testing:**
 Run `npx ts-node scripts/test-fee-calculation.ts` to see fee calculations with different scenarios.

@@ -1,8 +1,14 @@
+export enum PaymentProcessor {
+  PAYHERE = 'PAYHERE',
+  CEYPAY = 'CEYPAY',
+}
+
 export interface Subscription {
   payhere_sub_id: string; // Primary key
   user_id: string;
   package_id: string;
   is_active: boolean;
+  payment_processor: PaymentProcessor;
   created_at?: Date;
   updated_at?: Date;
 }
@@ -12,6 +18,7 @@ export interface SubscriptionDetails {
   user_id: string;
   package_id: string;
   is_active: boolean;
+  payment_processor: PaymentProcessor;
   created_at?: Date;
   updated_at?: Date;
   subscription_start_date: Date;

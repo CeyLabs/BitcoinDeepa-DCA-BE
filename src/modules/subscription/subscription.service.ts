@@ -90,6 +90,7 @@ export class SubscriptionService {
       user_id: result.user_id,
       package_id: result.package_id,
       is_active: result.is_active,
+      payment_processor: result.payment_processor,
       created_at: result.created_at,
       updated_at: result.updated_at,
       subscription_start_date: subscriptionStartDate,
