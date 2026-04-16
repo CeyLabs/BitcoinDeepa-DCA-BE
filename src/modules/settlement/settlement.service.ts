@@ -24,6 +24,7 @@ export class SettlementService {
     }
 
     try {
+      // Fetch unsettled transactions without locking (just for discovery)
       const unsettledTransactions = await this.knexService
         .knex('transaction as t')
         .select(
@@ -53,6 +54,7 @@ export class SettlementService {
         `Found ${unsettledTransactions.length} unsettled transactions to retry`,
       );
 
+      // Process each transaction with proper locking
       for (const transaction of unsettledTransactions) {
         await this.tryTransactionSettlement(transaction);
       }
@@ -89,21 +91,31 @@ export class SettlementService {
     }
 
     const currentRetryCount = retry_count + 1;
+
+    // CRITICAL FIX: Atomically claim this transaction using SELECT FOR UPDATE SKIP LOCKED
+    // This prevents race conditions when multiple cron jobs run concurrently
     const trx = await this.knexService.knex.transaction();
 
-    const logMessage = await this.telegramLogger.logSettlement(
-      payhere_pay_id,
-      satoshis_purchased,
-      telegram_id,
-      currentRetryCount,
-    );
-
     try {
-      await this.dbLogger.info(
-        `Retrying settlement for transaction ${payhere_pay_id} (attempt ${currentRetryCount}/5): ${satoshis_purchased} satoshis to user ${telegram_id}`,
-      );
+      // Lock this specific transaction row, skip if already locked by another process
+      const lockedTransaction = await trx('transaction')
+        .where('payhere_pay_id', payhere_pay_id)
+        .where('settled', false)
+        .where('retry_count', retry_count) // Ensure retry_count hasn't changed
+        .forUpdate()
+        .skipLocked()
+        .first();
 
-      // First, atomically update retry count to prevent duplicate processing
+      // If we couldn't acquire the lock, another process is handling this transaction
+      if (!lockedTransaction) {
+        await trx.rollback();
+        await this.dbLogger.info(
+          `Skipping transaction ${payhere_pay_id} - already being processed by another instance`,
+        );
+        return;
+      }
+
+      // Immediately update retry_count to prevent other processes from picking it up
       await trx('transaction')
         .update({
           retry_count: currentRetryCount,
@@ -112,39 +124,61 @@ export class SettlementService {
         .where('payhere_pay_id', payhere_pay_id);
 
       await this.dbLogger.info(
-        `Updated retry count for transaction ${payhere_pay_id} to ${currentRetryCount}`,
+        `Transaction ${payhere_pay_id} locked and retry_count updated to ${currentRetryCount}`,
       );
 
-      // Perform the external fund transfer
+      // Commit the lock and retry_count update immediately
+      // This releases the lock but marks the transaction as "in progress" via retry_count
+      await trx.commit();
+
+      await this.dbLogger.info(
+        `Retrying settlement for transaction ${payhere_pay_id} (attempt ${currentRetryCount}/5): ${satoshis_purchased} satoshis to user ${telegram_id}`,
+      );
+
+      const logMessage = await this.telegramLogger.logSettlement(
+        payhere_pay_id,
+        satoshis_purchased,
+        telegram_id,
+        currentRetryCount,
+      );
+
+      // Perform the external fund transfer (this can be slow)
       const memo = await this.generateTransferMemo(
         payhere_pay_id,
         payhere_sub_id,
       );
+
       const transferResult = await this.bitcoinDeepaService.transferFunds(
         satoshis_purchased,
         telegram_id,
         memo,
       );
 
-      if (transferResult.success) {
-        // Mark as settled on successful transfer
-        await trx('transaction')
+      // Mark as settled if transfer succeeded OR if it was already completed
+      const shouldMarkSettled =
+        transferResult.success || transferResult.already_completed;
+
+      if (shouldMarkSettled) {
+        // Mark as settled on successful transfer or already completed
+        await this.knexService
+          .knex('transaction')
           .update({ settled: true })
           .where('payhere_pay_id', payhere_pay_id);
 
-        // Commit the transaction
-        await trx.commit();
-
-        await this.dbLogger.info(
-          `Settlement retry successful for transaction ${payhere_pay_id} on attempt ${currentRetryCount}: ${satoshis_purchased} satoshis transferred to user ${telegram_id}`,
-        );
+        if (transferResult.already_completed) {
+          await this.dbLogger.info(
+            `Settlement marked as complete for transaction ${payhere_pay_id}: transfer was already completed in a previous attempt`,
+          );
+        } else {
+          await this.dbLogger.info(
+            `Settlement retry successful for transaction ${payhere_pay_id} on attempt ${currentRetryCount}: ${satoshis_purchased} satoshis transferred to user ${telegram_id}`,
+          );
+        }
 
         // Send Telegram notification for successful settlement
         await this.telegramLogger.setMessageReaction(logMessage);
       } else {
-        // Commit the retry count update even on transfer failure
-        await trx.commit();
-
+        // Transfer failed - retry_count already updated, just log
         if (currentRetryCount >= 5) {
           await this.dbLogger.error(
             `Settlement retry permanently failed for transaction ${payhere_pay_id} after ${currentRetryCount} attempts: ${transferResult.message}`,
@@ -156,37 +190,35 @@ export class SettlementService {
         }
       }
     } catch (error) {
-      // Rollback the transaction on any error
-      await trx.rollback();
-
-      await this.dbLogger.error(
-        `Settlement retry error for transaction ${payhere_pay_id}: ${error.message}`,
-      );
-
-      // Use a separate transaction to update retry count after rollback
-      try {
-        await this.knexService
-          .knex('transaction')
-          .update({
-            retry_count: currentRetryCount,
-            last_retry_at: new Date(),
-          })
-          .where('payhere_pay_id', payhere_pay_id);
-
-        if (currentRetryCount >= 5) {
-          await this.dbLogger.error(
-            `Settlement retry permanently failed for transaction ${payhere_pay_id} after ${currentRetryCount} attempts due to error: ${error.message}`,
+      // Only rollback if transaction hasn't been committed yet
+      // Attempting to rollback an already-committed transaction will throw an error
+      if (!trx.isCompleted()) {
+        try {
+          await trx.rollback();
+          await this.dbLogger.info(
+            `Transaction rolled back for ${payhere_pay_id} due to error before commit`,
           );
-        } else {
+        } catch (rollbackError) {
+          // Log rollback failure but don't mask the original error
           await this.dbLogger.error(
-            `Settlement retry error for transaction ${payhere_pay_id} (attempt ${currentRetryCount}/5): ${error.message}. Next retry in ${Math.pow(2, currentRetryCount)} minutes.`,
+            `Failed to rollback transaction ${payhere_pay_id}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
           );
         }
-      } catch (updateError) {
-        await this.dbLogger.error(
-          `Failed to update retry count after error for transaction ${payhere_pay_id}: ${updateError.message}`,
+      } else {
+        // Transaction was already committed - error happened after commit (e.g., during API call)
+        // The retry_count has been incremented, which is correct behavior
+        // The transaction will be retried on the next cron run
+        await this.dbLogger.warn(
+          `Error occurred after commit for transaction ${payhere_pay_id} - retry_count already updated, will retry on next cron run`,
         );
       }
+
+      await this.dbLogger.error(
+        `Settlement retry error for transaction ${payhere_pay_id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+
+      // Note: If the error happened after commit, retry_count is already updated
+      // If it happened before commit, we'll try again on the next cron run
     }
   }
 
@@ -212,7 +244,7 @@ export class SettlementService {
       }
     } catch (packageError) {
       await this.dbLogger.warn(
-        `Could not fetch package name for subscription ${subscription_id}: ${packageError.message}`,
+        `Could not fetch package name for subscription ${subscription_id}: ${packageError instanceof Error ? packageError.message : String(packageError)}`,
       );
     }
 

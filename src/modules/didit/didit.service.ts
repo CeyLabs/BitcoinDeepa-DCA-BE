@@ -16,13 +16,13 @@ export class DiditService {
 
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('DIDIT_API_KEY') || '';
-    this.redirectUrl = this.configService.get<string>('DIDIT_REDIRECT_URL') || '';
+    this.redirectUrl =
+      this.configService.get<string>('DIDIT_REDIRECT_URL') || '';
     this.baseUrl =
       this.configService.get<string>('DIDIT_BASE_URL') ||
       'https://verification.didit.me';
 
-      this.workflowId =
-      this.configService.get<string>('DIDIT_WORKFLOW_ID') || ''
+    this.workflowId = this.configService.get<string>('DIDIT_WORKFLOW_ID') || '';
 
     if (!this.apiKey || !this.workflowId) {
       this.logger.warn(
@@ -53,7 +53,7 @@ export class DiditService {
       const response = await fetch(`${this.baseUrl}/v2/session/`, {
         method: 'POST',
         headers: {
-          'accept': 'application/json',
+          accept: 'application/json',
           'content-type': 'application/json',
           'x-api-key': this.apiKey,
         },
@@ -101,15 +101,16 @@ export class DiditService {
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/v2/session/${sessionId}/decision/`, {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'x-api-key': this.apiKey,
+      const response = await fetch(
+        `${this.baseUrl}/v2/session/${sessionId}/decision/`,
+        {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-api-key': this.apiKey,
+          },
         },
-      });
-
-      console.log(response)
+      );
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -148,13 +149,16 @@ export class DiditService {
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/v2/session/${sessionId}/decision/`, {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'x-api-key': this.apiKey,
+      const response = await fetch(
+        `${this.baseUrl}/v2/session/${sessionId}/decision/`,
+        {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-api-key': this.apiKey,
+          },
         },
-      });
+      );
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -173,7 +177,7 @@ export class DiditService {
 
       const result = await response.json();
       return {
-        url: result.session_url || null
+        url: result.session_url || null,
       };
     } catch (error) {
       this.logger.error(

@@ -24,7 +24,7 @@ A NestJS backend service for the BitcoinDeepa DCA (Dollar Cost Averaging) Telegr
 ## 📋 Prerequisites
 
 - Node.js v22
-- PostgreSQL database
+- Docker (for PostgreSQL and Redis via Docker Compose)
 - Telegram Bot Token
 - PayHere Merchant credentials (see below)
 - pnpm (recommended)
@@ -52,7 +52,29 @@ Create a `.env` file in the root directory:
 cp .env.template .env
 ```
 
-### 4. Database Setup
+### 4. Start Infrastructure Services
+
+Start PostgreSQL and Redis using Docker Compose:
+
+```bash
+docker compose up -d
+```
+
+This starts:
+- **PostgreSQL 16** on port `5432` (user/pass/db: `bitcoindeepa_dca`)
+- **Redis 7** on port `6379` (password: `redis_password`)
+
+To stop services:
+```bash
+docker compose down
+```
+
+To stop and remove all data:
+```bash
+docker compose down -v
+```
+
+### 5. Database Setup
 
 ```bash
 # Run migrations
@@ -62,7 +84,7 @@ pnpm migrate
 pnpm seed
 ```
 
-### 5. Start the Application
+### 6. Start the Application
 
 ```bash
 # Development mode
