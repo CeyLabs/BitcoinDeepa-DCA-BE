@@ -13,6 +13,7 @@ export interface FundTransferResponse {
   success: boolean;
   message?: string;
   transaction_id?: string;
+  already_completed?: boolean; // True if transfer was already completed in a previous attempt
 }
 
 export interface UserBalanceRequest {
@@ -111,17 +112,28 @@ export class BitcoinDeepaService {
 
       return response.data;
     } catch (error: any) {
+      // Extract error message from response (BitcoinDeepa uses 'error' field, not 'message')
+      const errorMessage =
+        error.response?.data?.error ||
+        error.response?.data?.message ||
+        error.message ||
+        'Fund transfer failed';
+
+      // Log full error details for debugging
       await this.dbLogger.error(
-        `BitcoinDeepaService.transferFunds: Fund transfer failed for ${amount} satoshis to user ${toTelegramId}: ${error.message}`,
+        `BitcoinDeepaService.transferFunds: Fund transfer failed for ${amount} satoshis to user ${toTelegramId}: ${errorMessage} (status: ${error.response?.status})`,
       );
+
+      // Check if this is an "already completed" error (transfer actually succeeded)
+      const isAlreadyCompleted =
+        errorMessage.toLowerCase().includes('already completed') ||
+        errorMessage.toLowerCase().includes('already exists');
 
       // Return a standardized error response
       return {
         success: false,
-        message:
-          error.response?.data?.message ||
-          error.message ||
-          'Fund transfer failed',
+        message: errorMessage,
+        already_completed: isAlreadyCompleted,
       };
     }
   }

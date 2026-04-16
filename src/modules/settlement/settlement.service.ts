@@ -147,22 +147,33 @@ export class SettlementService {
         payhere_pay_id,
         payhere_sub_id,
       );
+
       const transferResult = await this.bitcoinDeepaService.transferFunds(
         satoshis_purchased,
         telegram_id,
         memo,
       );
 
-      if (transferResult.success) {
-        // Mark as settled on successful transfer
+      // Mark as settled if transfer succeeded OR if it was already completed
+      const shouldMarkSettled =
+        transferResult.success || transferResult.already_completed;
+
+      if (shouldMarkSettled) {
+        // Mark as settled on successful transfer or already completed
         await this.knexService
           .knex('transaction')
           .update({ settled: true })
           .where('payhere_pay_id', payhere_pay_id);
 
-        await this.dbLogger.info(
-          `Settlement retry successful for transaction ${payhere_pay_id} on attempt ${currentRetryCount}: ${satoshis_purchased} satoshis transferred to user ${telegram_id}`,
-        );
+        if (transferResult.already_completed) {
+          await this.dbLogger.info(
+            `Settlement marked as complete for transaction ${payhere_pay_id}: transfer was already completed in a previous attempt`,
+          );
+        } else {
+          await this.dbLogger.info(
+            `Settlement retry successful for transaction ${payhere_pay_id} on attempt ${currentRetryCount}: ${satoshis_purchased} satoshis transferred to user ${telegram_id}`,
+          );
+        }
 
         // Send Telegram notification for successful settlement
         await this.telegramLogger.setMessageReaction(logMessage);
