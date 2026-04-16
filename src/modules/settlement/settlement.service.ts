@@ -201,7 +201,7 @@ export class SettlementService {
         } catch (rollbackError) {
           // Log rollback failure but don't mask the original error
           await this.dbLogger.error(
-            `Failed to rollback transaction ${payhere_pay_id}: ${rollbackError.message}`,
+            `Failed to rollback transaction ${payhere_pay_id}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
           );
         }
       } else {
@@ -214,7 +214,7 @@ export class SettlementService {
       }
 
       await this.dbLogger.error(
-        `Settlement retry error for transaction ${payhere_pay_id}: ${error.message}`,
+        `Settlement retry error for transaction ${payhere_pay_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
 
       // Note: If the error happened after commit, retry_count is already updated
@@ -244,7 +244,7 @@ export class SettlementService {
       }
     } catch (packageError) {
       await this.dbLogger.warn(
-        `Could not fetch package name for subscription ${subscription_id}: ${packageError.message}`,
+        `Could not fetch package name for subscription ${subscription_id}: ${packageError instanceof Error ? packageError.message : String(packageError)}`,
       );
     }
 

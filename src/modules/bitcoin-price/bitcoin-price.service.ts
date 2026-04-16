@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosResponse } from 'axios';
-import * as dayjs from 'dayjs';
+import dayjs from 'dayjs';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 
@@ -100,7 +100,7 @@ export class BitcoinPriceService {
       }
 
       // Get USD/LKR exchange rate from Ceylon Cash
-      const usdLkrRate = await this.fetchUSDLKRRate();
+      const usdLkrRate = await this.fetchUsdLkrRate();
       if (!usdLkrRate) {
         return null;
       }
@@ -122,20 +122,17 @@ export class BitcoinPriceService {
 
   private async fetchBitcoinPriceInUSD(): Promise<number | null> {
     try {
-      // Check Redis cache first
-      const cacheKey = CacheKeys.bitcoin.price('USD');
-      const cached = await this.redisService.get<{
-        price: number;
-        timestamp: Date;
-      }>(cacheKey);
+      // Check Redis cache first (fresh data only)
+      const cached = await this.getCachedBitcoinPrice();
 
       if (cached && this.isCacheValid(cached.timestamp)) {
         this.logger.debug(
-          `Using cached BTC/USD price from Redis: ${cached.price}`,
+          `Using fresh cached BTC/USD price: ${cached.price}`,
         );
         return cached.price;
       }
 
+      // Try to fetch from API
       const apiKey = process.env.COINGECKO_API_KEY;
       const baseUrl = apiKey
         ? 'https://pro-api.coingecko.com/api/v3'
@@ -153,7 +150,7 @@ export class BitcoinPriceService {
       const response: AxiosResponse<CoinGeckoResponse> = await axios.get(url, {
         params,
         headers,
-        timeout: 10000, // 10 second timeout
+        timeout: 10000,
       });
 
       const price = response.data?.bitcoin?.usd;
@@ -162,43 +159,56 @@ export class BitcoinPriceService {
         this.logger.warn(
           `Invalid BTC/USD price received from CoinGecko: ${price}`,
         );
+        // Fall back to stale cache if API returns invalid data
+        if (cached?.price) {
+          this.logger.warn(
+            `Using stale cached BTC/USD price as fallback: ${cached.price}`,
+          );
+          return cached.price;
+        }
         return null;
       }
 
-      // Cache the result in Redis
-      const cacheData = { price, timestamp: new Date() };
-      await this.redisService.set(cacheKey, cacheData, {
-        ttl: this.CACHE_TTL_SECONDS,
-      });
+      // Cache the fresh price
+      await this.setCachedBitcoinPrice(price, new Date());
       this.logger.log(`Fetched fresh BTC/USD price: ${price}`);
 
       return price;
     } catch (error) {
       this.logger.error('CoinGecko API error for BTC/USD:', error);
+
+      // FALLBACK: Try to use stale cache data when API is down
+      const staleCache = await this.getCachedBitcoinPrice();
+
+      if (staleCache?.price) {
+        const ageMinutes = this.getCacheAgeMinutes(staleCache.timestamp);
+        this.logger.warn(
+          `CoinGecko API failed - using stale cached BTC/USD price: ${staleCache.price} (${ageMinutes} min old)`,
+        );
+        return staleCache.price;
+      }
+
       return null;
     }
   }
 
-  private async fetchUSDLKRRate(): Promise<number | null> {
+  private async fetchUsdLkrRate(): Promise<number | null> {
     try {
-      // Check Redis cache first
-      const cacheKey = CacheKeys.bitcoin.usdLkr();
-      const cached = await this.redisService.get<{
-        rate: number;
-        timestamp: Date;
-      }>(cacheKey);
+      // Check Redis cache first (fresh data only)
+      const cached = await this.getCachedUsdLkrRate();
 
       if (cached && this.isCacheValid(cached.timestamp)) {
         this.logger.debug(
-          `Using cached USD/LKR rate from Redis: ${cached.rate}`,
+          `Using fresh cached USD/LKR rate: ${cached.rate}`,
         );
         return cached.rate;
       }
 
+      // Try to fetch from API
       const response: AxiosResponse<CeylonCashResponse> = await axios.get(
         'https://fx.ceyloncash.com/currency/USD',
         {
-          timeout: 10000, // 10 second timeout
+          timeout: 10000,
         },
       );
 
@@ -208,19 +218,35 @@ export class BitcoinPriceService {
         this.logger.warn(
           `Invalid USD/LKR rate received from Ceylon Cash: ${sellingRate}`,
         );
+        // Fall back to stale cache if API returns invalid data
+        if (cached?.rate) {
+          this.logger.warn(
+            `Using stale cached USD/LKR rate as fallback: ${cached.rate}`,
+          );
+          return cached.rate;
+        }
         return null;
       }
 
-      // Cache the result in Redis
-      const cacheData = { rate: sellingRate, timestamp: new Date() };
-      await this.redisService.set(cacheKey, cacheData, {
-        ttl: this.CACHE_TTL_SECONDS,
-      });
+      // Cache the fresh rate
+      await this.setCachedUsdLkrRate(sellingRate, new Date());
       this.logger.log(`Fetched fresh USD/LKR rate: ${sellingRate}`);
 
       return sellingRate;
     } catch (error) {
       this.logger.error('Ceylon Cash API error for USD/LKR:', error);
+
+      // FALLBACK: Try to use stale cache data when API is down
+      const staleCache = await this.getCachedUsdLkrRate();
+
+      if (staleCache?.rate) {
+        const ageMinutes = this.getCacheAgeMinutes(staleCache.timestamp);
+        this.logger.warn(
+          `Ceylon Cash API failed - using stale cached USD/LKR rate: ${staleCache.rate} (${ageMinutes} min old)`,
+        );
+        return staleCache.rate;
+      }
+
       return null;
     }
   }
@@ -229,6 +255,89 @@ export class BitcoinPriceService {
     const now = dayjs();
     const cacheTime = dayjs(timestamp);
     return now.diff(cacheTime, 'second') < this.CACHE_TTL_SECONDS;
+  }
+
+  /**
+   * Get cached Bitcoin price in USD (returns null if not found)
+   */
+  private async getCachedBitcoinPrice(): Promise<{
+    price: number;
+    timestamp: Date;
+  } | null> {
+    try {
+      const cacheKey = CacheKeys.bitcoin.price('USD');
+      return await this.redisService.get<{
+        price: number;
+        timestamp: Date;
+      }>(cacheKey);
+    } catch (error) {
+      this.logger.error('Error getting cached BTC/USD price:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Set cached Bitcoin price in USD (1 hour TTL)
+   */
+  private async setCachedBitcoinPrice(
+    price: number,
+    timestamp: Date,
+  ): Promise<void> {
+    try {
+      const cacheKey = CacheKeys.bitcoin.price('USD');
+      await this.redisService.set(
+        cacheKey,
+        { price, timestamp },
+        { ttl: 3600 }, // 1 hour
+      );
+    } catch (error) {
+      this.logger.error('Error setting cached BTC/USD price:', error);
+    }
+  }
+
+  /**
+   * Get cached USD/LKR exchange rate (returns null if not found)
+   */
+  private async getCachedUsdLkrRate(): Promise<{
+    rate: number;
+    timestamp: Date;
+  } | null> {
+    try {
+      const cacheKey = CacheKeys.bitcoin.usdLkr();
+      return await this.redisService.get<{
+        rate: number;
+        timestamp: Date;
+      }>(cacheKey);
+    } catch (error) {
+      this.logger.error('Error getting cached USD/LKR rate:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Set cached USD/LKR exchange rate (1 hour TTL)
+   */
+  private async setCachedUsdLkrRate(
+    rate: number,
+    timestamp: Date,
+  ): Promise<void> {
+    try {
+      const cacheKey = CacheKeys.bitcoin.usdLkr();
+      await this.redisService.set(
+        cacheKey,
+        { rate, timestamp },
+        { ttl: 3600 }, // 1 hour
+      );
+    } catch (error) {
+      this.logger.error('Error setting cached USD/LKR rate:', error);
+    }
+  }
+
+  /**
+   * Calculate cache age in minutes
+   */
+  private getCacheAgeMinutes(timestamp: Date): number {
+    return Math.floor((Date.now() - new Date(timestamp).getTime()) / 60000);
   }
 
   private createPriceData(
