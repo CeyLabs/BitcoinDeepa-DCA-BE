@@ -148,7 +148,7 @@ export class TransactionService {
       bitcoinDataForUpdate = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
-        subscription_id,
+        PaymentProcessor.PAYHERE,
       );
     }
 
@@ -160,7 +160,7 @@ export class TransactionService {
       bitcoinDataForNew = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
-        subscription_id,
+        PaymentProcessor.PAYHERE,
       );
     }
 
@@ -298,7 +298,7 @@ export class TransactionService {
   private async fetchBitcoinDataForTransaction(
     amount: number,
     currency: string,
-    subscription_id: string,
+    paymentProcessor: PaymentProcessor,
   ): Promise<{
     btc_price_at_purchase: number;
     satoshis_purchased: number;
@@ -319,21 +319,6 @@ export class TransactionService {
         );
         return null;
       }
-
-      // Get payment processor from subscription
-      const subscription = await this.knexService
-        .knex<Subscription>('subscription')
-        .where('payhere_sub_id', subscription_id)
-        .first();
-
-      if (!subscription) {
-        await this.dbLogger.error(
-          `Subscription ${subscription_id} not found for Bitcoin calculation`,
-        );
-        return null;
-      }
-
-      const paymentProcessor = subscription.payment_processor;
 
       // Get fee configurations from environment based on payment processor
       const paymentProcessorFeeBps = parseInt(
