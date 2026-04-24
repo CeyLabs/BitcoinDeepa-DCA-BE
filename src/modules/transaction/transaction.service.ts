@@ -381,7 +381,7 @@ export class TransactionService {
 
       if (!bitcoinCalculation) {
         await this.dbLogger.warn(
-          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - CoinGecko API may be unavailable`,
+          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - CoinMarketCap API may be unavailable`,
         );
         return null;
       }
@@ -394,7 +394,7 @@ export class TransactionService {
         btc_price_at_purchase: bitcoinCalculation.btc_price,
         satoshis_purchased: bitcoinCalculation.satoshis,
         price_currency: bitcoinCalculation.currency,
-        coingecko_timestamp: bitcoinCalculation.timestamp,
+        coingecko_timestamp: new Date(),
         gross_amount: grossAmount,
         payment_processor_fee_basis_points: paymentProcessorFeeBps,
         payment_processor_fee_amount: paymentProcessorFeeAmount,
@@ -674,7 +674,7 @@ export class TransactionService {
           );
         }
 
-        // Fetch 24hr change from CoinGecko even without subscriptions
+        // Fetch 24hr change from CoinMarketCap even without subscriptions
         let bitcoin24HrChange = 0;
         try {
           const change = await this.bitcoinPriceService.getBitcoin24HrChange();
@@ -683,7 +683,7 @@ export class TransactionService {
           }
         } catch (error: unknown) {
           await this.dbLogger.warn(
-            `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
+            `Failed to fetch 24hr change from CoinMarketCap for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
 
@@ -785,7 +785,7 @@ export class TransactionService {
         );
       }
 
-      // Fetch 24hr change from CoinGecko
+      // Fetch 24hr change from CoinMarketCap
       let bitcoin24HrChange = 0;
       try {
         const change = await this.bitcoinPriceService.getBitcoin24HrChange();
@@ -794,7 +794,7 @@ export class TransactionService {
         }
       } catch (error: unknown) {
         await this.dbLogger.warn(
-          `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
+          `Failed to fetch 24hr change from CoinMarketCap for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
 
