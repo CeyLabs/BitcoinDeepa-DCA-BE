@@ -44,6 +44,7 @@ export interface Transaction {
   status: Status;
   btc_price_at_purchase?: number;
   satoshis_purchased?: number;
+  bonus_satoshis?: number;
   price_currency?: string;
   coingecko_timestamp?: Date;
   settled?: boolean;
@@ -164,6 +165,26 @@ export class TransactionService {
       );
     }
 
+    // Pre-check first-timer reward eligibility (outside transaction to avoid long-running trx)
+    let bonusSatoshis: number | null = null;
+    if (!existingTransaction && status === 'SUCCESS' && user_id && bitcoinDataForNew) {
+      const user = await this.knexService
+        .knex('user')
+        .where('id', user_id)
+        .first();
+      if (user && !user.first_timer_reward_claimed) {
+        const rewardLkr = parseFloat(
+          process.env.FIRST_TIMER_REWARD_LKR || '500',
+        );
+        bonusSatoshis = Math.floor(
+          (rewardLkr / bitcoinDataForNew.btc_price_at_purchase) * 100_000_000,
+        );
+        await this.dbLogger.info(
+          `User ${user_id} qualifies for first-timer reward: ${rewardLkr} LKR = ${bonusSatoshis} bonus sats at ${bitcoinDataForNew.btc_price_at_purchase} LKR/BTC`,
+        );
+      }
+    }
+
     // Use atomic transaction for all database operations only
     const trx = await this.knexService.knex.transaction();
 
@@ -226,6 +247,20 @@ export class TransactionService {
           await this.dbLogger.info(
             `Bitcoin data added to new transaction ${payment_id}: ${bitcoinDataForNew.satoshis_purchased} sats at ${bitcoinDataForNew.btc_price_at_purchase} ${bitcoinDataForNew.price_currency}`,
           );
+        }
+
+        // Apply first-timer reward atomically — re-verify inside trx to prevent races
+        if (bonusSatoshis !== null && user_id) {
+          const userInTrx = await trx('user').where('id', user_id).first();
+          if (userInTrx && !userInTrx.first_timer_reward_claimed) {
+            transactionData.bonus_satoshis = bonusSatoshis;
+            await trx('user')
+              .update({ first_timer_reward_claimed: true })
+              .where('id', user_id);
+            await this.dbLogger.info(
+              `First-timer reward applied to transaction ${payment_id}: ${bonusSatoshis} bonus sats; marked user ${user_id} as claimed`,
+            );
+          }
         }
 
         await this.createTransactionAtomic(trx, transactionData);
@@ -727,7 +762,17 @@ export class TransactionService {
       }
 
       // Use Big.js for precise satoshi calculations
+      // bonus_satoshis are included in balance but excluded from spent/avg_price
       const totalSatoshis = transactions.reduce((sum, tx) => {
+        const satoshis = tx.satoshis_purchased
+          ? new Big(tx.satoshis_purchased)
+          : new Big(0);
+        const bonus = tx.bonus_satoshis ? new Big(tx.bonus_satoshis) : new Big(0);
+        return sum.plus(satoshis).plus(bonus);
+      }, new Big(0));
+
+      // Purchased satoshis only (no bonus) — used for avg price calculation
+      const purchasedSatoshis = transactions.reduce((sum, tx) => {
         const satoshis = tx.satoshis_purchased
           ? new Big(tx.satoshis_purchased)
           : new Big(0);
@@ -746,10 +791,10 @@ export class TransactionService {
         return sum;
       }, new Big(0));
 
-      // Calculate average BTC price using Big.js
+      // Calculate average BTC price using Big.js (based on purchased sats only, not bonus)
       const averageBTCPrice =
-        totalSpent.gt(0) && totalSatoshis.gt(0)
-          ? totalSpent.div(totalSatoshis.div(100_000_000))
+        totalSpent.gt(0) && purchasedSatoshis.gt(0)
+          ? totalSpent.div(purchasedSatoshis.div(100_000_000))
           : new Big(0);
 
       // Fetch total balance from BitcoinDeepa API
