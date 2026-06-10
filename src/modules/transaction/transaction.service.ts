@@ -76,6 +76,19 @@ export class TransactionService {
 
   private readonly logger = new Logger(TransactionService.name);
 
+  async resetRetryCounts(): Promise<{ reset_count: number }> {
+    const updated = await this.knexService
+      .knex('transaction')
+      .where('settled', false)
+      .update({ retry_count: 0 });
+
+    await this.dbLogger.info(
+      `Reset retry_count to 0 for ${updated} unsettled transaction(s)`,
+    );
+
+    return { reset_count: updated };
+  }
+
   async handlePayHereNotification(
     data: PayHereNotificationParams,
   ): Promise<void> {
