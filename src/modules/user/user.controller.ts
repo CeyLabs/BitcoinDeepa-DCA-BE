@@ -14,7 +14,7 @@ import { UserService } from './user.service';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
-import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { DiditService } from '../didit/didit.service';
 import { KycStatus } from './enums/kyc-status.enum';
@@ -27,6 +27,9 @@ export class UserController {
     private readonly diditService: DiditService,
   ) {}
 
+  // Basic registration (id, first_name, last_name) happens automatically
+  // on Telegram login (see AuthController) — this completes the profile
+  // with the details Telegram doesn't provide.
   @Post()
   @UseGuards(ConditionalAuthGuard)
   @UsePipes(
@@ -37,23 +40,39 @@ export class UserController {
       transformOptions: { enableImplicitConversion: true },
     }),
   )
-  async createUser(
+  async updateProfile(
     @CurrentUser() user: JwtPayload,
-    @Body() createUserDto: CreateUserDto,
+    @Body() updateProfileDto: UpdateProfileDto,
   ) {
+    const userExists = await this.userService.userExists(user.id);
+    if (!userExists) {
+      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+    }
+
     const logMessage = await this.telegramLoggerService.logGenericAction(
-      'User Registration',
+      'User Profile Completed',
       user,
     );
 
-    const result = await this.userService.createUser({
-      id: user.id,
-      ...createUserDto,
-    });
+    await this.userService.updateProfileDetails(user.id, updateProfileDto);
 
     await this.telegramLoggerService.setMessageReaction(logMessage);
 
-    return result;
+    return { success: true };
+  }
+
+  @Get('me')
+  @UseGuards(ConditionalAuthGuard)
+  async getMe(@CurrentUser() user: JwtPayload) {
+    const currentUser = await this.userService.getUserById(user.id);
+    if (!currentUser) {
+      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+    }
+
+    return {
+      ...currentUser,
+      is_profile_complete: this.userService.isProfileComplete(currentUser),
+    };
   }
 
   @Get('exists/:telegramId')

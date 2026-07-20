@@ -5,17 +5,35 @@ import { KycStatus, KycStatusType } from './enums/kyc-status.enum';
 export interface User {
   id: string;
   first_name: string;
+  last_name: string | null;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  city: string | null;
+  country: string | null;
+  kyc_status?: KycStatusType;
+  kyc_session_id?: string;
+  kyc_verified_at?: Date;
+  kyc_rejection_reason?: string;
+}
+
+export interface TelegramProfile {
+  id: string;
+  first_name: string;
+  last_name?: string;
+}
+
+export interface ProfileDetails {
+  first_name: string;
   last_name: string;
   email: string;
   phone: string;
   address: string;
   city: string;
   country: string;
-  kyc_status?: KycStatusType;
-  kyc_session_id?: string;
-  kyc_verified_at?: Date;
-  kyc_rejection_reason?: string;
 }
+
+export type UserWithCompleteProfile = User & ProfileDetails;
 
 export interface KycStatusUpdate {
   kyc_status: KycStatusType;
@@ -27,8 +45,26 @@ export interface KycStatusUpdate {
 export class UserService {
   constructor(private readonly knexService: KnexService) {}
 
-  async createUser(createUserDto: User): Promise<void> {
-    return this.knexService.knex('user').insert(createUserDto);
+  async upsertTelegramUser(profile: TelegramProfile): Promise<void> {
+    await this.knexService
+      .knex('user')
+      .insert({
+        id: profile.id,
+        first_name: profile.first_name,
+        last_name: profile.last_name ?? null,
+      })
+      .onConflict('id')
+      .merge({
+        first_name: profile.first_name,
+        last_name: profile.last_name ?? null,
+      });
+  }
+
+  async updateProfileDetails(
+    id: string,
+    profile: ProfileDetails,
+  ): Promise<void> {
+    await this.knexService.knex('user').where('id', id).update(profile);
   }
 
   async getUserById(id: string): Promise<User | undefined> {
@@ -38,6 +74,16 @@ export class UserService {
   async userExists(id: string): Promise<boolean> {
     const user = await this.getUserById(id);
     return !!user;
+  }
+
+  isProfileComplete(user: User): user is UserWithCompleteProfile {
+    return !!(
+      user.email &&
+      user.phone &&
+      user.address &&
+      user.city &&
+      user.country
+    );
   }
 
   async updateKycSessionId(userId: string, sessionId: string): Promise<void> {

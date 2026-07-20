@@ -6,6 +6,7 @@ import {
   Post,
   Body,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { SubscriptionService } from './subscription.service';
 import { SubscriptionDetails } from '../../models/subscription';
@@ -112,6 +113,15 @@ export class SubscriptionController {
       throw new NotFoundException('User not found');
     }
 
+    if (!this.userService.isProfileComplete(_user)) {
+      await this.dbLogger.warn(
+        `User ${user.id} attempted to generate a payment link with an incomplete profile`,
+      );
+      throw new BadRequestException(
+        'Please complete your profile before subscribing',
+      );
+    }
+
     const orderId = randomUUID();
     const link = await this.payHereService.getLink({
       user_id: user.id,
@@ -120,7 +130,7 @@ export class SubscriptionController {
       amount: String(_package.amount),
       currency: _package.currency,
       first_name: _user.first_name,
-      last_name: _user.last_name,
+      last_name: _user.last_name ?? '',
       email: _user.email,
       phone: _user.phone,
       address: _user.address,
