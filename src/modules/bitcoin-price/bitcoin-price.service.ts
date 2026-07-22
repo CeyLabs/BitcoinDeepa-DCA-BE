@@ -91,6 +91,33 @@ export class BitcoinPriceService {
     };
   }
 
+  async getCurrentPrice(): Promise<{
+    usd: number;
+    lkr: number;
+    timestamp: Date;
+  } | null> {
+    try {
+      const btcUsdPrice = await this.fetchBitcoinPriceInUSD();
+      if (!btcUsdPrice) {
+        return null;
+      }
+
+      const usdLkrRate = await this.fetchUsdLkrRate();
+      if (!usdLkrRate) {
+        return null;
+      }
+
+      return {
+        lkr: btcUsdPrice * usdLkrRate,
+        usd: btcUsdPrice,
+        timestamp: new Date(),
+      };
+    } catch (error) {
+      this.logger.error('Failed to get current Bitcoin price:', error);
+      return null;
+    }
+  }
+
   private async getBitcoinPriceInLKR(): Promise<BitcoinPriceData | null> {
     try {
       // Get BTC/USD price from CoinGecko
