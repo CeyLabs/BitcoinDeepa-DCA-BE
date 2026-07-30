@@ -155,10 +155,12 @@ PORT=3000
 - Protected endpoints: User creation, subscription management, transaction history
 
 ### Authentication
-- `POST /auth/telegram` - Validate Telegram InitData, return JWT token
+- `POST /auth/telegram` - Validate Telegram InitData, return JWT token. Also auto-registers/refreshes a minimal user row (`id`, `first_name`, `last_name`) from the Telegram profile.
 
 ### User Management
-- `POST /user` - Create user profile (authenticated)
+- `POST /user` - Complete profile (email, phone, address, city, country) for the already-registered user (authenticated)
+- `GET /user/me` - Get current user profile, including `is_profile_complete` (authenticated)
+- `GET /user/exists/:telegramId` - Check if a user has been registered (public)
 - `POST /user/kyc/initiate` - Initiate KYC verification process (authenticated)
 - `GET /user/kyc/status` - Get current KYC verification status (authenticated)
 

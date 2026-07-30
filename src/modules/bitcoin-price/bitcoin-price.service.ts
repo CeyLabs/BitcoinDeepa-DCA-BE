@@ -90,6 +90,33 @@ export class BitcoinPriceService {
     return data?.percent_change_24h ?? null;
   }
 
+  async getCurrentPrice(): Promise<{
+    usd: number;
+    lkr: number;
+    timestamp: Date;
+  } | null> {
+    try {
+      const btcUsdPrice = await this.fetchBitcoinPriceInUSD();
+      if (!btcUsdPrice) {
+        return null;
+      }
+
+      const usdLkrRate = await this.fetchUsdLkrRate();
+      if (!usdLkrRate) {
+        return null;
+      }
+
+      return {
+        lkr: btcUsdPrice * usdLkrRate,
+        usd: btcUsdPrice,
+        timestamp: new Date(),
+      };
+    } catch (error) {
+      this.logger.error('Failed to get current Bitcoin price:', error);
+      return null;
+    }
+  }
+
   private async getOrFetchBitcoinData(): Promise<BitcoinCacheData | null> {
     const cached = await this.getCachedBitcoinData();
     if (cached) return cached;

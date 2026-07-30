@@ -8,7 +8,7 @@ import { DiditModule } from '../didit/didit.module';
 
 @Module({
   imports: [
-    AuthModule,
+    forwardRef(() => AuthModule),
     KnexModule,
     TelegramLoggerModule,
     forwardRef(() => DiditModule),

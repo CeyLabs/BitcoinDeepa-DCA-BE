@@ -500,11 +500,21 @@ export class TransactionService {
       const totalPages = Math.ceil(totalCount / limit);
       const offset = (page - 1) * limit;
 
-      // Fetch paginated transactions
+      // Fetch paginated transactions, joined with package info so callers get
+      // the LKR amount and plan name without a second round trip.
       const transactions = await this.knexService
-        .knex<Transaction>('transaction')
-        .whereIn('payhere_sub_id', subscriptionIds)
-        .orderBy('created_at', 'desc')
+        .knex('transaction as t')
+        .select(
+          't.*',
+          'p.amount as package_amount',
+          'p.currency as package_currency',
+          'p.name as package_name',
+          'p.frequency as package_frequency',
+        )
+        .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
+        .join('package as p', 's.package_id', 'p.id')
+        .whereIn('t.payhere_sub_id', subscriptionIds)
+        .orderBy('t.created_at', 'desc')
         .limit(limit)
         .offset(offset);
 
@@ -619,6 +629,10 @@ export class TransactionService {
     total_lkr: string | undefined;
     currency: string;
     '24_hr_change': number;
+    current_btc_price?: {
+      usd: number;
+      lkr: number;
+    };
   } | null> {
     try {
       const cacheKey = CacheKeys.transaction.dcaSummary(user_id);
@@ -634,6 +648,10 @@ export class TransactionService {
         total_lkr: string | undefined;
         currency: string;
         '24_hr_change': number;
+        current_btc_price?: {
+          usd: number;
+          lkr: number;
+        };
       }>(cacheKey);
 
       if (cached) {
@@ -685,6 +703,8 @@ export class TransactionService {
           );
         }
 
+        const currentPrice = await this.getCurrentBtcPriceSafe(user_id);
+
         const emptyResult = {
           dca: {
             balance: 0,
@@ -695,6 +715,9 @@ export class TransactionService {
           total_lkr: balanceResponse.balance_lkr || '0.00',
           currency: 'LKR',
           '24_hr_change': bitcoin24HrChange,
+          current_btc_price: currentPrice
+            ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
+            : undefined,
         };
 
         // Cache empty result for 5 minutes
@@ -722,6 +745,7 @@ export class TransactionService {
         await this.dbLogger.info(
           `No successful transactions with Bitcoin data for user ${user_id} - returning empty summary`,
         );
+        const currentPrice = await this.getCurrentBtcPriceSafe(user_id);
         const emptyResult = {
           dca: {
             balance: 0,
@@ -732,6 +756,9 @@ export class TransactionService {
           total_lkr: '0.00',
           currency: 'LKR',
           '24_hr_change': 0,
+          current_btc_price: currentPrice
+            ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
+            : undefined,
         };
 
         // Cache empty result for 5 minutes
@@ -796,6 +823,8 @@ export class TransactionService {
         );
       }
 
+      const currentPrice = await this.getCurrentBtcPriceSafe(user_id);
+
       // Convert Big.js values to numbers for the response
       const summary = {
         dca: {
@@ -807,6 +836,9 @@ export class TransactionService {
         total_lkr: balanceResponse.balance_lkr,
         currency: 'LKR',
         '24_hr_change': bitcoin24HrChange,
+        current_btc_price: currentPrice
+          ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
+          : undefined,
       };
 
       // Cache the result for 5 minutes (300 seconds)
@@ -819,6 +851,20 @@ export class TransactionService {
     } catch (error: unknown) {
       await this.dbLogger.error(
         `Error calculating DCA summary for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private async getCurrentBtcPriceSafe(user_id: string): Promise<{
+    usd: number;
+    lkr: number;
+  } | null> {
+    try {
+      return await this.bitcoinPriceService.getCurrentPrice();
+    } catch (error: unknown) {
+      await this.dbLogger.warn(
+        `Failed to fetch current BTC price for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
