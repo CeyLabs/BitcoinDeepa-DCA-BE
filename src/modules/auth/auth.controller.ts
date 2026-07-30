@@ -1,6 +1,7 @@
 import { Controller, Post, Body, UnauthorizedException } from '@nestjs/common';
 import { AuthService, JwtPayload } from './auth.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { UserService } from '../user/user.service';
 
 interface TelegramAuthDto {
   initData: string;
@@ -26,6 +27,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly dbLogger: DatabaseLoggerService,
+    private readonly userService: UserService,
   ) {}
 
   @Post('telegram')
@@ -72,6 +74,13 @@ export class AuthController {
       );
       throw new UnauthorizedException('Invalid user data format');
     }
+
+    // Auto-register/refresh the user's basic profile from Telegram data
+    await this.userService.upsertTelegramUser({
+      id: userData.id.toString(),
+      first_name: userData.first_name || 'Telegram User',
+      last_name: userData.last_name,
+    });
 
     // Generate JWT payload
     const payload: JwtPayload = {
