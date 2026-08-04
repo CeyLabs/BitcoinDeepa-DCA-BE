@@ -9,13 +9,23 @@ const TELEGRAM_OIDC_ISSUER = 'https://oauth.telegram.org';
 const TELEGRAM_OIDC_JWKS_URL =
   'https://oauth.telegram.org/.well-known/jwks.json';
 
-// jose is ESM-only; this project compiles to CommonJS, so it must be loaded
-// via dynamic import() rather than a static import (which tsc would emit as
-// a require() and crash with ERR_REQUIRE_ESM).
+// jose is ESM-only. tsc compiles this project to CommonJS and rewrites
+// `await import(...)` into `Promise.resolve().then(() => require(...))` —
+// still a require() under the hood, which throws ERR_REQUIRE_ESM on Node 18
+// (unlike Node 22+, it has no require(esm) support at all). Routing the
+// import through `new Function` hides it from tsc's rewrite so Node executes
+// a real dynamic import() instead.
+// Not eval of user input; this is the standard escape hatch to stop tsc
+// rewriting import() into require().
+// eslint-disable-next-line @typescript-eslint/no-implied-eval
+const importJose = new Function('return import("jose")') as () => Promise<
+  typeof import('jose')
+>;
+
 let telegramJwksPromise: Promise<JWTVerifyGetKey> | null = null;
 async function getTelegramJwks(): Promise<JWTVerifyGetKey> {
   if (!telegramJwksPromise) {
-    telegramJwksPromise = import('jose').then(({ createRemoteJWKSet }) =>
+    telegramJwksPromise = importJose().then(({ createRemoteJWKSet }) =>
       createRemoteJWKSet(new URL(TELEGRAM_OIDC_JWKS_URL)),
     );
   }
@@ -145,7 +155,7 @@ export class AuthService {
     clientId: string,
   ): Promise<TelegramOidcClaims> {
     try {
-      const { jwtVerify } = await import('jose');
+      const { jwtVerify } = await importJose();
       const jwks = await getTelegramJwks();
       const { payload } = await jwtVerify(idToken, jwks, {
         issuer: TELEGRAM_OIDC_ISSUER,
