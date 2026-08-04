@@ -22,6 +22,16 @@ export interface JwtPayload {
   username?: string;
 }
 
+export interface TelegramWidgetAuthDto {
+  id: number;
+  first_name: string;
+  last_name?: string;
+  username?: string;
+  photo_url?: string;
+  auth_date: number;
+  hash: string;
+}
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -97,6 +107,35 @@ export class AuthService {
       );
       return false;
     }
+  }
+
+  verifyTelegramWidgetHash(
+    payload: TelegramWidgetAuthDto,
+    botToken: string,
+  ): boolean {
+    const { hash, ...fields } = payload;
+    const fieldMap = fields as Record<string, string | number | undefined>;
+
+    const dataCheckString = Object.keys(fieldMap)
+      .filter((key) => fieldMap[key] !== undefined)
+      .sort()
+      .map((key) => `${key}=${fieldMap[key]}`)
+      .join('\n');
+
+    const secretKey = crypto.createHash('sha256').update(botToken).digest();
+    const computedHash = crypto
+      .createHmac('sha256', secretKey)
+      .update(dataCheckString)
+      .digest('hex');
+
+    const computedBuffer = Buffer.from(computedHash, 'hex');
+    const providedBuffer = Buffer.from(hash || '', 'hex');
+
+    if (computedBuffer.length !== providedBuffer.length) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(computedBuffer, providedBuffer);
   }
 
   parseTelegramInitData(initData: string): TelegramInitData | null {
