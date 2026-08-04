@@ -56,8 +56,10 @@ export interface TelegramOidcAuthDto {
 
 // Claims Telegram puts in the id_token — see
 // https://core.telegram.org/bots/telegram-login#user-data-structure
+// Telegram's docs say `id` is a number, but in practice it's sent as a
+// numeric string (verified against a real id_token payload).
 export interface TelegramOidcClaims extends JWTPayload {
-  id: number;
+  id: string;
   name?: string;
   given_name?: string;
   family_name?: string;
@@ -162,11 +164,15 @@ export class AuthService {
         audience: clientId,
       });
 
-      if (typeof payload.id !== 'number') {
+      const rawId = payload.id;
+      const isNumericId =
+        typeof rawId === 'number' ||
+        (typeof rawId === 'string' && /^\d+$/.test(rawId));
+      if (!isNumericId) {
         throw new Error('id_token missing numeric "id" claim');
       }
 
-      return payload as TelegramOidcClaims;
+      return { ...payload, id: String(rawId) } as TelegramOidcClaims;
     } catch (error) {
       await this.dbLogger.warn(
         `Telegram OIDC id_token verification failed: ${error.message}`,
