@@ -1,5 +1,5 @@
 import { Controller, Post, Body, UnauthorizedException } from '@nestjs/common';
-import { AuthService, JwtPayload } from './auth.service';
+import { AuthService, JwtPayload, TelegramOidcAuthDto } from './auth.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { UserService } from '../user/user.service';
 
@@ -13,6 +13,7 @@ interface AuthResponse {
     telegram_id?: string;
     username?: string;
   };
+  isRegistered: boolean;
 }
 
 interface TelegramUser {
@@ -75,16 +76,19 @@ export class AuthController {
       throw new UnauthorizedException('Invalid user data format');
     }
 
+    const telegramId = userData.id.toString();
+    const isRegistered = await this.userService.userExists(telegramId);
+
     // Auto-register/refresh the user's basic profile from Telegram data
     await this.userService.upsertTelegramUser({
-      id: userData.id.toString(),
+      id: telegramId,
       first_name: userData.first_name || 'Telegram User',
       last_name: userData.last_name,
     });
 
     // Generate JWT payload
     const payload: JwtPayload = {
-      id: userData.id.toString(),
+      id: telegramId,
       username: userData.username,
     };
 
@@ -98,9 +102,61 @@ export class AuthController {
     return {
       token,
       user: {
-        telegram_id: userData.id.toString(),
+        telegram_id: telegramId,
         username: userData.username,
       },
+      isRegistered,
+    };
+  }
+
+  @Post('telegram-oidc')
+  async validateTelegramOidcAuth(
+    @Body() body: TelegramOidcAuthDto,
+  ): Promise<AuthResponse> {
+    const clientId = process.env.TELEGRAM_OIDC_CLIENT_ID;
+    if (!clientId) {
+      await this.dbLogger.error(
+        'Telegram OIDC client ID not configured - authentication failed',
+      );
+      throw new UnauthorizedException('Telegram login not configured');
+    }
+
+    if (!body?.id_token) {
+      throw new UnauthorizedException('Invalid Telegram login data');
+    }
+
+    const claims = await this.authService.verifyTelegramOidcToken(
+      body.id_token,
+      clientId,
+    );
+
+    const telegramId = claims.id.toString();
+    const isRegistered = await this.userService.userExists(telegramId);
+
+    await this.userService.upsertTelegramUser({
+      id: telegramId,
+      first_name: claims.given_name || claims.name || 'Telegram User',
+      last_name: claims.family_name,
+    });
+
+    const payload: JwtPayload = {
+      id: telegramId,
+      username: claims.preferred_username,
+    };
+
+    const token = await this.authService.generateJwt(payload);
+
+    await this.dbLogger.info(
+      `Successful Telegram OIDC authentication for user: ${claims.id} (${claims.preferred_username || 'no username'})`,
+    );
+
+    return {
+      token,
+      user: {
+        telegram_id: telegramId,
+        username: claims.preferred_username,
+      },
+      isRegistered,
     };
   }
 }

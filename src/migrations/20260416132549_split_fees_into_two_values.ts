@@ -24,8 +24,14 @@ export async function up(knex: Knex): Promise<void> {
     table.dropColumn('fee_amount');
 
     // Add payment processor fee columns with default 0
-    table.integer('payment_processor_fee_basis_points').defaultTo(0).notNullable();
-    table.decimal('payment_processor_fee_amount', 18, 2).defaultTo(0).notNullable();
+    table
+      .integer('payment_processor_fee_basis_points')
+      .defaultTo(0)
+      .notNullable();
+    table
+      .decimal('payment_processor_fee_amount', 18, 2)
+      .defaultTo(0)
+      .notNullable();
 
     // Add BitcoinDeepa platform fee columns with default 0
     table.integer('bitcoindeepa_fee_basis_points').defaultTo(0).notNullable();
