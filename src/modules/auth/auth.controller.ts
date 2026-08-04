@@ -1,9 +1,7 @@
 import { Controller, Post, Body, UnauthorizedException } from '@nestjs/common';
-import { AuthService, JwtPayload, TelegramWidgetAuthDto } from './auth.service';
+import { AuthService, JwtPayload, TelegramOidcAuthDto } from './auth.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { UserService } from '../user/user.service';
-
-const MAX_AUTH_AGE_SECONDS = 86400; // 1 day
 
 interface TelegramAuthDto {
   initData: string;
@@ -111,63 +109,52 @@ export class AuthController {
     };
   }
 
-  @Post('telegram-widget')
-  async validateTelegramWidgetAuth(
-    @Body() body: TelegramWidgetAuthDto,
+  @Post('telegram-oidc')
+  async validateTelegramOidcAuth(
+    @Body() body: TelegramOidcAuthDto,
   ): Promise<AuthResponse> {
-    const botToken = process.env.TELEGRAM_BOT_TOKEN;
-    if (!botToken) {
+    const clientId = process.env.TELEGRAM_OIDC_CLIENT_ID;
+    if (!clientId) {
       await this.dbLogger.error(
-        'Bot token not configured - widget authentication failed',
+        'Telegram OIDC client ID not configured - authentication failed',
       );
-      throw new UnauthorizedException('Bot token not configured');
+      throw new UnauthorizedException('Telegram login not configured');
     }
 
-    if (!body?.hash) {
-      throw new UnauthorizedException('Invalid Telegram widget data');
+    if (!body?.id_token) {
+      throw new UnauthorizedException('Invalid Telegram login data');
     }
 
-    const isValid = this.authService.verifyTelegramWidgetHash(body, botToken);
-    if (!isValid) {
-      await this.dbLogger.warn(
-        'Invalid hash provided during Telegram widget authentication',
-      );
-      throw new UnauthorizedException('Invalid Telegram widget data');
-    }
+    const claims = await this.authService.verifyTelegramOidcToken(
+      body.id_token,
+      clientId,
+    );
 
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    if (nowSeconds - body.auth_date > MAX_AUTH_AGE_SECONDS) {
-      await this.dbLogger.warn(
-        `Expired Telegram widget auth data for user: ${body.id}`,
-      );
-      throw new UnauthorizedException('Login expired, please try again');
-    }
-
-    const telegramId = body.id.toString();
+    const telegramId = claims.id.toString();
     const isRegistered = await this.userService.userExists(telegramId);
 
     await this.userService.upsertTelegramUser({
       id: telegramId,
-      first_name: body.first_name || 'Telegram User',
-      last_name: body.last_name,
+      first_name: claims.given_name || claims.name || 'Telegram User',
+      last_name: claims.family_name,
     });
 
     const payload: JwtPayload = {
       id: telegramId,
-      username: body.username,
+      username: claims.preferred_username,
     };
 
     const token = await this.authService.generateJwt(payload);
 
     await this.dbLogger.info(
-      `Successful Telegram widget authentication for user: ${body.id} (${body.username || 'no username'})`,
+      `Successful Telegram OIDC authentication for user: ${claims.id} (${claims.preferred_username || 'no username'})`,
     );
 
     return {
       token,
       user: {
         telegram_id: telegramId,
-        username: body.username,
+        username: claims.preferred_username,
       },
       isRegistered,
     };

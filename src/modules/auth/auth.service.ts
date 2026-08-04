@@ -1,8 +1,26 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as crypto from 'crypto';
 import * as dayjs from 'dayjs';
+import type { JWTPayload, JWTVerifyGetKey } from 'jose';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
+
+const TELEGRAM_OIDC_ISSUER = 'https://oauth.telegram.org';
+const TELEGRAM_OIDC_JWKS_URL =
+  'https://oauth.telegram.org/.well-known/jwks.json';
+
+// jose is ESM-only; this project compiles to CommonJS, so it must be loaded
+// via dynamic import() rather than a static import (which tsc would emit as
+// a require() and crash with ERR_REQUIRE_ESM).
+let telegramJwksPromise: Promise<JWTVerifyGetKey> | null = null;
+async function getTelegramJwks(): Promise<JWTVerifyGetKey> {
+  if (!telegramJwksPromise) {
+    telegramJwksPromise = import('jose').then(({ createRemoteJWKSet }) =>
+      createRemoteJWKSet(new URL(TELEGRAM_OIDC_JWKS_URL)),
+    );
+  }
+  return telegramJwksPromise;
+}
 
 export interface TelegramInitData {
   query_id?: string;
@@ -22,14 +40,21 @@ export interface JwtPayload {
   username?: string;
 }
 
-export interface TelegramWidgetAuthDto {
+export interface TelegramOidcAuthDto {
+  id_token: string;
+}
+
+// Claims Telegram puts in the id_token — see
+// https://core.telegram.org/bots/telegram-login#user-data-structure
+export interface TelegramOidcClaims extends JWTPayload {
   id: number;
-  first_name: string;
-  last_name?: string;
-  username?: string;
-  photo_url?: string;
-  auth_date: number;
-  hash: string;
+  name?: string;
+  given_name?: string;
+  family_name?: string;
+  preferred_username?: string;
+  picture?: string;
+  phone_number?: string;
+  phone_number_verified?: boolean;
 }
 
 @Injectable()
@@ -109,33 +134,35 @@ export class AuthService {
     }
   }
 
-  verifyTelegramWidgetHash(
-    payload: TelegramWidgetAuthDto,
-    botToken: string,
-  ): boolean {
-    const { hash, ...fields } = payload;
-    const fieldMap = fields as Record<string, string | number | undefined>;
+  /**
+   * Verifies a Telegram Login (OIDC) id_token: signature against Telegram's
+   * JWKS, issuer, and audience (must match this app's Client ID from
+   * BotFather). jwtVerify also rejects expired tokens.
+   * https://core.telegram.org/bots/telegram-login#validating-id-tokens
+   */
+  async verifyTelegramOidcToken(
+    idToken: string,
+    clientId: string,
+  ): Promise<TelegramOidcClaims> {
+    try {
+      const { jwtVerify } = await import('jose');
+      const jwks = await getTelegramJwks();
+      const { payload } = await jwtVerify(idToken, jwks, {
+        issuer: TELEGRAM_OIDC_ISSUER,
+        audience: clientId,
+      });
 
-    const dataCheckString = Object.keys(fieldMap)
-      .filter((key) => fieldMap[key] !== undefined)
-      .sort()
-      .map((key) => `${key}=${fieldMap[key]}`)
-      .join('\n');
+      if (typeof payload.id !== 'number') {
+        throw new Error('id_token missing numeric "id" claim');
+      }
 
-    const secretKey = crypto.createHash('sha256').update(botToken).digest();
-    const computedHash = crypto
-      .createHmac('sha256', secretKey)
-      .update(dataCheckString)
-      .digest('hex');
-
-    const computedBuffer = Buffer.from(computedHash, 'hex');
-    const providedBuffer = Buffer.from(hash || '', 'hex');
-
-    if (computedBuffer.length !== providedBuffer.length) {
-      return false;
+      return payload as TelegramOidcClaims;
+    } catch (error) {
+      await this.dbLogger.warn(
+        `Telegram OIDC id_token verification failed: ${error.message}`,
+      );
+      throw new UnauthorizedException('Invalid Telegram login token');
     }
-
-    return crypto.timingSafeEqual(computedBuffer, providedBuffer);
   }
 
   parseTelegramInitData(initData: string): TelegramInitData | null {
