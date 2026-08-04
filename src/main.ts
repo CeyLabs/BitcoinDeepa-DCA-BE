@@ -1,11 +1,15 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { DatabaseSystemLogger } from './modules/knex/database-system-logger.service';
-import { randomUUID } from 'crypto';
+import { randomUUID, webcrypto } from 'crypto';
 
-// Polyfill for crypto.randomUUID if not available (Node.js < 14.17.0)
+// Polyfill global.crypto if not available (older Node runtimes). Falls back
+// to Node's real WebCrypto implementation rather than an empty object —
+// libraries like jose call crypto.subtle directly off the global and would
+// break silently (e.g. "Cannot read properties of undefined (reading
+// 'importKey')") if this were stubbed out with `{}`.
 if (typeof global.crypto === 'undefined') {
-  global.crypto = {} as any;
+  global.crypto = webcrypto as unknown as Crypto;
 }
 if (typeof global.crypto.randomUUID === 'undefined') {
   global.crypto.randomUUID = randomUUID;
