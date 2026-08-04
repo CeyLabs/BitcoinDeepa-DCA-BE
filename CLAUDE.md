@@ -9,7 +9,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - Database: PostgreSQL with Knex.js ORM
 - Authentication: JWT tokens with Telegram WebApp InitData validation
 - Payment Gateway: PayHere (Sri Lankan payment processor)
-- Bitcoin Integration: CoinGecko API for real-time BTC prices and DCA calculations
+- Bitcoin Integration: CoinMarketCap API for real-time BTC prices and DCA calculations
 - Time Management: dayjs for date/time operations
 - Development: pnpm, ESLint, Prettier
 
@@ -53,7 +53,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Connection monitoring and keep-alive mechanisms
 
 8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
-   - CoinGecko API integration for real-time Bitcoin prices
+   - CoinMarketCap API integration for real-time Bitcoin prices
    - Automatic satoshi calculation for DCA transactions
    - Price caching with configurable TTL (20 seconds default)
    - Support for multiple currencies (LKR, USD, etc.)

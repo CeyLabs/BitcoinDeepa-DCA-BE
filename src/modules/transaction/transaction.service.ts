@@ -76,6 +76,19 @@ export class TransactionService {
 
   private readonly logger = new Logger(TransactionService.name);
 
+  async resetRetryCounts(): Promise<{ reset_count: number }> {
+    const updated = await this.knexService
+      .knex('transaction')
+      .where('settled', false)
+      .update({ retry_count: 0 });
+
+    await this.dbLogger.info(
+      `Reset retry_count to 0 for ${updated} unsettled transaction(s)`,
+    );
+
+    return { reset_count: updated };
+  }
+
   async handlePayHereNotification(
     data: PayHereNotificationParams,
   ): Promise<void> {
@@ -148,7 +161,7 @@ export class TransactionService {
       bitcoinDataForUpdate = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
-        subscription_id,
+        PaymentProcessor.PAYHERE,
       );
     }
 
@@ -160,7 +173,7 @@ export class TransactionService {
       bitcoinDataForNew = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
-        subscription_id,
+        PaymentProcessor.PAYHERE,
       );
     }
 
@@ -298,7 +311,7 @@ export class TransactionService {
   private async fetchBitcoinDataForTransaction(
     amount: number,
     currency: string,
-    subscription_id: string,
+    paymentProcessor: PaymentProcessor,
   ): Promise<{
     btc_price_at_purchase: number;
     satoshis_purchased: number;
@@ -319,21 +332,6 @@ export class TransactionService {
         );
         return null;
       }
-
-      // Get payment processor from subscription
-      const subscription = await this.knexService
-        .knex<Subscription>('subscription')
-        .where('payhere_sub_id', subscription_id)
-        .first();
-
-      if (!subscription) {
-        await this.dbLogger.error(
-          `Subscription ${subscription_id} not found for Bitcoin calculation`,
-        );
-        return null;
-      }
-
-      const paymentProcessor = subscription.payment_processor;
 
       // Get fee configurations from environment based on payment processor
       const paymentProcessorFeeBps = parseInt(
@@ -381,7 +379,7 @@ export class TransactionService {
 
       if (!bitcoinCalculation) {
         await this.dbLogger.warn(
-          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - CoinGecko API may be unavailable`,
+          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - CoinMarketCap API may be unavailable`,
         );
         return null;
       }
@@ -394,7 +392,7 @@ export class TransactionService {
         btc_price_at_purchase: bitcoinCalculation.btc_price,
         satoshis_purchased: bitcoinCalculation.satoshis,
         price_currency: bitcoinCalculation.currency,
-        coingecko_timestamp: bitcoinCalculation.timestamp,
+        coingecko_timestamp: new Date(),
         gross_amount: grossAmount,
         payment_processor_fee_basis_points: paymentProcessorFeeBps,
         payment_processor_fee_amount: paymentProcessorFeeAmount,
@@ -692,7 +690,7 @@ export class TransactionService {
           );
         }
 
-        // Fetch 24hr change from CoinGecko even without subscriptions
+        // Fetch 24hr change from CoinMarketCap even without subscriptions
         let bitcoin24HrChange = 0;
         try {
           const change = await this.bitcoinPriceService.getBitcoin24HrChange();
@@ -701,7 +699,7 @@ export class TransactionService {
           }
         } catch (error: unknown) {
           await this.dbLogger.warn(
-            `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
+            `Failed to fetch 24hr change from CoinMarketCap for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
 
@@ -812,7 +810,7 @@ export class TransactionService {
         );
       }
 
-      // Fetch 24hr change from CoinGecko
+      // Fetch 24hr change from CoinMarketCap
       let bitcoin24HrChange = 0;
       try {
         const change = await this.bitcoinPriceService.getBitcoin24HrChange();
@@ -821,7 +819,7 @@ export class TransactionService {
         }
       } catch (error: unknown) {
         await this.dbLogger.warn(
-          `Failed to fetch 24hr change from CoinGecko for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
+          `Failed to fetch 24hr change from CoinMarketCap for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
 

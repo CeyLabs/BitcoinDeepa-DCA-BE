@@ -64,6 +64,11 @@ export class TransactionController {
     }
   }
 
+  @Post('reset-retry-counts')
+  async resetRetryCounts() {
+    return this.transactionService.resetRetryCounts();
+  }
+
   @Get('list')
   @UseGuards(ConditionalAuthGuard)
   async getUserTransactions(
