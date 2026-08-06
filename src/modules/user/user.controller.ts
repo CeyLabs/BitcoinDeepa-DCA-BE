@@ -154,6 +154,7 @@ export class UserController {
     return {
       ...status,
       url,
+      is_new_user: !status.session_id,
     };
   }
 }

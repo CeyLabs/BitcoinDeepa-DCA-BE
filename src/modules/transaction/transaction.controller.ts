@@ -19,6 +19,7 @@ import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 
 @Controller('transaction')
 export class TransactionController {
@@ -26,6 +27,7 @@ export class TransactionController {
     private readonly transactionService: TransactionService,
     private readonly dbLogger: DatabaseLoggerService,
     private readonly telegramLoggerService: TelegramLoggerService,
+    private readonly bitcoinDeepaService: BitcoinDeepaService,
   ) {}
 
   @Post('payhere-webhook')
@@ -120,6 +122,27 @@ export class TransactionController {
       );
       throw new NotFoundException('No transactions found');
     }
+  }
+
+  @Get('bot-history')
+  @UseGuards(ConditionalAuthGuard)
+  async getBotTransactionHistory(
+    @CurrentUser() user: JwtPayload,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const limitNum = Math.min(limit ? parseInt(limit, 10) : 100, 250);
+    const offsetNum = offset ? parseInt(offset, 10) : 0;
+
+    await this.dbLogger.info(
+      `User ${user.id} requesting bot transaction history (limit: ${limitNum}, offset: ${offsetNum})`,
+    );
+
+    return this.bitcoinDeepaService.getUserTransactions(
+      Number(user.id),
+      limitNum,
+      offsetNum,
+    );
   }
 
   @Get('dca-summary')
