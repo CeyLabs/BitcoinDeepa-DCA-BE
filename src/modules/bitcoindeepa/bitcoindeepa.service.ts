@@ -32,6 +32,37 @@ export interface UserBalanceResponse {
   created_at?: string;
 }
 
+export interface UserTransactionsRequest {
+  telegram_id: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BotTransaction {
+  id: number;
+  time: string;
+  direction: 'incoming' | 'outgoing';
+  from_id: number;
+  to_id: number;
+  from_user?: string;
+  to_user?: string;
+  type: string;
+  amount: number;
+  amount_lkr: string;
+  memo?: string;
+  success: boolean;
+}
+
+export interface UserTransactionsResponse {
+  success: boolean;
+  telegram_id: number;
+  count: number;
+  limit: number;
+  offset: number;
+  transactions: BotTransaction[];
+  message?: string;
+}
+
 @Injectable()
 export class BitcoinDeepaService {
   private readonly apiUrl: string;
@@ -39,6 +70,7 @@ export class BitcoinDeepaService {
   private readonly timeout: number;
   private readonly sendEndpoint = '/api/v1/send';
   private readonly balanceEndpoint = '/api/v1/userbalance';
+  private readonly userTransactionsEndpoint = '/api/v1/usertransactions';
 
   constructor(private readonly dbLogger: DatabaseLoggerService) {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
@@ -190,6 +222,80 @@ export class BitcoinDeepaService {
           error.response?.data?.message ||
           error.message ||
           'Balance fetch failed',
+      };
+    }
+  }
+
+  /**
+   * Fetch a user's bot transaction (sats send/receive) history via BitcoinDeepa API
+   */
+  async getUserTransactions(
+    telegramId: number,
+    limit = 100,
+    offset = 0,
+  ): Promise<UserTransactionsResponse> {
+    try {
+      const url = `${this.apiUrl}${this.userTransactionsEndpoint}`;
+      const timestamp = Math.floor(Date.now() / 1000);
+      const httpMethod = 'POST';
+
+      const requestBody: UserTransactionsRequest = {
+        telegram_id: telegramId,
+        limit,
+        offset,
+      };
+
+      const bodyString = JSON.stringify(requestBody);
+      const signature = this.generateHmacSignature(
+        httpMethod,
+        this.userTransactionsEndpoint,
+        timestamp.toString(),
+        bodyString,
+      );
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'X-HMAC-Signature': signature,
+        'X-Timestamp': timestamp.toString(),
+      };
+
+      await this.dbLogger.info(
+        `BitcoinDeepaService.getUserTransactions: Fetching transactions for user ${telegramId} at ${this.userTransactionsEndpoint} (limit: ${limit}, offset: ${offset})`,
+      );
+
+      const response = await axios.post<UserTransactionsResponse>(
+        url,
+        requestBody,
+        {
+          headers,
+          timeout: this.timeout,
+        },
+      );
+
+      await this.dbLogger.info(
+        `BitcoinDeepaService.getUserTransactions: Fetch successful for user ${telegramId}, status: ${response.status}, count: ${response.data.count}`,
+      );
+
+      return response.data;
+    } catch (error: any) {
+      const errorMessage =
+        error.response?.data?.error ||
+        error.response?.data?.message ||
+        error.message ||
+        'Fetching transactions failed';
+
+      await this.dbLogger.error(
+        `BitcoinDeepaService.getUserTransactions: Fetch failed for user ${telegramId}: ${errorMessage} (status: ${error.response?.status})`,
+      );
+
+      return {
+        success: false,
+        telegram_id: telegramId,
+        count: 0,
+        limit,
+        offset,
+        transactions: [],
+        message: errorMessage,
       };
     }
   }
