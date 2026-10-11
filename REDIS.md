@@ -6,9 +6,15 @@
 The application is configured to use a cloud Redis instance. No local setup required!
 
 **Current Configuration:**
-- URL: `redis://default:password@centerbeam.proxy.rlwy.net:16234/0`
+- URL: `redis://default:***@centerbeam.proxy.rlwy.net:16234/0`
 - Authentication: Username/password enabled  
 - TTL: 5 minutes default
+
+> **🔐 Credential Rotation — 2026-10-12**
+> Redis password was rotated via Railway Dashboard (Database → Config → Regenerate Password).
+> Railway auto-updated all environment variables (`REDIS_URL`, `REDIS_PASSWORD`, `REDISPASSWORD`).
+> The service was redeployed automatically. External apps using the old password will need to reconnect.
+> **Do not commit the raw `REDIS_URL` to this file.** Use Railway's environment variable references instead.
 
 ### 2. Start the Application
 ```bash
@@ -34,7 +40,8 @@ The application supports both cloud and local Redis setups:
 ### Cloud Redis (Current Setup)
 ```bash
 # Redis Configuration (Railway/Cloud) - Single URL format
-REDIS_URL=redis://default:jMjRTnsjTJAZUjZxLnSxVqylJMDwfOmm@centerbeam.proxy.rlwy.net:16234/0
+# ⚠️  Do NOT put the real password here. Use Railway's variable reference.
+REDIS_URL=${{Redis.REDIS_URL}}
 REDIS_TTL_DEFAULT=300
 
 # Bitcoin Price Cache TTL (seconds)
@@ -111,7 +118,13 @@ KEYS dca:*
 
 1. **Cloud Redis**: Use managed Redis services (Railway, AWS ElastiCache, etc.)
 2. **Memory**: Monitor Redis memory usage with `INFO memory`
-3. **Security**: Always use password authentication for production
+3. **Security**: Always use password authentication for production; rotate credentials periodically
 4. **Clustering**: Consider Redis Cluster for high availability
 5. **Monitoring**: Set up Redis monitoring and alerts
 6. **Backups**: Configure regular Redis data backups
+
+## Credential Rotation Log
+
+| Date | Action | Rotated By | Notes |
+|------|--------|------------|-------|
+| 2026-10-12 | Password regenerated | BackendBanda agent | Via Railway Dashboard → Database → Config → Regenerate Password. Env vars auto-updated by Railway. Service redeployed. |
