@@ -5,6 +5,8 @@ import {
   HttpStatus,
   Get,
   UseGuards,
+  UsePipes,
+  ValidationPipe,
   Body,
   NotFoundException,
   Query,
@@ -19,7 +21,7 @@ import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
-import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
+import { GetTransactionHistoryDto } from './dto/get-transaction-history.dto';
 
 @Controller('transaction')
 export class TransactionController {
@@ -27,7 +29,6 @@ export class TransactionController {
     private readonly transactionService: TransactionService,
     private readonly dbLogger: DatabaseLoggerService,
     private readonly telegramLoggerService: TelegramLoggerService,
-    private readonly bitcoinDeepaService: BitcoinDeepaService,
   ) {}
 
   @Post('payhere-webhook')
@@ -71,34 +72,38 @@ export class TransactionController {
     return this.transactionService.resetRetryCounts();
   }
 
-  @Get('list')
+  @Get('history')
   @UseGuards(ConditionalAuthGuard)
-  async getUserTransactions(
+  @UsePipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+      transformOptions: { enableImplicitConversion: true },
+    }),
+  )
+  async getTransactionHistory(
     @CurrentUser() user: JwtPayload,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query() query: GetTransactionHistoryDto,
   ) {
-    const pageNum = page ? parseInt(page, 10) : 1;
-    const limitNum = limit ? parseInt(limit, 10) : 10;
-
     const logMessage = await this.telegramLoggerService.logGenericAction(
-      'Transaction List (/transaction/list)',
+      'Transaction History (/transaction/history)',
       user,
     );
 
     await this.dbLogger.info(
-      `User ${user.id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`,
+      `User ${user.id} requesting transaction history (type: ${query.type}, page: ${query.page}, limit: ${query.limit})`,
     );
 
-    const result =
-      await this.transactionService.getTransactionsByUserIdPaginated(
-        user.id,
-        pageNum,
-        limitNum,
-      );
+    const result = await this.transactionService.getUnifiedTransactionHistory(
+      user.id,
+      query.type,
+      query.page,
+      query.limit,
+    );
 
     await this.dbLogger.info(
-      `Returned ${result.transactions.length} transactions for user ${user.id} (page ${pageNum}/${result.total_pages})`,
+      `Returned ${result.transactions.length} transactions for user ${user.id} (type: ${query.type}, page ${result.current_page})`,
     );
     await this.telegramLoggerService.setMessageReaction(logMessage);
     return result;
@@ -122,27 +127,6 @@ export class TransactionController {
       );
       throw new NotFoundException('No transactions found');
     }
-  }
-
-  @Get('bot-history')
-  @UseGuards(ConditionalAuthGuard)
-  async getBotTransactionHistory(
-    @CurrentUser() user: JwtPayload,
-    @Query('limit') limit?: string,
-    @Query('offset') offset?: string,
-  ) {
-    const limitNum = Math.min(limit ? parseInt(limit, 10) : 100, 250);
-    const offsetNum = offset ? parseInt(offset, 10) : 0;
-
-    await this.dbLogger.info(
-      `User ${user.id} requesting bot transaction history (limit: ${limitNum}, offset: ${offsetNum})`,
-    );
-
-    return this.bitcoinDeepaService.getUserTransactions(
-      Number(user.id),
-      limitNum,
-      offsetNum,
-    );
   }
 
   @Get('dca-summary')

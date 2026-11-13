@@ -14,9 +14,15 @@ import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import {
   BitcoinDeepaService,
+  BotTransaction,
   UserBalanceResponse,
 } from '../bitcoindeepa/bitcoindeepa.service';
 import Big from 'big.js';
+import {
+  TransactionHistoryResponse,
+  UnifiedTransactionItem,
+} from './dto/transaction-history.dto';
+import { TransactionHistorySource } from './dto/get-transaction-history.dto';
 
 export interface PayHereNotificationParams {
   merchant_id: string;
@@ -542,6 +548,129 @@ export class TransactionService {
       );
       throw error;
     }
+  }
+
+  async getUnifiedTransactionHistory(
+    user_id: string,
+    type: TransactionHistorySource,
+    page: number,
+    limit: number,
+  ): Promise<TransactionHistoryResponse> {
+    if (type === 'plan') {
+      const plan = await this.getTransactionsByUserIdPaginated(
+        user_id,
+        page,
+        limit,
+      );
+      return {
+        transactions: plan.transactions.map((tx) => this.toUnifiedPlanItem(tx)),
+        current_page: page,
+        limit,
+        has_more: plan.has_more,
+        total_count: plan.total_count,
+        total_pages: plan.total_pages,
+        sources: {
+          plan: { total_count: plan.total_count, has_more: plan.has_more },
+        },
+      };
+    }
+
+    if (type === 'bot') {
+      const offset = (page - 1) * limit;
+      const bot = await this.bitcoinDeepaService.getUserTransactions(
+        Number(user_id),
+        limit,
+        offset,
+      );
+      const hasMore = offset + bot.transactions.length < bot.count;
+      return {
+        transactions: bot.transactions.map((tx) => this.toUnifiedBotItem(tx)),
+        current_page: page,
+        limit,
+        has_more: hasMore,
+        total_count: bot.count,
+        total_pages: Math.ceil(bot.count / limit),
+        sources: { bot: { total_count: bot.count, has_more: hasMore } },
+      };
+    }
+
+    // type === 'all': overfetch up to `limit` from each source independently,
+    // normalize timestamps, merge, sort desc, then slice to `limit`. This is not
+    // perfectly cross-source-accurate for deep pagination since each source is
+    // paginated on its own, but avoids needing local storage of bot transactions.
+    const offset = (page - 1) * limit;
+    const [planResult, botResult] = await Promise.allSettled([
+      this.getTransactionsByUserIdPaginated(user_id, page, limit),
+      this.bitcoinDeepaService.getUserTransactions(
+        Number(user_id),
+        limit,
+        offset,
+      ),
+    ]);
+
+    const merged: UnifiedTransactionItem[] = [];
+    const sources: TransactionHistoryResponse['sources'] = {};
+    let totalCount = 0;
+
+    if (planResult.status === 'fulfilled') {
+      const plan = planResult.value;
+      merged.push(...plan.transactions.map((tx) => this.toUnifiedPlanItem(tx)));
+      sources.plan = { total_count: plan.total_count, has_more: plan.has_more };
+      totalCount += plan.total_count;
+    } else {
+      await this.dbLogger.warn(
+        `Plan transactions fetch failed while building unified history for user ${user_id}: ${planResult.reason instanceof Error ? planResult.reason.message : String(planResult.reason)}`,
+      );
+    }
+
+    if (botResult.status === 'fulfilled') {
+      const bot = botResult.value;
+      merged.push(...bot.transactions.map((tx) => this.toUnifiedBotItem(tx)));
+      const botHasMore = offset + bot.transactions.length < bot.count;
+      sources.bot = { total_count: bot.count, has_more: botHasMore };
+      totalCount += bot.count;
+    } else {
+      await this.dbLogger.warn(
+        `Bot transactions fetch failed while building unified history for user ${user_id}: ${botResult.reason instanceof Error ? botResult.reason.message : String(botResult.reason)}`,
+      );
+    }
+
+    // Guard against unparsable timestamps so they don't sort unpredictably.
+    const sortable = merged.filter(
+      (item) => !Number.isNaN(new Date(item.timestamp).getTime()),
+    );
+    sortable.sort(
+      (a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
+
+    const hasMore = Boolean(sources.plan?.has_more || sources.bot?.has_more);
+
+    return {
+      transactions: sortable.slice(0, limit),
+      current_page: page,
+      limit,
+      has_more: hasMore,
+      total_count: totalCount,
+      total_pages: undefined,
+      sources,
+    };
+  }
+
+  private toUnifiedPlanItem(tx: Transaction): UnifiedTransactionItem {
+    return {
+      source: 'plan',
+      timestamp: new Date(tx.created_at ?? Date.now()).toISOString(),
+      plan: tx,
+    };
+  }
+
+  private toUnifiedBotItem(tx: BotTransaction): UnifiedTransactionItem {
+    return {
+      source: 'bot',
+      timestamp: new Date(tx.time).toISOString(),
+      bot: tx,
+    };
   }
 
   async getLatestTransactionForUser(user_id: string): Promise<any | null> {
