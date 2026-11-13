@@ -11,7 +11,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - Payment Gateway: PayHere (Sri Lankan payment processor)
 - Bitcoin Integration: CoinMarketCap API for real-time BTC prices and DCA calculations
 - Time Management: dayjs for date/time operations
-- Development: pnpm, ESLint, Prettier
+- Development: bun (package manager; app runs on Node), ESLint, Prettier
 
 ## Architecture & Module Structure
 
@@ -83,12 +83,12 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 ### Setup Commands
 ```bash
 # Install dependencies
-pnpm install
+bun install
 
 # Database setup
-pnpm migrate          # Run migrations
-pnpm seed            # Seed initial data
-pnpm db:reset        # Full database reset (rollback + migrate + seed)
+bun run migrate          # Run migrations
+bun run seed            # Seed initial data
+bun run db:reset        # Full database reset (rollback + migrate + seed)
 
 # Environment setup
 cp .env.template .env  # Configure environment variables
@@ -97,17 +97,17 @@ cp .env.template .env  # Configure environment variables
 ### Development Commands
 ```bash
 # Start development server
-pnpm start:dev       # Watch mode
+bun run start:dev       # Watch mode
 
 # Production
-pnpm start:prod      # Production mode
+bun run start:prod      # Production mode
 
 # Code quality
-pnpm lint           # ESLint with auto-fix
-pnpm prettier       # Format code
+bun run lint           # ESLint with auto-fix
+bun run prettier       # Format code
 
 # Database operations
-pnpm migrate:rollback  # Rollback all migrations
+bun run migrate:rollback  # Rollback all migrations
 ```
 
 ## Environment Variables
@@ -245,7 +245,7 @@ try {
 ### Database Migrations
 1. Create migration file: `npx knex migrate:make migration_name`
 2. Implement `up()` and `down()` methods
-3. Run migration: `pnpm migrate`
+3. Run migration: `bun run migrate`
 4. Create corresponding seed file if needed
 
 ### PayHere Webhook Testing
