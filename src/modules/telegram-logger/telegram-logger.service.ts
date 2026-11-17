@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { JwtPayload } from 'jsonwebtoken';
+import type { JwtPayload } from '../auth/auth.service';
 import { Package } from '../package/package.service';
 
 interface TgMessage {
