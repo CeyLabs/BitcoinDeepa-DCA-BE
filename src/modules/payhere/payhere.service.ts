@@ -101,6 +101,8 @@ export class PayHereService {
       duration,
       amount: amountFormatted,
       hash,
+      // Informational only (shown in the PayHere dashboard). The webhook never
+      // trusts these - they aren't covered by the hash and can be edited.
       custom_1: user_id,
       custom_2: package_id,
     };

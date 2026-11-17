@@ -36,11 +36,11 @@ export class PayHereNotificationDto {
 
   @IsOptional()
   @IsString()
-  custom_1?: string; // user_id
+  custom_1?: string; // user_id - unsigned, informational only
 
   @IsOptional()
   @IsString()
-  custom_2?: string; // package_id
+  custom_2?: string; // package_id - unsigned, informational only
 
   // Recurring API extras
   // AUTHORIZATION_SUCCESS | AUTHORIZATION_FAILED | RECURRING_INSTALLMENT_SUCCESS |

@@ -282,7 +282,7 @@ try {
 - `CHARGEBACK`: Payment reversed
 
 **Webhook rules (PayHere):**
-- PayHere's md5sig only covers merchant_id, order_id, amount, currency and status_code. Each subscription is bound to its `payhere_order_id`; notifications whose order_id / custom_1 don't match the stored subscription are rejected.
+- PayHere's md5sig (and the checkout hash) only cover merchant_id, order_id, amount, currency (and status_code). `custom_1`/`custom_2` are payer-editable and never trusted: `POST /subscription/payhere-link` stores a `payhere_order` row (order_id → user, package), and the webhook creates subscriptions only from that row. Unknown order_ids are rejected with a Telegram alert. Each subscription is bound to its `payhere_order_id`.
 - Status transitions: SUCCESS can only become CHARGEBACK, CHARGEBACK is final, nothing goes back to PENDING. Out-of-order notifications are ignored.
 - A new subscription is `is_active = true` only if its first payment is SUCCESS; otherwise it is activated by its first SUCCESS.
 - `item_rec_status` -1/1 or `message_type` RECURRING_STOPPED/RECURRING_COMPLETE marks the subscription inactive.

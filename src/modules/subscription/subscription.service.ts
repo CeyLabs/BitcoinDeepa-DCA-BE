@@ -27,6 +27,21 @@ export class SubscriptionService {
       .first();
   }
 
+  /**
+   * Record who a checkout is for before sending the user to PayHere. The
+   * webhook resolves the subscription's owner from this row (by the signed
+   * order_id), never from the payer-editable custom_1/custom_2.
+   */
+  async createPayHereOrder(
+    order_id: string,
+    user_id: string,
+    package_id: string,
+  ): Promise<void> {
+    await this.knexService
+      .knex('payhere_order')
+      .insert({ order_id, user_id, package_id });
+  }
+
   async getCurrentSubscriptionDetailsForUser(
     user_id: string,
   ): Promise<SubscriptionDetails | undefined> {

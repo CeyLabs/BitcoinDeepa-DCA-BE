@@ -90,6 +90,11 @@ export class SubscriptionController {
         }
 
         const orderId = randomUUID();
+        await this.subscriptionService.createPayHereOrder(
+          orderId,
+          user.id,
+          _package.id,
+        );
         const link = this.payHereService.getLink({
           user_id: user.id,
           package_id: _package.id,

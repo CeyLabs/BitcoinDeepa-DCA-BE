@@ -163,8 +163,6 @@ export class TransactionService {
       status_code,
       payment_id,
       subscription_id,
-      custom_1: user_id,
-      custom_2: package_id,
       message_type,
       item_rec_status,
     } = data;
@@ -225,8 +223,6 @@ export class TransactionService {
       const { subscription, created } = await this.resolveSubscription(trx, {
         subscription_id,
         order_id,
-        user_id,
-        package_id,
         status,
       });
       subscriptionUserId = subscription.user_id;
@@ -313,6 +309,14 @@ export class TransactionService {
       if (!trx.isCompleted()) {
         await trx.rollback();
       }
+      // A correctly signed notification we refuse is a real PayHere event we
+      // didn't record (e.g. unknown order_id) - a human needs to look at it.
+      if (error instanceof BadRequestException) {
+        await this.telegramLoggerService.logAlert(
+          'PayHere webhook',
+          `Rejected signed notification payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id}: ${errorMessage(error)}`,
+        );
+      }
       this.logger.error(
         `PayHere notification processing failed for payment_id ${payment_id}: ${errorMessage(error)}`,
       );
@@ -359,20 +363,22 @@ export class TransactionService {
 
   /**
    * Find the subscription for this notification, or create it on first sight.
-   * Binds the subscription to its PayHere order_id (which IS covered by the
-   * md5sig) and rejects notifications whose unsigned fields don't match.
+   *
+   * Only signed fields decide who owns a subscription: order_id is covered by
+   * the md5sig, and the user/package come from the payhere_order row we stored
+   * when generating the checkout link. custom_1/custom_2 are NOT used - the
+   * checkout hash doesn't cover them, so a payer can edit them (e.g. to give
+   * an un-KYC'd account a subscription).
    */
   private async resolveSubscription(
     trx: Knex.Transaction,
     params: {
       subscription_id: string;
       order_id: string;
-      user_id?: string;
-      package_id?: string;
       status: Status;
     },
   ): Promise<{ subscription: Subscription; created: boolean }> {
-    const { subscription_id, order_id, user_id, package_id, status } = params;
+    const { subscription_id, order_id, status } = params;
 
     const existing: Subscription | undefined = await trx('subscription')
       .where('payhere_sub_id', subscription_id)
@@ -385,11 +391,6 @@ export class TransactionService {
           'order_id does not match the subscription',
         );
       }
-      if (user_id && user_id !== existing.user_id) {
-        throw new BadRequestException(
-          'custom_1 (user) does not match the subscription',
-        );
-      }
       if (!existing.payhere_order_id) {
         await this.assertOrderIdUnused(trx, order_id, subscription_id);
         await trx('subscription')
@@ -400,11 +401,18 @@ export class TransactionService {
       return { subscription: existing, created: false };
     }
 
-    if (!user_id || !package_id) {
+    const order = await trx<{ user_id: string; package_id: string }>(
+      'payhere_order',
+    )
+      .select('user_id', 'package_id')
+      .where('order_id', order_id)
+      .first();
+    if (!order) {
       throw new BadRequestException(
-        `Cannot create subscription ${subscription_id}: missing user_id or package_id`,
+        `Unknown order_id ${order_id} - no checkout link was generated for it`,
       );
     }
+    const { user_id, package_id } = order;
     await this.assertOrderIdUnused(trx, order_id, subscription_id);
 
     const subscription: Subscription = {
