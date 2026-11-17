@@ -1,7 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHmac } from 'crypto';
 import axios, { AxiosResponse } from 'axios';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
 
 export interface FundTransferRequest {
   amount: number; // satoshis
@@ -66,6 +65,8 @@ export interface UserTransactionsResponse {
 
 @Injectable()
 export class BitcoinDeepaService {
+  private readonly logger = new Logger(BitcoinDeepaService.name);
+
   private readonly apiUrl: string;
   private readonly hmacSecret: string;
   private readonly timeout: number;
@@ -73,7 +74,7 @@ export class BitcoinDeepaService {
   private readonly balanceEndpoint = '/api/v1/userbalance';
   private readonly userTransactionsEndpoint = '/api/v1/usertransactions';
 
-  constructor(private readonly dbLogger: DatabaseLoggerService) {
+  constructor() {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
     this.hmacSecret = process.env.BITCOINDEEPA_HMAC_SECRET || '';
     this.timeout = parseInt(process.env.BITCOINDEEPA_TIMEOUT || '10000', 10);
@@ -132,7 +133,7 @@ export class BitcoinDeepaService {
         this.sendEndpoint,
         requestBody,
       );
-      await this.dbLogger.info(
+      this.logger.log(
         `BitcoinDeepa transfer OK: ${amount} sats to user ${toTelegramId} (status ${response.status})`,
       );
       return response.data;
@@ -141,7 +142,7 @@ export class BitcoinDeepaService {
         error,
         'Fund transfer failed',
       );
-      await this.dbLogger.error(
+      this.logger.error(
         `BitcoinDeepa transfer failed: ${amount} sats to user ${toTelegramId}: ${message} (status: ${error.response?.status})`,
       );
 
@@ -176,7 +177,7 @@ export class BitcoinDeepaService {
         error,
         'Balance fetch failed',
       );
-      await this.dbLogger.error(
+      this.logger.error(
         `BitcoinDeepa balance fetch failed for user ${telegramId}: ${message}`,
       );
       return { success: false, message };
@@ -207,7 +208,7 @@ export class BitcoinDeepaService {
         error,
         'Fetching transactions failed',
       );
-      await this.dbLogger.error(
+      this.logger.error(
         `BitcoinDeepa transactions fetch failed for user ${telegramId}: ${message} (status: ${error.response?.status})`,
       );
       return {

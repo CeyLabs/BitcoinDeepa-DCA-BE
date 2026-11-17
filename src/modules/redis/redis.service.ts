@@ -5,6 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import Redis, { RedisOptions } from 'ioredis';
+import { errorMessage } from '../../common/error-message';
 
 export interface CacheOptions {
   /** TTL in seconds */
@@ -37,7 +38,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     this.redis = new Redis(options);
     this.redis.on('error', (error) =>
-      this.logger.error(`Redis error: ${error.message}`),
+      this.logger.error(`Redis error: ${errorMessage(error)}`),
     );
     this.redis.on('reconnecting', () => this.logger.warn('Redis reconnecting'));
 
@@ -47,7 +48,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       // ioredis keeps retrying in the background; cache calls are misses until then
       this.logger.error(
-        `Initial Redis connection failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Initial Redis connection failed: ${errorMessage(error)}`,
       );
     }
   }
@@ -124,6 +125,27 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.warn(`Cache SET failed for ${key}: ${String(error)}`);
     }
+  }
+
+  /**
+   * Return the cached value, or run `loader`, cache its result and return it.
+   * null/undefined results are not cached.
+   */
+  async getOrSet<T>(
+    key: string,
+    ttlSeconds: number,
+    loader: () => Promise<T | null | undefined>,
+  ): Promise<T | null> {
+    const cached = await this.get<T>(key);
+    if (cached !== null) {
+      return cached;
+    }
+    const value = await loader();
+    if (value === null || value === undefined) {
+      return null;
+    }
+    await this.set(key, value, { ttl: ttlSeconds });
+    return value;
   }
 
   async del(key: string): Promise<void> {

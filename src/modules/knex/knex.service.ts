@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Knex, knex as createKnex } from 'knex';
 import config from '../../../knexfile';
+import { errorMessage } from '../../common/error-message';
 
 type KnexConfig = Record<string, Knex.Config>;
 
@@ -30,16 +31,14 @@ export class KnexService implements OnModuleInit, OnModuleDestroy {
       (config as KnexConfig)[this.NODE_ENV] ||
       (config as KnexConfig).development;
 
-    // Ensure pool settings are properly configured
+    // Pool sizes/timeouts come from knexfile.ts (single source of truth);
+    // only the connection validator is added here.
     const poolConfig: Knex.PoolConfig = {
-      min: 2,
-      max: 50,
-      // Add a connection validator
+      ...(configToUse.pool || {}),
       afterCreate: (
         conn: IDbConnection,
         done: (err: Error | null, connection?: IDbConnection) => void,
       ) => {
-        // Setup connection
         conn.query('SELECT 1', (err: Error | null) => {
           if (err) {
             this.logger.error('Error during connection validation', err);
@@ -55,28 +54,13 @@ export class KnexService implements OnModuleInit, OnModuleDestroy {
           }
         });
       },
-      // Set proper timeouts to prevent idle connection termination
-      idleTimeoutMillis: 30000, // 30 seconds
-      acquireTimeoutMillis: 30000, // 30 seconds
-      // Ping the connection to keep it alive
-      createTimeoutMillis: 30000, // 30 seconds
-      // Check if the connection is still valid before using it
-      reapIntervalMillis: 1000, // 1 second
-      createRetryIntervalMillis: 100, // 0.1 seconds
     };
 
-    // Initialize knex with enhanced configuration
-    this.knex = createKnex({
-      ...configToUse,
-      pool: {
-        ...(configToUse.pool || {}),
-        ...poolConfig,
-      },
-    });
+    this.knex = createKnex({ ...configToUse, pool: poolConfig });
 
     // Log when connections open or close for debugging
     this.knex.on('query-error', (error: Error, query: { sql: string }) => {
-      this.logger.error(`Query error: ${error.message}`, {
+      this.logger.error(`Query error: ${errorMessage(error)}`, {
         error,
         query: query.sql,
       });

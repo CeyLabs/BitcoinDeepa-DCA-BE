@@ -8,6 +8,7 @@ import {
 } from '@nestjs/terminus';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
+import { errorMessage } from '../../common/error-message';
 
 @Controller('health')
 export class HealthController {
@@ -35,7 +36,7 @@ export class HealthController {
           return indicator.up();
         } catch (error) {
           return indicator.down({
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       },

@@ -23,41 +23,25 @@ export class PackageService {
   ) {}
 
   async getAllPackages(): Promise<Package[]> {
-    const cacheKey = CacheKeys.packages.all();
-    const cached = await this.redisService.get<Package[]>(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
-    const packages = await this.knexService
-      .knex<Package>('package')
-      .select('*')
-      .orderBy('frequency', 'desc')
-      .orderBy('amount', 'asc');
-
-    await this.redisService.set(cacheKey, packages, {
-      ttl: PACKAGE_CACHE_TTL_SECONDS,
-    });
-    return packages;
+    const packages = await this.redisService.getOrSet(
+      CacheKeys.packages.all(),
+      PACKAGE_CACHE_TTL_SECONDS,
+      () =>
+        this.knexService
+          .knex<Package>('package')
+          .select('*')
+          .orderBy('frequency', 'desc')
+          .orderBy('amount', 'asc'),
+    );
+    return packages ?? [];
   }
 
   async getPackageById(id: string): Promise<Package | undefined> {
-    const cacheKey = CacheKeys.packages.byId(id);
-    const cached = await this.redisService.get<Package>(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
-    const package_ = await this.knexService
-      .knex<Package>('package')
-      .where('id', id)
-      .first();
-
-    if (package_) {
-      await this.redisService.set(cacheKey, package_, {
-        ttl: PACKAGE_CACHE_TTL_SECONDS,
-      });
-    }
-    return package_;
+    const package_ = await this.redisService.getOrSet(
+      CacheKeys.packages.byId(id),
+      PACKAGE_CACHE_TTL_SECONDS,
+      () => this.knexService.knex<Package>('package').where('id', id).first(),
+    );
+    return package_ ?? undefined;
   }
 }

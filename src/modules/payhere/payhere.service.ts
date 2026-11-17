@@ -1,7 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 import axios from 'axios';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { errorMessage } from '../../common/error-message';
 
 export interface IGetLinkParams {
   user_id: string;
@@ -37,7 +37,7 @@ function md5String(input: string): string {
 
 @Injectable()
 export class PayHereService {
-  constructor(private readonly dbLogger: DatabaseLoggerService) {}
+  private readonly logger = new Logger(PayHereService.name);
 
   getBaseUrl(): string {
     return (process.env.PAYHERE_ENV as string) === 'live'
@@ -45,7 +45,7 @@ export class PayHereService {
       : 'https://sandbox.payhere.lk';
   }
 
-  async getLink({
+  getLink({
     user_id,
     package_id,
     order_id,
@@ -62,8 +62,8 @@ export class PayHereService {
     recurrence,
     duration,
     type = 'checkout',
-  }: IGetLinkParams): Promise<string> {
-    await this.dbLogger.info(
+  }: IGetLinkParams): string {
+    this.logger.log(
       `Generating PayHere payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}, package: ${package_id}`,
     );
     const hashedSecret = md5String(
@@ -106,19 +106,19 @@ export class PayHereService {
     };
 
     const link = `${this.getBaseUrl()}/pay/${type}?${new URLSearchParams(params).toString()}`;
-    await this.dbLogger.info(
+    this.logger.log(
       `PayHere payment link generated successfully for order: ${order_id}`,
     );
     return link;
   }
 
   async getAccessToken(): Promise<string> {
-    await this.dbLogger.info('Requesting PayHere OAuth token');
+    this.logger.log('Requesting PayHere OAuth token');
 
     const appId = process.env.PAYHERE_APP_ID;
     const appSecret = process.env.PAYHERE_APP_SECRET;
     if (!appId || !appSecret) {
-      await this.dbLogger.error(
+      this.logger.error(
         'PayHere App ID/Secret not configured - OAuth token generation failed',
       );
       throw new Error('PayHere App ID/Secret not set');
@@ -144,13 +144,13 @@ export class PayHereService {
         },
       });
 
-      await this.dbLogger.info(
+      this.logger.log(
         `PayHere OAuth token generated successfully (expires in ${response.data.expires_in}s)`,
       );
       return response.data.access_token;
     } catch (error) {
-      await this.dbLogger.error(
-        `PayHere OAuth token generation failed: ${error.message}`,
+      this.logger.error(
+        `PayHere OAuth token generation failed: ${errorMessage(error)}`,
       );
       throw error;
     }
@@ -159,7 +159,7 @@ export class PayHereService {
   async cancelSubscription(
     payhere_sub_id: string,
   ): Promise<CancelSubscriptionResponse> {
-    await this.dbLogger.info(
+    this.logger.log(
       `Requesting PayHere subscription cancellation for: ${payhere_sub_id}`,
     );
 
@@ -178,13 +178,13 @@ export class PayHereService {
         },
       );
 
-      await this.dbLogger.info(
+      this.logger.log(
         `PayHere subscription cancellation response for ${payhere_sub_id}: status=${response.data.status}, message=${response.data.msg}`,
       );
       return response.data;
     } catch (error) {
-      await this.dbLogger.error(
-        `PayHere subscription cancellation failed for ${payhere_sub_id}: ${error.message}`,
+      this.logger.error(
+        `PayHere subscription cancellation failed for ${payhere_sub_id}: ${errorMessage(error)}`,
       );
       throw error;
     }

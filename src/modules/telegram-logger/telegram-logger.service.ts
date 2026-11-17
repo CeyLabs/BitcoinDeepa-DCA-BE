@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { JwtPayload } from '../auth/auth.service';
 import { Package } from '../package/package.service';
 
-interface TgMessage {
+export interface TgMessage {
   id: number | null;
   text: string;
 }
@@ -83,6 +83,21 @@ export class TelegramLoggerService {
       `Username: <b>${this.formatUsername(user)}</b>\n` +
       `User ID: <b>#UID${user.id}</b>`;
     return await this.sendMessage(message);
+  }
+
+  /**
+   * Post "Action: <action>" to the log group, run `fn`, and react to the
+   * message once `fn` succeeds. `fn` gets the message so it can append to it.
+   */
+  async trackAction<T>(
+    action: string,
+    user: JwtPayload,
+    fn: (message: TgMessage | null) => Promise<T>,
+  ): Promise<T> {
+    const message = await this.logGenericAction(action, user);
+    const result = await fn(message);
+    await this.setMessageReaction(message);
+    return result;
   }
 
   async appendToMessage(

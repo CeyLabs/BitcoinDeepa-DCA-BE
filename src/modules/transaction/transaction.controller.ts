@@ -9,6 +9,7 @@ import {
   Body,
   NotFoundException,
   Query,
+  Logger,
 } from '@nestjs/common';
 import { Response } from 'express';
 import { TransactionService } from './transaction.service';
@@ -17,9 +18,9 @@ import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { AdminKeyGuard } from '../auth/admin-key.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
+import { errorMessage } from '../../common/error-message';
 
 /** Parse a positive integer query param, clamped to [min, max]. */
 function parseIntParam(
@@ -35,9 +36,10 @@ function parseIntParam(
 
 @Controller('transaction')
 export class TransactionController {
+  private readonly logger = new Logger(TransactionController.name);
+
   constructor(
     private readonly transactionService: TransactionService,
-    private readonly dbLogger: DatabaseLoggerService,
     private readonly telegramLoggerService: TelegramLoggerService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
   ) {}
@@ -47,13 +49,13 @@ export class TransactionController {
     @Body() body: PayHereNotificationDto,
     @Res() res: Response,
   ) {
-    await this.dbLogger.info(
+    this.logger.log(
       `PayHere webhook received: order_id=${body.order_id}, status=${body.status_code}, amount=${body.payhere_amount} ${body.payhere_currency}`,
     );
 
     // Reject forged requests before touching Telegram or the DB
     if (!this.transactionService.isValidPayHereSignature(body)) {
-      await this.dbLogger.warn(
+      this.logger.warn(
         `PayHere webhook rejected (bad signature) for order_id ${body.order_id}`,
       );
       return res.status(HttpStatus.UNAUTHORIZED).send();
@@ -72,8 +74,8 @@ export class TransactionController {
       await this.telegramLoggerService.setMessageReaction(logMessage);
       return res.status(HttpStatus.OK).send('OK');
     } catch (error) {
-      await this.dbLogger.error(
-        `PayHere webhook processing failed for order_id ${body.order_id}: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `PayHere webhook processing failed for order_id ${body.order_id}: ${errorMessage(error)}`,
       );
       const status =
         error instanceof HttpException
@@ -99,20 +101,16 @@ export class TransactionController {
     const pageNum = parseIntParam(page, 1, 1, 10_000);
     const limitNum = parseIntParam(limit, 10, 1, 100);
 
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    return this.telegramLoggerService.trackAction(
       'Transaction List (/transaction/list)',
       user,
+      () =>
+        this.transactionService.getTransactionsByUserIdPaginated(
+          user.id,
+          pageNum,
+          limitNum,
+        ),
     );
-
-    const result =
-      await this.transactionService.getTransactionsByUserIdPaginated(
-        user.id,
-        pageNum,
-        limitNum,
-      );
-
-    await this.telegramLoggerService.setMessageReaction(logMessage);
-    return result;
   }
 
   @Get('latest')
@@ -147,14 +145,10 @@ export class TransactionController {
   @Get('dca-summary')
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    return this.telegramLoggerService.trackAction(
       'Main balance (/transaction/dca-summary)',
       user,
+      () => this.transactionService.getDCASummaryForUser(user.id),
     );
-
-    const summary = await this.transactionService.getDCASummaryForUser(user.id);
-
-    await this.telegramLoggerService.setMessageReaction(logMessage);
-    return summary;
   }
 }

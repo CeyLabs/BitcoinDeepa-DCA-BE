@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   UnauthorizedException,
+  Logger,
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { createHash, timingSafeEqual } from 'crypto';
@@ -10,12 +11,12 @@ import Big from 'big.js';
 import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
+import { errorMessage } from '../../common/error-message';
 
 export type PayHereNotificationParams = PayHereNotificationDto;
 
@@ -87,16 +88,24 @@ export interface PaginatedTransactions {
 
 const SATOSHIS_PER_BTC = 100_000_000;
 
+const PACKAGE_COLUMNS = [
+  'p.amount as package_amount',
+  'p.currency as package_currency',
+  'p.name as package_name',
+  'p.frequency as package_frequency',
+];
+
 function md5Upper(input: string): string {
   return createHash('md5').update(input).digest('hex').toUpperCase();
 }
 
 @Injectable()
 export class TransactionService {
+  private readonly logger = new Logger(TransactionService.name);
+
   constructor(
     private readonly knexService: KnexService,
     private readonly bitcoinPriceService: BitcoinPriceService,
-    private readonly dbLogger: DatabaseLoggerService,
     private readonly redisService: RedisService,
     private readonly telegramLoggerService: TelegramLoggerService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
@@ -108,7 +117,7 @@ export class TransactionService {
       .where('settled', false)
       .update({ retry_count: 0 });
 
-    await this.dbLogger.info(
+    this.logger.log(
       `Reset retry_count to 0 for ${updated} unsettled transaction(s)`,
     );
 
@@ -163,21 +172,21 @@ export class TransactionService {
     if (!this.isValidPayHereSignature(data)) {
       // Never log the expected signature - it would let anyone with log
       // access forge this exact notification.
-      await this.dbLogger.error(
+      this.logger.error(
         `MD5 signature verification failed for payment_id ${payment_id}, order_id ${order_id}`,
       );
       throw new UnauthorizedException('Md5 verification failed');
     }
 
     if (!payment_id || !subscription_id || Number(subscription_id) < 0) {
-      await this.dbLogger.error(
+      this.logger.error(
         `Invalid payment/subscription id: payment_id=${payment_id}, subscription_id=${subscription_id}`,
       );
       throw new BadRequestException('Invalid payment or subscription id');
     }
 
     const status = this.getPayHereStatusMapped(status_code);
-    await this.dbLogger.info(
+    this.logger.log(
       `Processing PayHere notification: payment_id=${payment_id}, subscription_id=${subscription_id}, status=${status}, amount=${payhere_amount} ${payhere_currency}`,
     );
 
@@ -250,7 +259,7 @@ export class TransactionService {
         }
 
         if (!this.isAllowedTransition(current.status, status)) {
-          await this.dbLogger.warn(
+          this.logger.warn(
             `Ignoring status change ${current.status} → ${status} for payment_id ${payment_id} (out-of-order or duplicate notification)`,
           );
         } else {
@@ -270,7 +279,7 @@ export class TransactionService {
             );
           }
 
-          await this.dbLogger.info(
+          this.logger.log(
             `Transaction ${payment_id} updated: ${current.status} → ${status}`,
           );
         }
@@ -285,7 +294,7 @@ export class TransactionService {
         };
         await trx('transaction').insert(row);
 
-        await this.dbLogger.info(
+        this.logger.log(
           `New transaction ${payment_id} created (status ${status})`,
         );
       }
@@ -304,8 +313,8 @@ export class TransactionService {
       if (!trx.isCompleted()) {
         await trx.rollback();
       }
-      await this.dbLogger.error(
-        `PayHere notification processing failed for payment_id ${payment_id}: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `PayHere notification processing failed for payment_id ${payment_id}: ${errorMessage(error)}`,
       );
       throw error;
     }
@@ -319,7 +328,7 @@ export class TransactionService {
       );
     }
     for (const alert of alerts) {
-      await this.dbLogger.error(alert);
+      this.logger.error(alert);
       await this.telegramLoggerService.logAlert('PayHere webhook', alert);
     }
     await this.invalidateUserCaches(subscriptionUserId);
@@ -408,7 +417,7 @@ export class TransactionService {
     } as Subscription;
     await trx('subscription').insert(subscription);
 
-    await this.dbLogger.info(
+    this.logger.log(
       `Created subscription ${subscription_id} for user ${user_id}, package ${package_id} (active: ${subscription.is_active})`,
     );
     return { subscription, created: true };
@@ -461,7 +470,7 @@ export class TransactionService {
     await trx('subscription')
       .update({ is_active: true, updated_at: trx.fn.now() })
       .where('payhere_sub_id', subscription.payhere_sub_id);
-    await this.dbLogger.info(
+    this.logger.log(
       `Subscription ${subscription.payhere_sub_id} activated by first successful payment ${payment_id}`,
     );
     return null;
@@ -485,8 +494,8 @@ export class TransactionService {
         );
       }
     } catch (error: unknown) {
-      await this.dbLogger.warn(
-        `Failed to log subscription creation to Telegram: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.warn(
+        `Failed to log subscription creation to Telegram: ${errorMessage(error)}`,
       );
     }
   }
@@ -497,7 +506,7 @@ export class TransactionService {
   ): Promise<BitcoinData | null> {
     try {
       if (process.env.ENABLE_BITCOIN_TRACKING === 'false') {
-        await this.dbLogger.info(
+        this.logger.log(
           'Bitcoin tracking is disabled - skipping Bitcoin data fetch',
         );
         return null;
@@ -525,13 +534,13 @@ export class TransactionService {
         currency,
       );
       if (!calc) {
-        await this.dbLogger.warn(
+        this.logger.warn(
           `Failed to fetch Bitcoin price for ${netAmount} ${currency} - will be backfilled later`,
         );
         return null;
       }
 
-      await this.dbLogger.info(
+      this.logger.log(
         `Bitcoin DCA calculation: ${amount} ${currency} gross, ${totalFees.toString()} fees, ${netAmount} net = ${calc.satoshis} sats at ${calc.btc_price} ${currency}/BTC`,
       );
 
@@ -548,8 +557,8 @@ export class TransactionService {
         net_amount: netAmount,
       };
     } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${errorMessage(error)}`,
       );
       return null;
     }
@@ -564,8 +573,7 @@ export class TransactionService {
     if (process.env.ENABLE_BITCOIN_TRACKING === 'false') return;
 
     try {
-      const rows = await this.knexService
-        .knex('transaction as t')
+      const rows = await this.transactionsWithPackage()
         .select(
           't.payhere_pay_id',
           't.gross_amount',
@@ -573,8 +581,6 @@ export class TransactionService {
           'p.currency as package_currency',
           's.user_id',
         )
-        .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
-        .join('package as p', 's.package_id', 'p.id')
         .where('t.status', 'SUCCESS')
         .whereNull('t.satoshis_purchased')
         .limit(50);
@@ -597,16 +603,14 @@ export class TransactionService {
           .whereNull('satoshis_purchased');
 
         if (updated) {
-          await this.dbLogger.warn(
+          this.logger.warn(
             `Backfilled Bitcoin data for ${row.payhere_pay_id}: ${data.satoshis_purchased} sats at ${data.btc_price_at_purchase} (price taken at backfill time)`,
           );
           await this.invalidateUserCaches(row.user_id);
         }
       }
     } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Bitcoin data backfill failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      this.logger.error(`Bitcoin data backfill failed: ${errorMessage(error)}`);
     }
   }
 
@@ -615,23 +619,28 @@ export class TransactionService {
     page: number,
     limit: number,
   ): Promise<PaginatedTransactions> {
-    const cacheKey = CacheKeys.transaction.list(user_id, page, limit);
-    const cached = await this.redisService.get<PaginatedTransactions>(cacheKey);
-    if (cached) {
-      return cached;
-    }
+    const result = await this.redisService.getOrSet(
+      CacheKeys.transaction.list(user_id, page, limit),
+      120,
+      () => this.loadTransactionsPage(user_id, page, limit),
+    );
+    return result!;
+  }
 
+  private async loadTransactionsPage(
+    user_id: string,
+    page: number,
+    limit: number,
+  ): Promise<PaginatedTransactions> {
     const subscriptionIds = await this.getSubscriptionIds(user_id);
     if (subscriptionIds.length === 0) {
-      const emptyResult: PaginatedTransactions = {
+      return {
         transactions: [],
         total_count: 0,
         total_pages: 0,
         current_page: page,
         has_more: false,
       };
-      await this.redisService.set(cacheKey, emptyResult, { ttl: 120 });
-      return emptyResult;
     }
 
     const [countResult] = await this.knexService
@@ -643,41 +652,35 @@ export class TransactionService {
     const totalPages = Math.ceil(totalCount / limit);
 
     // Joined with package info so callers get the LKR amount and plan name
-    const transactions = await this.knexService
-      .knex('transaction as t')
-      .select(
-        't.*',
-        'p.amount as package_amount',
-        'p.currency as package_currency',
-        'p.name as package_name',
-        'p.frequency as package_frequency',
-      )
-      .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
-      .join('package as p', 's.package_id', 'p.id')
+    const transactions = await this.transactionsWithPackage()
+      .select('t.*', ...PACKAGE_COLUMNS)
       .whereIn('t.payhere_sub_id', subscriptionIds)
       .orderBy('t.created_at', 'desc')
       .limit(limit)
       .offset((page - 1) * limit);
 
-    const result: PaginatedTransactions = {
+    return {
       transactions,
       total_count: totalCount,
       total_pages: totalPages,
       current_page: page,
       has_more: page < totalPages,
     };
-
-    await this.redisService.set(cacheKey, result, { ttl: 120 });
-    return result;
   }
 
-  async getLatestTransactionForUser(user_id: string): Promise<any | null> {
-    const cacheKey = CacheKeys.transaction.latest(user_id);
-    const cached = await this.redisService.get<any>(cacheKey);
-    if (cached) {
-      return cached;
-    }
+  async getLatestTransactionForUser(
+    user_id: string,
+  ): Promise<Record<string, unknown> | null> {
+    return this.redisService.getOrSet(
+      CacheKeys.transaction.latest(user_id),
+      60,
+      () => this.loadLatestTransaction(user_id),
+    );
+  }
 
+  private async loadLatestTransaction(
+    user_id: string,
+  ): Promise<Record<string, unknown> | null> {
     const activeSubscription: Subscription | undefined = await this.knexService
       .knex<Subscription>('subscription')
       .where('user_id', user_id)
@@ -689,42 +692,37 @@ export class TransactionService {
       return null;
     }
 
-    const result = await this.knexService
-      .knex('transaction as t')
-      .select(
-        't.payhere_pay_id',
-        't.payhere_sub_id',
-        't.status',
-        't.btc_price_at_purchase',
-        't.satoshis_purchased',
-        't.price_currency',
-        't.coingecko_timestamp',
-        't.created_at',
-        't.updated_at',
-        'p.amount as package_amount',
-        'p.currency as package_currency',
-        'p.name as package_name',
-        'p.frequency as package_frequency',
-      )
-      .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
-      .join('package as p', 's.package_id', 'p.id')
-      .where('t.payhere_sub_id', activeSubscription.payhere_sub_id)
-      .orderBy('t.created_at', 'desc')
-      .first();
+    const result: Record<string, unknown> | undefined =
+      await this.transactionsWithPackage()
+        .select(
+          't.payhere_pay_id',
+          't.payhere_sub_id',
+          't.status',
+          't.btc_price_at_purchase',
+          't.satoshis_purchased',
+          't.price_currency',
+          't.coingecko_timestamp',
+          't.created_at',
+          't.updated_at',
+          ...PACKAGE_COLUMNS,
+        )
+        .where('t.payhere_sub_id', activeSubscription.payhere_sub_id)
+        .orderBy('t.created_at', 'desc')
+        .first();
 
-    if (result) {
-      await this.redisService.set(cacheKey, result, { ttl: 60 });
-    }
-    return result || null;
+    return result ?? null;
   }
 
   async getDCASummaryForUser(user_id: string): Promise<DcaSummary> {
-    const cacheKey = CacheKeys.transaction.dcaSummary(user_id);
-    const cached = await this.redisService.get<DcaSummary>(cacheKey);
-    if (cached) {
-      return cached;
-    }
+    const summary = await this.redisService.getOrSet(
+      CacheKeys.transaction.dcaSummary(user_id),
+      300,
+      () => this.computeDcaSummary(user_id),
+    );
+    return summary!;
+  }
 
+  private async computeDcaSummary(user_id: string): Promise<DcaSummary> {
     const subscriptionIds = await this.getSubscriptionIds(user_id);
     const transactions: Transaction[] =
       subscriptionIds.length === 0
@@ -761,7 +759,7 @@ export class TransactionService {
 
     const market = await this.fetchBalanceAndMarket(user_id);
 
-    const summary: DcaSummary = {
+    return {
       dca: {
         balance: totalSatoshis.toNumber(),
         spent: totalSpent.toNumber(),
@@ -770,9 +768,14 @@ export class TransactionService {
       currency: 'LKR',
       ...market,
     };
+  }
 
-    await this.redisService.set(cacheKey, summary, { ttl: 300 });
-    return summary;
+  /** transaction t → subscription s → package p */
+  private transactionsWithPackage() {
+    return this.knexService
+      .knex('transaction as t')
+      .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
+      .join('package as p', 's.package_id', 'p.id');
   }
 
   private async getSubscriptionIds(user_id: string): Promise<string[]> {
@@ -805,8 +808,8 @@ export class TransactionService {
       change24h = (await this.bitcoinPriceService.getBitcoin24HrChange()) ?? 0;
       currentPrice = await this.bitcoinPriceService.getCurrentPrice();
     } catch (error: unknown) {
-      await this.dbLogger.warn(
-        `Failed to fetch market data for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.warn(
+        `Failed to fetch market data for user ${user_id}: ${errorMessage(error)}`,
       );
     }
 

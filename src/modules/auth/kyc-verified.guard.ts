@@ -33,33 +33,26 @@ export class KycVerifiedGuard implements CanActivate {
       throw new ForbiddenException('User not authenticated');
     }
 
-    // Check if user's KYC is verified
-    const isVerified = await this.userService.isKycVerified(user.id);
-    if (!isVerified) {
-      const kycStatus = await this.userService.getKycStatus(user.id);
-
-      let message = 'KYC verification required';
-      if (kycStatus?.status === KycStatus.DECLINED) {
-        message = `KYC verification declined: ${kycStatus.rejection_reason || 'Please retry verification'}`;
-      } else if (kycStatus?.status === KycStatus.EXPIRED) {
-        message = 'KYC verification session has expired. Please verify again';
-      } else if (kycStatus?.status === KycStatus.KYC_EXPIRED) {
-        message = 'Previous KYC verification has expired. Please verify again';
-      } else if (kycStatus?.status === KycStatus.ABANDONED) {
-        message =
-          'KYC verification was abandoned. Please complete the verification process';
-      } else if (kycStatus?.status === KycStatus.NOT_STARTED) {
-        message =
-          'KYC verification not started. Please complete the verification process';
-      } else if (kycStatus?.status === KycStatus.IN_PROGRESS) {
-        message =
-          'KYC verification is in progress. Please complete the verification process';
-      } else if (kycStatus?.status === KycStatus.IN_REVIEW) {
-        message =
-          'KYC verification is under manual review. Please wait for completion';
-      }
-
-      throw new ForbiddenException(message);
+    const kycStatus = await this.userService.getKycStatus(user.id);
+    if (kycStatus.status !== KycStatus.APPROVED) {
+      const messages: Partial<Record<KycStatus, string>> = {
+        [KycStatus.DECLINED]: `KYC verification declined: ${kycStatus.rejection_reason || 'Please retry verification'}`,
+        [KycStatus.EXPIRED]:
+          'KYC verification session has expired. Please verify again',
+        [KycStatus.KYC_EXPIRED]:
+          'Previous KYC verification has expired. Please verify again',
+        [KycStatus.ABANDONED]:
+          'KYC verification was abandoned. Please complete the verification process',
+        [KycStatus.NOT_STARTED]:
+          'KYC verification not started. Please complete the verification process',
+        [KycStatus.IN_PROGRESS]:
+          'KYC verification is in progress. Please complete the verification process',
+        [KycStatus.IN_REVIEW]:
+          'KYC verification is under manual review. Please wait for completion',
+      };
+      throw new ForbiddenException(
+        messages[kycStatus.status as KycStatus] ?? 'KYC verification required',
+      );
     }
 
     return true;

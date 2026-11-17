@@ -1,9 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import { errorMessage } from '../../common/error-message';
 
 const MAX_SETTLEMENT_ATTEMPTS = 5;
 
@@ -17,10 +17,11 @@ interface UnsettledTransaction {
 
 @Injectable()
 export class SettlementService {
+  private readonly logger = new Logger(SettlementService.name);
+
   constructor(
     private readonly knexService: KnexService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
-    private readonly dbLogger: DatabaseLoggerService,
     private readonly telegramLogger: TelegramLoggerService,
   ) {}
 
@@ -62,8 +63,8 @@ export class SettlementService {
         await this.tryTransactionSettlement(transaction);
       }
     } catch (error) {
-      await this.dbLogger.error(
-        `Error during settlement retry process: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `Error during settlement retry process: ${errorMessage(error)}`,
       );
     }
   }
@@ -104,8 +105,8 @@ export class SettlementService {
       if (!trx.isCompleted()) {
         await trx.rollback().catch(() => undefined);
       }
-      await this.dbLogger.error(
-        `Failed to claim transaction ${payhere_pay_id} for settlement: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `Failed to claim transaction ${payhere_pay_id} for settlement: ${errorMessage(error)}`,
       );
       return;
     }
@@ -133,7 +134,7 @@ export class SettlementService {
           .knex('transaction')
           .update({ settled: true })
           .where('payhere_pay_id', payhere_pay_id);
-        await this.dbLogger.info(
+        this.logger.log(
           result.already_completed
             ? `Settlement for ${payhere_pay_id} was already completed in a previous attempt`
             : `Settled ${payhere_pay_id}: ${satoshis_purchased} sats to user ${telegram_id} (attempt ${currentRetryCount})`,
@@ -150,24 +151,24 @@ export class SettlementService {
           .update({ retry_count: MAX_SETTLEMENT_ATTEMPTS })
           .where('payhere_pay_id', payhere_pay_id);
         const alert = `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) has an UNKNOWN outcome: ${result.message}. Retries stopped - check BitcoinDeepa before resetting.`;
-        await this.dbLogger.error(alert);
+        this.logger.error(alert);
         await this.telegramLogger.logAlert('Settlement', alert);
         return;
       }
 
       if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
         const alert = `Settlement of ${payhere_pay_id} permanently failed after ${currentRetryCount} attempts: ${result.message}`;
-        await this.dbLogger.error(alert);
+        this.logger.error(alert);
         await this.telegramLogger.logAlert('Settlement', alert);
       } else {
-        await this.dbLogger.warn(
+        this.logger.warn(
           `Settlement of ${payhere_pay_id} failed (attempt ${currentRetryCount}/${MAX_SETTLEMENT_ATTEMPTS}): ${result.message}. Next retry in ${Math.pow(2, currentRetryCount)} minutes.`,
         );
       }
     } catch (error) {
       // retry_count is already incremented, so the backoff still applies
-      await this.dbLogger.error(
-        `Settlement error for ${payhere_pay_id}: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `Settlement error for ${payhere_pay_id}: ${errorMessage(error)}`,
       );
     }
   }
@@ -193,8 +194,8 @@ export class SettlementService {
         memo = `${subscriptionWithPackage.package_name} DCA plan (Ref: ${payhere_pay_id})`;
       }
     } catch (packageError) {
-      await this.dbLogger.warn(
-        `Could not fetch package name for subscription ${subscription_id}: ${packageError instanceof Error ? packageError.message : String(packageError)}`,
+      this.logger.warn(
+        `Could not fetch package name for subscription ${subscription_id}: ${errorMessage(packageError)}`,
       );
     }
 

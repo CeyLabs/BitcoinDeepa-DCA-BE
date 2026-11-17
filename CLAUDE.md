@@ -249,6 +249,14 @@ try {
 3. Use `@CurrentUser() user: JwtPayload` parameter for user context
 4. Type every `@Body()` with a class DTO using class-validator decorators (not an interface) - the global `ValidationPipe` (`whitelist`, `transform`) only validates classes and strips unknown fields
 
+### Shared helpers (use these instead of re-writing the pattern)
+- Logging: `private readonly logger = new Logger(MyService.name)`. `DatabaseSystemLogger` (set via `app.useLogger`) already writes log/warn/error to the `log` table; `debug`/`verbose` stay console-only. Don't inject `DatabaseLoggerService` in features.
+- Errors: `errorMessage(error)` from `src/common/error-message.ts`.
+- Caching: `redisService.getOrSet(key, ttlSeconds, loader)` (null results aren't cached).
+- Telegram ops log: `telegramLoggerService.trackAction(action, user, fn)` posts the action, runs `fn`, and reacts on success.
+- Users: `userService.getUserOrThrow(id)` throws 404.
+- DB pool settings live only in `knexfile.ts`.
+
 ### Configuration
 - `ConfigModule.forRoot({ isGlobal: true, validate })` loads `.env` and validates it at startup (`src/config/env.validation.ts`). Add new env vars there; the app refuses to boot on missing/invalid values.
 - Production additionally requires `TELEGRAM_BOT_TOKEN`, `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET` and `DIDIT_WEBHOOK_SECRET`.

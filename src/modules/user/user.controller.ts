@@ -44,30 +44,22 @@ export class UserController {
     @CurrentUser() user: JwtPayload,
     @Body() updateProfileDto: UpdateProfileDto,
   ) {
-    const userExists = await this.userService.userExists(user.id);
-    if (!userExists) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
+    await this.userService.getUserOrThrow(user.id);
 
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    return this.telegramLoggerService.trackAction(
       'User Profile Completed',
       user,
+      async () => {
+        await this.userService.updateProfileDetails(user.id, updateProfileDto);
+        return { success: true };
+      },
     );
-
-    await this.userService.updateProfileDetails(user.id, updateProfileDto);
-
-    await this.telegramLoggerService.setMessageReaction(logMessage);
-
-    return { success: true };
   }
 
   @Get('me')
   @UseGuards(ConditionalAuthGuard)
   async getMe(@CurrentUser() user: JwtPayload) {
-    const currentUser = await this.userService.getUserById(user.id);
-    if (!currentUser) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
+    const currentUser = await this.userService.getUserOrThrow(user.id);
 
     return {
       ...currentUser,
@@ -84,19 +76,14 @@ export class UserController {
   @Post('kyc/initiate')
   @UseGuards(ConditionalAuthGuard)
   async initiateKyc(@CurrentUser() user: JwtPayload) {
-    // Check if user exists
-    const userExists = await this.userService.userExists(user.id);
-    if (!userExists) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
-
-    // Check if user already has approved KYC or verification in progress
-    const currentStatus = await this.userService.getKycStatus(user.id);
-    if (currentStatus?.status === KycStatus.APPROVED) {
+    const currentStatus = this.userService.toKycStatus(
+      await this.userService.getUserOrThrow(user.id),
+    );
+    if (currentStatus.status === KycStatus.APPROVED) {
       throw new HttpException('KYC already verified', HttpStatus.BAD_REQUEST);
     }
 
-    if (currentStatus?.status === KycStatus.IN_REVIEW) {
+    if (currentStatus.status === KycStatus.IN_REVIEW) {
       throw new HttpException(
         'KYC verification is under review',
         HttpStatus.BAD_REQUEST,
@@ -107,7 +94,7 @@ export class UserController {
     // the existing session if Didit says it is still open; otherwise start a
     // new one instead of blocking the user forever.
     if (
-      currentStatus?.status === KycStatus.IN_PROGRESS &&
+      currentStatus.status === KycStatus.IN_PROGRESS &&
       currentStatus.session_id
     ) {
       const existing = await this.diditService
@@ -121,39 +108,23 @@ export class UserController {
       }
     }
 
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    return this.telegramLoggerService.trackAction(
       'KYC Initiation',
       user,
+      async () => {
+        const session = await this.diditService.createVerificationSession(
+          user.id,
+        );
+        await this.userService.updateKycSessionId(user.id, session.session_id);
+        return { session_id: session.session_id, url: session.url };
+      },
     );
-
-    try {
-      // Create verification session with Didit
-      const session = await this.diditService.createVerificationSession(
-        user.id,
-      );
-
-      // Update user with session ID
-      await this.userService.updateKycSessionId(user.id, session.session_id);
-
-      await this.telegramLoggerService.setMessageReaction(logMessage);
-
-      return {
-        session_id: session.session_id,
-        url: session.url,
-      };
-    } catch (error) {
-      await this.telegramLoggerService.setMessageReaction(logMessage);
-      throw error;
-    }
   }
 
   @Get('kyc/status')
   @UseGuards(ConditionalAuthGuard)
   async getKycStatus(@CurrentUser() user: JwtPayload) {
     const status = await this.userService.getKycStatus(user.id);
-    if (!status) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
 
     let url: string | null = null;
 

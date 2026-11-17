@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
 import { KycStatus, KycStatusType } from './enums/kyc-status.enum';
 
@@ -41,6 +41,13 @@ export interface KycStatusUpdate {
   kyc_rejection_reason?: string | null;
 }
 
+export interface KycStatusInfo {
+  status: KycStatusType;
+  verified_at?: Date;
+  rejection_reason?: string;
+  session_id?: string;
+}
+
 @Injectable()
 export class UserService {
   constructor(private readonly knexService: KnexService) {}
@@ -72,6 +79,14 @@ export class UserService {
 
   async getUserById(id: string): Promise<User | undefined> {
     return this.knexService.knex<User>('user').where('id', id).first();
+  }
+
+  async getUserOrThrow(id: string): Promise<User> {
+    const user = await this.getUserById(id);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return user;
   }
 
   async userExists(id: string): Promise<boolean> {
@@ -110,22 +125,11 @@ export class UserService {
       .first();
   }
 
-  async isKycVerified(userId: string): Promise<boolean> {
-    const user = await this.getUserById(userId);
-    return user?.kyc_status === KycStatus.APPROVED;
+  async getKycStatus(userId: string): Promise<KycStatusInfo> {
+    return this.toKycStatus(await this.getUserOrThrow(userId));
   }
 
-  async getKycStatus(userId: string): Promise<{
-    status: KycStatusType;
-    verified_at?: Date;
-    rejection_reason?: string;
-    session_id?: string;
-  } | null> {
-    const user = await this.getUserById(userId);
-    if (!user) {
-      return null;
-    }
-
+  toKycStatus(user: User): KycStatusInfo {
     return {
       status: user.kyc_status || KycStatus.NOT_STARTED,
       verified_at: user.kyc_verified_at,
