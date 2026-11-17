@@ -96,14 +96,29 @@ export class UserController {
       throw new HttpException('KYC already verified', HttpStatus.BAD_REQUEST);
     }
 
-    if (
-      currentStatus?.status === KycStatus.IN_PROGRESS ||
-      currentStatus?.status === KycStatus.IN_REVIEW
-    ) {
+    if (currentStatus?.status === KycStatus.IN_REVIEW) {
       throw new HttpException(
-        'KYC verification already in progress',
+        'KYC verification is under review',
         HttpStatus.BAD_REQUEST,
       );
+    }
+
+    // IN_PROGRESS can get stuck if Didit's final webhook never arrives. Resume
+    // the existing session if Didit says it is still open; otherwise start a
+    // new one instead of blocking the user forever.
+    if (
+      currentStatus?.status === KycStatus.IN_PROGRESS &&
+      currentStatus.session_id
+    ) {
+      const existing = await this.diditService
+        .getSession(currentStatus.session_id)
+        .catch(() => null);
+      if (
+        existing?.url &&
+        (existing.status === 'Not Started' || existing.status === 'In Progress')
+      ) {
+        return { session_id: currentStatus.session_id, url: existing.url };
+      }
     }
 
     const logMessage = await this.telegramLoggerService.logGenericAction(
@@ -143,12 +158,10 @@ export class UserController {
     let url: string | null = null;
 
     if (status.session_id) {
-      try {
-        const sessionDetails = await this.diditService.getSessionDetails(
-          status.session_id,
-        );
-        url = sessionDetails?.url || null;
-      } catch (error) {}
+      const session = await this.diditService
+        .getSession(status.session_id)
+        .catch(() => null);
+      url = session?.url ?? null;
     }
 
     return {

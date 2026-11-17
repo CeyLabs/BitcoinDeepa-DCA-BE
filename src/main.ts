@@ -1,3 +1,4 @@
+import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { DatabaseSystemLogger } from './modules/knex/database-system-logger.service';
@@ -17,8 +18,10 @@ if (typeof global.crypto.randomUUID === 'undefined') {
 
 async function bootstrap() {
   // Create the app with custom logger
+  // rawBody is needed to verify HMAC signatures on incoming webhooks (Didit)
   const app = await NestFactory.create(AppModule, {
     bufferLogs: true,
+    rawBody: true,
   });
 
   // Get the custom logger from the DI container
@@ -26,6 +29,17 @@ async function bootstrap() {
 
   // Use the custom logger for the application
   app.useLogger(databaseLogger);
+
+  // Validate every request body against its DTO class; strip unknown fields
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+    }),
+  );
+
+  // Run onModuleDestroy (close DB pool / Redis) on SIGTERM during redeploys
+  app.enableShutdownHooks();
 
   // Enable CORS for production deployment
   app.enableCors({

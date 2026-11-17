@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { SubscriptionModule } from './modules/subscription/subscription.module';
 import { PackageModule } from './modules/package/package.module';
@@ -9,9 +10,11 @@ import { RedisModule } from './modules/redis/redis.module';
 import { HealthModule } from './modules/health/health.module';
 import { SettlementModule } from './modules/settlement/settlement.module';
 import { DiditModule } from './modules/didit/didit.module';
+import { validateEnv } from './config/env.validation';
 
 @Module({
   imports: [
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     ScheduleModule.forRoot(),
     RedisModule,
     SubscriptionModule,

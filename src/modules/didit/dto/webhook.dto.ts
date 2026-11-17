@@ -1,28 +1,22 @@
-import { DiditStatusType } from '../../user/enums/kyc-status.enum';
+import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
-export interface WebhookDto {
+/**
+ * Only the fields we use. Unknown fields are stripped by the global
+ * ValidationPipe; the HMAC is checked against the raw body, so stripping
+ * doesn't affect signature verification.
+ */
+export class WebhookDto {
+  @IsString()
+  @IsNotEmpty()
   session_id: string;
-  status: DiditStatusType;
-  verification_results?: {
-    id_verification?: {
-      status: 'passed' | 'failed';
-      document_type?: string;
-      country?: string;
-      confidence_score?: number;
-    };
-    liveness_detection?: {
-      status: 'passed' | 'failed';
-      confidence_score?: number;
-    };
-    face_match?: {
-      status: 'passed' | 'failed';
-      confidence_score?: number;
-    };
-    aml_screening?: {
-      status: 'passed' | 'failed';
-      risk_level?: string;
-    };
-  };
+
+  // Kept as a plain string: unknown Didit statuses are logged and ignored
+  // rather than rejected (which would make Didit retry forever).
+  @IsString()
+  @IsNotEmpty()
+  status: string;
+
+  @IsOptional()
+  @IsString()
   failure_reason?: string;
-  timestamp: string;
 }

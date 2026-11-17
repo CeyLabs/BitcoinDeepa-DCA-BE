@@ -48,6 +48,7 @@ export class SubscriptionService {
         's.user_id',
         's.package_id',
         's.is_active',
+        's.payment_processor',
         's.created_at',
         's.updated_at',
         'p.name as package_name',

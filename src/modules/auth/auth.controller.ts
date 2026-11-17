@@ -1,11 +1,8 @@
 import { Controller, Post, Body, UnauthorizedException } from '@nestjs/common';
-import { AuthService, JwtPayload, TelegramOidcAuthDto } from './auth.service';
+import { AuthService, JwtPayload } from './auth.service';
+import { TelegramAuthDto, TelegramOidcAuthDto } from './dto/telegram-auth.dto';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { UserService } from '../user/user.service';
-
-interface TelegramAuthDto {
-  initData: string;
-}
 
 interface AuthResponse {
   token: string;

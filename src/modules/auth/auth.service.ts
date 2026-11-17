@@ -50,10 +50,6 @@ export interface JwtPayload {
   username?: string;
 }
 
-export interface TelegramOidcAuthDto {
-  id_token: string;
-}
-
 // Claims Telegram puts in the id_token — see
 // https://core.telegram.org/bots/telegram-login#user-data-structure
 // Telegram's docs say `id` is a number, but in practice it's sent as a
@@ -101,13 +97,15 @@ export class AuthService {
         return false;
       }
 
-      const authTime = dayjs.unix(authTimestamp);
-      const currentTime = dayjs();
-      const maxAge = 24; // 24 hours
+      const ageSeconds = dayjs().diff(dayjs.unix(authTimestamp), 'second');
+      // initData is exchanged for a 7-day JWT right at app launch, so a
+      // short window limits how long a leaked initData can be replayed.
+      const maxAgeSeconds = 60 * 60; // 1 hour
+      const maxClockSkewSeconds = 60;
 
-      if (currentTime.diff(authTime, 'hour') > maxAge) {
+      if (ageSeconds > maxAgeSeconds || ageSeconds < -maxClockSkewSeconds) {
         await this.dbLogger.warn(
-          `Expired Telegram auth data - age: ${currentTime.diff(authTime, 'hour')} hours (max: ${maxAge})`,
+          `Rejected Telegram auth data - age: ${ageSeconds}s (allowed: -${maxClockSkewSeconds}s to ${maxAgeSeconds}s)`,
         );
         return false;
       }
@@ -130,7 +128,11 @@ export class AuthService {
         .update(dataCheckString)
         .digest('hex');
 
-      const isValid = computedHash === hash;
+      const computed = Buffer.from(computedHash, 'hex');
+      const received = Buffer.from(hash, 'hex');
+      const isValid =
+        received.length === computed.length &&
+        crypto.timingSafeEqual(computed, received);
       if (!isValid) {
         await this.dbLogger.warn(
           'Hash verification failed for Telegram init data',
@@ -162,6 +164,9 @@ export class AuthService {
       const { payload } = await jwtVerify(idToken, jwks, {
         issuer: TELEGRAM_OIDC_ISSUER,
         audience: clientId,
+        // Telegram's default; update if BotFather's Login Widget > Advanced
+        // signing algorithm is changed.
+        algorithms: ['RS256'],
       });
 
       const rawId = payload.id;
@@ -206,18 +211,5 @@ export class AuthService {
     const token = this.jwtService.sign(payload);
     await this.dbLogger.info(`JWT token generated for user: ${payload.id}`);
     return token;
-  }
-
-  async verifyJwt(token: string): Promise<JwtPayload> {
-    try {
-      const payload = this.jwtService.verify(token);
-      await this.dbLogger.info(
-        `JWT token verified for user: ${payload.telegram_id}`,
-      );
-      return payload;
-    } catch (error) {
-      await this.dbLogger.warn(`JWT verification failed: ${error.message}`);
-      throw error;
-    }
   }
 }

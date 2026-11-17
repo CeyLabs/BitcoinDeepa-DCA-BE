@@ -68,6 +68,12 @@ export class TelegramLoggerService {
     await this.sendMessage(message, true);
   }
 
+  /** Something that needs a human to look at it (fraud signal, manual fix). */
+  async logAlert(source: string, text: string): Promise<void> {
+    const message = `⚠️ <b>ALERT (${source})</b>\n${text}`;
+    await this.sendMessage(message);
+  }
+
   async logGenericAction(
     action: string,
     user: JwtPayload,

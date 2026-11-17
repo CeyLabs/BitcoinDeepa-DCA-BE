@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { createHmac } from 'crypto';
-import axios from 'axios';
+import axios, { AxiosResponse } from 'axios';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 
 export interface FundTransferRequest {
@@ -14,6 +14,7 @@ export interface FundTransferResponse {
   message?: string;
   transaction_id?: string;
   already_completed?: boolean; // True if transfer was already completed in a previous attempt
+  outcome_unknown?: boolean; // True if we got no response (timeout/network) - the transfer may have happened
 }
 
 export interface UserBalanceRequest {
@@ -78,18 +79,38 @@ export class BitcoinDeepaService {
     this.timeout = parseInt(process.env.BITCOINDEEPA_TIMEOUT || '10000', 10);
   }
 
+  isConfigured(): boolean {
+    return !!(this.apiUrl && this.hmacSecret);
+  }
+
   /**
-   * Generate HMAC signature for API authentication
-   * Combines: METHOD + PATH + TIMESTAMP + BODY
+   * POST to the BitcoinDeepa API, signed with
+   * HMAC-SHA256(secret, METHOD + PATH + TIMESTAMP + BODY).
    */
-  private generateHmacSignature(
-    httpMethod: string,
-    urlPath: string,
-    timestamp: string,
-    body: string,
-  ): string {
-    const message = `${httpMethod}${urlPath}${timestamp}${body}`;
-    return createHmac('sha256', this.hmacSecret).update(message).digest('hex');
+  private signedPost<T>(path: string, body: object): Promise<AxiosResponse<T>> {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const bodyString = JSON.stringify(body);
+    const signature = createHmac('sha256', this.hmacSecret)
+      .update(`POST${path}${timestamp}${bodyString}`)
+      .digest('hex');
+
+    return axios.post<T>(`${this.apiUrl}${path}`, bodyString, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-HMAC-Signature': signature,
+        'X-Timestamp': timestamp,
+      },
+      timeout: this.timeout,
+    });
+  }
+
+  private static errorMessage(error: any, fallback: string): string {
+    return String(
+      error?.response?.data?.error ||
+        error?.response?.data?.message ||
+        error?.message ||
+        fallback,
+    );
   }
 
   /**
@@ -100,129 +121,65 @@ export class BitcoinDeepaService {
     toTelegramId: string,
     memo: string,
   ): Promise<FundTransferResponse> {
+    const requestBody: FundTransferRequest = {
+      amount: Number(amount),
+      to: toTelegramId,
+      memo,
+    };
+
     try {
-      const url = `${this.apiUrl}${this.sendEndpoint}`;
-      const timestamp = Math.floor(Date.now() / 1000);
-      const httpMethod = 'POST';
-
-      const requestBody: FundTransferRequest = {
-        amount: Number(amount),
-        to: toTelegramId,
-        memo,
-      };
-
-      const bodyString = JSON.stringify(requestBody);
-      const signature = this.generateHmacSignature(
-        httpMethod,
+      const response = await this.signedPost<FundTransferResponse>(
         this.sendEndpoint,
-        timestamp.toString(),
-        bodyString,
-      );
-
-      const headers = {
-        'Content-Type': 'application/json',
-        'X-HMAC-Signature': signature,
-        'X-Timestamp': timestamp.toString(),
-      };
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.sendEndpoint}`,
-      );
-
-      const response = await axios.post<FundTransferResponse>(
-        url,
         requestBody,
-        {
-          headers,
-          timeout: this.timeout,
-        },
       );
-
       await this.dbLogger.info(
-        `BitcoinDeepaService.transferFunds: Fund transfer successful - ${amount} satoshis to user ${toTelegramId}, status: ${response.status}`,
+        `BitcoinDeepa transfer OK: ${amount} sats to user ${toTelegramId} (status ${response.status})`,
       );
-
       return response.data;
     } catch (error: any) {
-      // Extract error message from response (BitcoinDeepa uses 'error' field, not 'message')
-      const errorMessage =
-        error.response?.data?.error ||
-        error.response?.data?.message ||
-        error.message ||
-        'Fund transfer failed';
-
-      // Log full error details for debugging
+      const message = BitcoinDeepaService.errorMessage(
+        error,
+        'Fund transfer failed',
+      );
       await this.dbLogger.error(
-        `BitcoinDeepaService.transferFunds: Fund transfer failed for ${amount} satoshis to user ${toTelegramId}: ${errorMessage} (status: ${error.response?.status})`,
+        `BitcoinDeepa transfer failed: ${amount} sats to user ${toTelegramId}: ${message} (status: ${error.response?.status})`,
       );
 
-      // Check if this is an "already completed" error (transfer actually succeeded)
-      const isAlreadyCompleted =
-        errorMessage.toLowerCase().includes('already completed') ||
-        errorMessage.toLowerCase().includes('already exists');
+      // No HTTP response (timeout, connection reset): the server may still
+      // have processed the transfer, so this must not be blindly retried.
+      if (!error.response) {
+        return { success: false, message, outcome_unknown: true };
+      }
 
-      // Return a standardized error response
+      // The API reports a duplicate memo/ref as an error; treat it as done.
+      const lower = String(message).toLowerCase();
       return {
         success: false,
-        message: errorMessage,
-        already_completed: isAlreadyCompleted,
+        message,
+        already_completed:
+          lower.includes('already completed') ||
+          lower.includes('already exists'),
       };
     }
   }
 
-  /**
-   * Validate configuration on service initialization
-   */
   async getUserBalance(telegramId: number): Promise<UserBalanceResponse> {
+    const requestBody: UserBalanceRequest = { telegram_id: telegramId };
     try {
-      const url = `${this.apiUrl}${this.balanceEndpoint}`;
-      const timestamp = Math.floor(Date.now() / 1000);
-      const httpMethod = 'POST';
-
-      const requestBody: UserBalanceRequest = {
-        telegram_id: telegramId,
-      };
-
-      const bodyString = JSON.stringify(requestBody);
-      const signature = this.generateHmacSignature(
-        httpMethod,
+      const response = await this.signedPost<UserBalanceResponse>(
         this.balanceEndpoint,
-        timestamp.toString(),
-        bodyString,
+        requestBody,
       );
-
-      const headers = {
-        'Content-Type': 'application/json',
-        'X-HMAC-Signature': signature,
-        'X-Timestamp': timestamp.toString(),
-      };
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.getUserBalance: Fetching balance for user ${telegramId} at ${this.balanceEndpoint}`,
-      );
-
-      const response = await axios.post<UserBalanceResponse>(url, requestBody, {
-        headers,
-        timeout: this.timeout,
-      });
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.getUserBalance: Balance fetch successful for user ${telegramId}, status: ${response.status}`,
-      );
-
       return response.data;
     } catch (error: any) {
-      await this.dbLogger.error(
-        `BitcoinDeepaService.getUserBalance: Balance fetch failed for user ${telegramId}: ${error.message}`,
+      const message = BitcoinDeepaService.errorMessage(
+        error,
+        'Balance fetch failed',
       );
-
-      return {
-        success: false,
-        message:
-          error.response?.data?.message ||
-          error.message ||
-          'Balance fetch failed',
-      };
+      await this.dbLogger.error(
+        `BitcoinDeepa balance fetch failed for user ${telegramId}: ${message}`,
+      );
+      return { success: false, message };
     }
   }
 
@@ -234,60 +191,25 @@ export class BitcoinDeepaService {
     limit = 100,
     offset = 0,
   ): Promise<UserTransactionsResponse> {
+    const requestBody: UserTransactionsRequest = {
+      telegram_id: telegramId,
+      limit,
+      offset,
+    };
     try {
-      const url = `${this.apiUrl}${this.userTransactionsEndpoint}`;
-      const timestamp = Math.floor(Date.now() / 1000);
-      const httpMethod = 'POST';
-
-      const requestBody: UserTransactionsRequest = {
-        telegram_id: telegramId,
-        limit,
-        offset,
-      };
-
-      const bodyString = JSON.stringify(requestBody);
-      const signature = this.generateHmacSignature(
-        httpMethod,
+      const response = await this.signedPost<UserTransactionsResponse>(
         this.userTransactionsEndpoint,
-        timestamp.toString(),
-        bodyString,
-      );
-
-      const headers = {
-        'Content-Type': 'application/json',
-        'X-HMAC-Signature': signature,
-        'X-Timestamp': timestamp.toString(),
-      };
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.getUserTransactions: Fetching transactions for user ${telegramId} at ${this.userTransactionsEndpoint} (limit: ${limit}, offset: ${offset})`,
-      );
-
-      const response = await axios.post<UserTransactionsResponse>(
-        url,
         requestBody,
-        {
-          headers,
-          timeout: this.timeout,
-        },
       );
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.getUserTransactions: Fetch successful for user ${telegramId}, status: ${response.status}, count: ${response.data.count}`,
-      );
-
       return response.data;
     } catch (error: any) {
-      const errorMessage =
-        error.response?.data?.error ||
-        error.response?.data?.message ||
-        error.message ||
-        'Fetching transactions failed';
-
-      await this.dbLogger.error(
-        `BitcoinDeepaService.getUserTransactions: Fetch failed for user ${telegramId}: ${errorMessage} (status: ${error.response?.status})`,
+      const message = BitcoinDeepaService.errorMessage(
+        error,
+        'Fetching transactions failed',
       );
-
+      await this.dbLogger.error(
+        `BitcoinDeepa transactions fetch failed for user ${telegramId}: ${message} (status: ${error.response?.status})`,
+      );
       return {
         success: false,
         telegram_id: telegramId,
@@ -295,12 +217,8 @@ export class BitcoinDeepaService {
         limit,
         offset,
         transactions: [],
-        message: errorMessage,
+        message,
       };
     }
-  }
-
-  isConfigured(): boolean {
-    return !!(this.apiUrl && this.hmacSecret);
   }
 }

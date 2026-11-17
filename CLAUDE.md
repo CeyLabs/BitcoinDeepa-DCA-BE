@@ -18,7 +18,8 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 ### Core Modules
 
 1. **Auth Module** (`src/modules/auth/`)
-   - Telegram WebApp InitData validation using HMAC-SHA256 with timestamp verification (24-hour max age)
+   - Telegram WebApp InitData validation using HMAC-SHA256 (constant-time compare) with timestamp verification (1-hour max age)
+   - Telegram Login (OIDC) id_token verified against Telegram's JWKS (RS256, issuer, audience, exp)
    - JWT token generation and verification (7-day expiration)
    - Single guard strategy: `ConditionalAuthGuard` (supports both authenticated and development modes)
    - `@CurrentUser()` decorator for extracting user context
@@ -55,14 +56,15 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
    - CoinMarketCap API integration for real-time Bitcoin prices
    - Automatic satoshi calculation for DCA transactions
-   - Price caching with configurable TTL (20 seconds default)
+   - Redis price caching: BTC/USD `BTC_PRICE_CACHE_TTL` (300s default), USD/LKR `USD_LKR_CACHE_TTL` (20s default)
    - Support for multiple currencies (LKR, USD, etc.)
 
 9. **Didit KYC Module** (`src/modules/didit/`)
    - KYC (Know Your Customer) verification integration via Didit API
    - Verification session management and webhook handling
    - ID verification, liveness detection, face matching, and AML screening
-   - Automatic user KYC status updates via webhooks
+   - Automatic user KYC status updates via webhooks: `X-Signature` (HMAC of raw body), `X-Timestamp` must be within 5 minutes; `DIDIT_WEBHOOK_SECRET` required in production
+   - Sessions API v3 (`/v3/session/`); late `Not Started`/`In Progress` webhooks never overwrite a final KYC result; `Resubmitted` → `IN_PROGRESS`
    - Uses strongly typed KYC status enum for database consistency
 
 ### Database Schema
@@ -119,7 +121,8 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/dbname
 
 # Telegram Authentication
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-JWT_SECRET=your_jwt_secret_key
+JWT_SECRET=your_jwt_secret_key  # Required - app refuses to start without it
+ADMIN_API_KEY=your_admin_key  # Required for internal endpoints (x-admin-key header)
 ENABLE_AUTH=true  # Set to 'false' for development (bypasses auth)
 
 # PayHere Integration
@@ -127,20 +130,22 @@ PAYHERE_MERCHANT_ID=your_merchant_id
 PAYHERE_MERCHANT_SECRET=your_merchant_secret
 PAYHERE_APP_ID=your_app_id
 PAYHERE_APP_SECRET=your_app_secret
-PAYHERE_BASE_URL=https://sandbox.payhere.lk  # or production URL
+PAYHERE_ENV=sandbox  # or live
 
 # Bitcoin DCA Configuration
-COINGECKO_API_KEY=your_coingecko_pro_api_key  # Optional, for better rate limits
+COINMARKETCAP_API_KEY=your_cmc_api_key
 ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
-BITCOIN_PRICE_CACHE_TTL=20  # Cache duration in seconds (default: 20)
+BTC_PRICE_CACHE_TTL=300  # BTC/USD cache in seconds (default: 300)
+USD_LKR_CACHE_TTL=20  # USD/LKR cache in seconds (default: 20)
 
 # Fee Configuration
-FEE_BASIS_POINTS=100  # Platform fee in basis points (1 bp = 0.01%, 100 = 1%, 250 = 2.5%)
+PAYHERE_FEE_BASIS_POINTS=100  # Payment processor fee (1 bp = 0.01%)
+BITCOINDEEPA_FEE_BASIS_POINTS=100  # Platform fee
 
 # Didit KYC Integration
 DIDIT_API_KEY=your_didit_api_key  # Required for KYC verification
-DIDIT_BASE_URL=https://api.didit.me  # Didit API base URL (sandbox: https://sandbox.api.didit.me)
-DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Optional, for webhook signature verification
+DIDIT_BASE_URL=https://verification.didit.me  # Didit API base URL (v3 sessions API)
+DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Required in production; optional in dev
 DIDIT_CALLBACK_BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
 
 # Server
@@ -176,7 +181,8 @@ PORT=3000
 - `POST /didit/webhook` - Didit webhook for KYC status updates (public)
 
 ### Transactions
-- `POST /transaction/payhere-webhook` - PayHere webhook handler (public)
+- `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
+- `POST /transaction/reset-retry-counts` - Reset settlement retries (internal, requires `x-admin-key`)
 - `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 
@@ -225,7 +231,7 @@ try {
 
 ### KYC Integration (Didit)
 - KYC verification is required before creating new subscriptions
-- Webhook signatures should be verified when `DIDIT_WEBHOOK_SECRET` is configured
+- Webhook signatures (`X-Signature` + `X-Timestamp`) are always verified when `DIDIT_WEBHOOK_SECRET` is set (missing/stale = 401); in production the secret is required
 - Handle various verification statuses: pending, verified, rejected, expired
 - Store Didit session IDs for tracking verification progress
 - Use ID verification + liveness detection as minimum requirements
@@ -241,6 +247,12 @@ try {
 1. Import `ConditionalAuthGuard` and `@CurrentUser` decorator
 2. Apply `@UseGuards(ConditionalAuthGuard)` to controller method
 3. Use `@CurrentUser() user: JwtPayload` parameter for user context
+4. Type every `@Body()` with a class DTO using class-validator decorators (not an interface) - the global `ValidationPipe` (`whitelist`, `transform`) only validates classes and strips unknown fields
+
+### Configuration
+- `ConfigModule.forRoot({ isGlobal: true, validate })` loads `.env` and validates it at startup (`src/config/env.validation.ts`). Add new env vars there; the app refuses to boot on missing/invalid values.
+- Production additionally requires `TELEGRAM_BOT_TOKEN`, `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET` and `DIDIT_WEBHOOK_SECRET`.
+- `app.enableShutdownHooks()` is on, so `onModuleDestroy` (DB pool, Redis) runs on SIGTERM.
 
 ### Database Migrations
 1. Create migration file: `npx knex migrate:make migration_name`
@@ -261,13 +273,21 @@ try {
 - `FAILED`: Payment failed
 - `CHARGEBACK`: Payment reversed
 
+**Webhook rules (PayHere):**
+- PayHere's md5sig only covers merchant_id, order_id, amount, currency and status_code. Each subscription is bound to its `payhere_order_id`; notifications whose order_id / custom_1 don't match the stored subscription are rejected.
+- Status transitions: SUCCESS can only become CHARGEBACK, CHARGEBACK is final, nothing goes back to PENDING. Out-of-order notifications are ignored.
+- A new subscription is `is_active = true` only if its first payment is SUCCESS; otherwise it is activated by its first SUCCESS.
+- `item_rec_status` -1/1 or `message_type` RECURRING_STOPPED/RECURRING_COMPLETE marks the subscription inactive.
+- SUCCESS payments saved without BTC price data (price API down) are backfilled by a cron every minute.
+- Settlement stops retrying (and alerts) when a BitcoinDeepa transfer times out, since it may have gone through.
+
 ### Fee System
 
 The platform implements a dual-fee system with separate payment processor and platform fees using basis points:
 
 **Configuration:**
 - Fees are configured via environment variables (each in basis points)
-- `PAYHERE_FEE_BASIS_POINTS`: Fee charged by payment processor (PayHere, CeyPay)
+- `PAYHERE_FEE_BASIS_POINTS`: Fee charged by the payment processor (PayHere)
 - `BITCOINDEEPA_FEE_BASIS_POINTS`: Platform fee charged by BitcoinDeepa
 - 1 basis point (bp) = 0.01%
 - Default: 100 basis points = 1% for each fee
@@ -275,7 +295,7 @@ The platform implements a dual-fee system with separate payment processor and pl
 
 **Payment Processors:**
 - `PAYHERE`: Default payment processor (Sri Lankan payment gateway)
-- `CEYPAY`: Alternative processor (to be implemented)
+- `CEYPAY`: Alternative processor (enum value only - not implemented yet)
 
 **Fee Calculation:**
 ```typescript
@@ -304,8 +324,6 @@ satoshis_purchased = (net_amount ÷ btc_price) × 100,000,000
 - Net amount: 980 LKR
 - Bitcoin purchased: 980 LKR worth of satoshis
 
-**Testing:**
-Run `npx ts-node scripts/test-fee-calculation.ts` to see fee calculations with different scenarios.
 
 ## File Organization
 
@@ -330,8 +348,7 @@ src/
 ```typescript
 // Authentication
 interface JwtPayload {
-  user_id: string;
-  telegram_id: string;
+  id: string; // Telegram user ID
   username?: string;
 }
 
@@ -359,8 +376,8 @@ enum Status {
 
 - When `ENABLE_AUTH=false`, all protected endpoints use mock user data (development only)
 - PayHere webhooks must be publicly accessible (no authentication)
-- Telegram InitData validation requires proper HMAC-SHA256 verification with 24-hour timestamp limit
-- Replay attack protection: InitData must be less than 24 hours old
+- Telegram InitData validation requires proper HMAC-SHA256 verification with 1-hour timestamp limit
+- Replay attack protection: InitData must be less than 1 hour old
 - Production environments always enforce authentication regardless of ENABLE_AUTH setting
 - Database uses UUID for packages, string IDs for users (Telegram ID)
 - All timestamps use PostgreSQL's automatic timestamp handling

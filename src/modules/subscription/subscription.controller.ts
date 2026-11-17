@@ -21,6 +21,7 @@ import { UserService } from '../user/user.service';
 import { randomUUID } from 'crypto';
 import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import { PayHereLinkDto } from './dto/payhere-link.dto';
 
 @Controller('subscription')
 export class SubscriptionController {
@@ -67,7 +68,7 @@ export class SubscriptionController {
   @RequireKyc()
   async getPayHereLink(
     @CurrentUser() user: JwtPayload,
-    @Body() body: { package_id: string },
+    @Body() body: PayHereLinkDto,
   ): Promise<{ link: string }> {
     const logMessage = await this.telegramLoggerService.logGenericAction(
       'Generate PayHere Link (/subscription/payhere-link)',

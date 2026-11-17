@@ -57,7 +57,10 @@ export class UserService {
       .merge({
         first_name: profile.first_name,
         last_name: profile.last_name ?? null,
-      });
+      })
+      // Once the user completes their profile (legal name used for PayHere
+      // billing), stop overwriting it with their Telegram display name.
+      .whereNull('user.email');
   }
 
   async updateProfileDetails(
