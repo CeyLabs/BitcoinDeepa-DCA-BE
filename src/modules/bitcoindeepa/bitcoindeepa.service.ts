@@ -63,6 +63,8 @@ export interface UserTransactionsResponse {
   message?: string;
 }
 
+const GATEWAY_ERROR_STATUSES = [502, 503, 504];
+
 @Injectable()
 export class BitcoinDeepaService {
   private readonly logger = new Logger(BitcoinDeepaService.name);
@@ -146,9 +148,14 @@ export class BitcoinDeepaService {
         `BitcoinDeepa transfer failed: ${amount} sats to user ${toTelegramId}: ${message} (status: ${error.response?.status})`,
       );
 
-      // No HTTP response (timeout, connection reset): the server may still
-      // have processed the transfer, so this must not be blindly retried.
-      if (!error.response) {
+      // No HTTP response (timeout, connection reset), or a gateway error from
+      // a proxy in front of the API (502/503/504): the transfer may still
+      // have gone through, so it must not be blindly retried.
+      const httpStatus: unknown = error.response?.status;
+      if (
+        httpStatus === undefined ||
+        GATEWAY_ERROR_STATUSES.includes(Number(httpStatus))
+      ) {
         return { success: false, message, outcome_unknown: true };
       }
 

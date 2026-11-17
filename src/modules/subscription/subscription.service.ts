@@ -17,12 +17,18 @@ export class SubscriptionService {
     private readonly redisService: RedisService,
   ) {}
 
+  /**
+   * The user's active subscription if there is one, else their newest. An
+   * active plan must win over a newer inactive row (a declined checkout
+   * attempt), or the one-plan check and /cancel would miss the live plan.
+   */
   async getCurrentSubscriptionForUser(
     user_id: string,
   ): Promise<Subscription | undefined> {
     return this.knexService
       .knex<Subscription>('subscription')
       .where({ user_id })
+      .orderBy('is_active', 'desc')
       .orderBy('created_at', 'desc')
       .first();
   }

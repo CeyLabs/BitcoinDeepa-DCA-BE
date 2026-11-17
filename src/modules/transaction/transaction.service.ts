@@ -91,6 +91,9 @@ export interface PaginatedTransactions {
 
 const SATOSHIS_PER_BTC = 100_000_000;
 
+// Unpriced payments older than this are alerted, not auto-priced and paid.
+const BACKFILL_MAX_AGE_HOURS = 24;
+
 const PACKAGE_COLUMNS = [
   'p.amount as package_amount',
   'p.currency as package_currency',
@@ -423,13 +426,15 @@ export class TransactionService {
       payhere_order_id: order_id,
       user_id,
       package_id,
-      // Only a paid first charge makes the subscription active
-      is_active: status === 'SUCCESS',
+      // Always created inactive. activateIfFirstSuccess (run for SUCCESS)
+      // activates it, unless the user already has another active plan - e.g.
+      // they opened two checkout links and paid both.
+      is_active: false,
     } as Subscription;
     await trx('subscription').insert(subscription);
 
     this.logger.log(
-      `Created subscription ${subscription_id} for user ${user_id}, package ${package_id} (active: ${subscription.is_active})`,
+      `Created subscription ${subscription_id} for user ${user_id}, package ${package_id} (first status: ${status})`,
     );
     return { subscription, created: true };
   }
@@ -439,15 +444,32 @@ export class TransactionService {
     order_id: string,
     subscription_id: string,
   ): Promise<void> {
-    const other = await trx('subscription')
+    const other: Subscription | undefined = await trx('subscription')
       .where('payhere_order_id', order_id)
       .whereNot('payhere_sub_id', subscription_id)
+      .forUpdate()
       .first();
-    if (other) {
+    if (!other) return;
+
+    // A declined first charge leaves an inactive, never-paid subscription
+    // holding the order_id. If the payer retries on the same checkout page
+    // and PayHere issues a new subscription_id, the retry must still be
+    // accepted - so release the order_id from the failed attempt.
+    const otherWasPaid: unknown = await trx('transaction')
+      .where('payhere_sub_id', other.payhere_sub_id)
+      .whereIn('status', ['SUCCESS', 'CHARGEBACK'])
+      .first();
+    if (other.is_active || otherWasPaid) {
       throw new BadRequestException(
         'order_id is already bound to another subscription',
       );
     }
+    await trx('subscription')
+      .update({ payhere_order_id: null, updated_at: trx.fn.now() })
+      .where('payhere_sub_id', other.payhere_sub_id);
+    this.logger.warn(
+      `order_id ${order_id} moved from never-paid subscription ${other.payhere_sub_id} to ${subscription_id} (checkout retry)`,
+    );
   }
 
   /**
@@ -578,6 +600,11 @@ export class TransactionService {
   /**
    * SUCCESS payments saved without price data (price API was down at webhook
    * time) are never settled. Fill them in with the current price.
+   *
+   * Only recent payments: the backfilled amount is settled automatically, and
+   * pricing an old payment at today's rate (e.g. rows from before tracking
+   * was enabled) is a payout decision for a human - see
+   * alertStaleUnpricedPayments.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async backfillMissingBitcoinData(): Promise<void> {
@@ -594,6 +621,13 @@ export class TransactionService {
         )
         .where('t.status', 'SUCCESS')
         .whereNull('t.satoshis_purchased')
+        .where(
+          't.created_at',
+          '>=',
+          this.knexService.knex.raw(
+            `now() - interval '${BACKFILL_MAX_AGE_HOURS} hours'`,
+          ),
+        )
         .limit(50);
 
       for (const row of rows) {
@@ -622,6 +656,38 @@ export class TransactionService {
       }
     } catch (error: unknown) {
       this.logger.error(`Bitcoin data backfill failed: ${errorMessage(error)}`);
+    }
+  }
+
+  /** Unpriced SUCCESS payments too old to backfill need a manual decision. */
+  @Cron(CronExpression.EVERY_6_HOURS)
+  async alertStaleUnpricedPayments(): Promise<void> {
+    try {
+      const rows = await this.knexService
+        .knex<{ payhere_pay_id: string }>('transaction')
+        .select('payhere_pay_id')
+        .where('status', 'SUCCESS')
+        .whereNull('satoshis_purchased')
+        .where(
+          'created_at',
+          '<',
+          this.knexService.knex.raw(
+            `now() - interval '${BACKFILL_MAX_AGE_HOURS} hours'`,
+          ),
+        )
+        .orderBy('created_at')
+        .limit(20);
+      if (rows.length === 0) return;
+
+      const ids = rows.map((r) => r.payhere_pay_id).join(', ');
+      await this.telegramLoggerService.logAlert(
+        'Backfill',
+        `SUCCESS payments older than ${BACKFILL_MAX_AGE_HOURS}h have no BTC price and will NOT be settled automatically${rows.length === 20 ? ' (first 20)' : ''}: ${ids}. Price and settle them manually.`,
+      );
+    } catch (error: unknown) {
+      this.logger.error(
+        `Stale unpriced payment check failed: ${errorMessage(error)}`,
+      );
     }
   }
 
