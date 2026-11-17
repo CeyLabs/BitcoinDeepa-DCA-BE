@@ -113,11 +113,29 @@ export class SettlementService {
       return;
     }
 
+    let confirmed: boolean;
     try {
-      const confirmed = await this.isConfirmedByPayHere(
+      confirmed = await this.isConfirmedByPayHere(
         payhere_pay_id,
         payhere_sub_id,
       );
+    } catch (error) {
+      // PayHere's API failing says nothing about this payment, so it must not
+      // use up settlement attempts (an outage would otherwise flag every
+      // payment in it as forged). Give the attempt back; last_retry_at keeps
+      // the backoff, so it is retried later.
+      await this.knexService
+        .knex('transaction')
+        .update({ retry_count: retry_count })
+        .where('payhere_pay_id', payhere_pay_id)
+        .where('retry_count', currentRetryCount);
+      this.logger.warn(
+        `Settlement of ${payhere_pay_id} postponed: PayHere payment lookup failed (${errorMessage(error)})`,
+      );
+      return;
+    }
+
+    try {
       if (!confirmed) {
         const message = `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for subscription ${payhere_sub_id}`;
         if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
@@ -206,7 +224,7 @@ export class SettlementService {
    * Only pay out payments PayHere itself lists as received. The webhook's
    * md5sig doesn't cover payment_id, so a signed notification can be replayed
    * with invented payment_ids - this is the check that stops those being
-   * paid. API errors throw (the attempt counts and is retried with backoff).
+   * paid. API errors throw (the caller retries without using an attempt).
    */
   private async isConfirmedByPayHere(
     payhere_pay_id: string,

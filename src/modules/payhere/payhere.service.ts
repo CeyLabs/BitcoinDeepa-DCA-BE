@@ -33,6 +33,12 @@ export interface SubscriptionPayment {
   status: string;
 }
 
+// Every PayHere API call is bounded: settlement handles payments one after
+// another, so a hung request would stall every payout behind it.
+const PAYHERE_API_TIMEOUT_MS = 10000;
+// Refresh the OAuth token this long before PayHere says it expires
+const TOKEN_EXPIRY_MARGIN_MS = 60_000;
+
 function md5String(input: string): string {
   try {
     return createHash('md5').update(input).digest('hex');
@@ -44,6 +50,7 @@ function md5String(input: string): string {
 @Injectable()
 export class PayHereService {
   private readonly logger = new Logger(PayHereService.name);
+  private cachedToken: { token: string; expiresAt: number } | null = null;
 
   getBaseUrl(): string {
     return (process.env.PAYHERE_ENV as string) === 'live'
@@ -120,7 +127,11 @@ export class PayHereService {
     return link;
   }
 
+  /** OAuth token, reused until shortly before it expires. */
   async getAccessToken(): Promise<string> {
+    if (this.cachedToken && Date.now() < this.cachedToken.expiresAt) {
+      return this.cachedToken.token;
+    }
     this.logger.log('Requesting PayHere OAuth token');
 
     const appId = process.env.PAYHERE_APP_ID;
@@ -150,11 +161,19 @@ export class PayHereService {
           Authorization: `Basic ${authCode}`,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
+        timeout: PAYHERE_API_TIMEOUT_MS,
       });
 
       this.logger.log(
         `PayHere OAuth token generated successfully (expires in ${response.data.expires_in}s)`,
       );
+      this.cachedToken = {
+        token: response.data.access_token,
+        expiresAt:
+          Date.now() +
+          Number(response.data.expires_in || 0) * 1000 -
+          TOKEN_EXPIRY_MARGIN_MS,
+      };
       return response.data.access_token;
     } catch (error) {
       this.logger.error(
@@ -183,6 +202,7 @@ export class PayHereService {
             Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
+          timeout: PAYHERE_API_TIMEOUT_MS,
         },
       );
 
@@ -191,10 +211,18 @@ export class PayHereService {
       );
       return response.data;
     } catch (error) {
+      this.forgetTokenIfRejected(error);
       this.logger.error(
         `PayHere subscription cancellation failed for ${payhere_sub_id}: ${errorMessage(error)}`,
       );
       throw error;
+    }
+  }
+
+  /** A cached token PayHere rejects (e.g. revoked) must not be reused. */
+  private forgetTokenIfRejected(error: unknown): void {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      this.cachedToken = null;
     }
   }
 
@@ -216,10 +244,15 @@ export class PayHereService {
         msg: string;
         data?: { payment_id: number | string; status: string }[];
       };
-    } = await axios.get(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      timeout: 10000,
-    });
+    } = await axios
+      .get(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: PAYHERE_API_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        this.forgetTokenIfRejected(error);
+        throw error;
+      });
 
     return (response.data.data ?? []).map((p) => ({
       payment_id: String(p.payment_id),
