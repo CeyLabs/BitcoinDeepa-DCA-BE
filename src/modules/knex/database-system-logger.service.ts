@@ -90,24 +90,14 @@ export class DatabaseSystemLogger
     this.writeToDatabase(formattedMessage, 'warn').catch(() => {});
   }
 
+  // debug/verbose go to the console only - writing them to the DB log table
+  // (e.g. every cache hit/miss) floods it and competes for pool connections.
   debug(message: any, context?: string): void {
-    const formattedMessage = this.formatDatabaseMessage(
-      message,
-      context,
-      'DEBUG',
-    );
     super.debug(message, context);
-    this.writeToDatabase(formattedMessage, 'info').catch(() => {});
   }
 
   verbose(message: any, context?: string): void {
-    const formattedMessage = this.formatDatabaseMessage(
-      message,
-      context,
-      'VERBOSE',
-    );
     super.verbose(message, context);
-    this.writeToDatabase(formattedMessage, 'info').catch(() => {});
   }
 
   private formatDatabaseMessage(

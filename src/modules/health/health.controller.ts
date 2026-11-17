@@ -2,17 +2,18 @@ import { Controller, Get } from '@nestjs/common';
 import {
   HealthCheck,
   HealthCheckService,
+  HealthIndicatorService,
   MemoryHealthIndicator,
   DiskHealthIndicator,
 } from '@nestjs/terminus';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
-import Redis from 'ioredis';
 
 @Controller('health')
 export class HealthController {
   constructor(
     private health: HealthCheckService,
+    private healthIndicator: HealthIndicatorService,
     private memory: MemoryHealthIndicator,
     private disk: DiskHealthIndicator,
     private knexService: KnexService,
@@ -28,28 +29,21 @@ export class HealthController {
       () =>
         this.disk.checkStorage('storage', { path: '/', thresholdPercent: 0.9 }),
       async () => {
+        const indicator = this.healthIndicator.check('database');
         try {
           await this.knexService.knex.raw('SELECT 1');
-          return { database: { status: 'up' } };
+          return indicator.up();
         } catch (error) {
-          return { database: { status: 'down', error: error.message } };
+          return indicator.down({
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       async () => {
-        try {
-          const testKey = 'health_check_' + Date.now();
-          await this.redisService.set(testKey, 'ok', { ttl: 10 });
-          const value = await this.redisService.get(testKey);
-          await this.redisService.del(testKey);
-
-          if (value === 'ok') {
-            return { redis: { status: 'up' } };
-          } else {
-            return { redis: { status: 'down', error: 'Test failed' } };
-          }
-        } catch (error) {
-          return { redis: { status: 'down', error: error.message } };
-        }
+        const indicator = this.healthIndicator.check('redis');
+        return (await this.redisService.ping())
+          ? indicator.up()
+          : indicator.down({ error: 'Redis ping failed' });
       },
     ]);
   }

@@ -7,7 +7,6 @@ import { CoinMarketCapService } from '../coinmarketcap/coinmarketcap.service';
 export interface BitcoinPriceData {
   btc_price: number;
   currency: string;
-  satoshis_per_amount: number;
 }
 
 interface CeylonCashResponse {
@@ -22,9 +21,13 @@ interface BitcoinCacheData {
 @Injectable()
 export class BitcoinPriceService {
   private readonly logger = new Logger(BitcoinPriceService.name);
-  private readonly BTC_PRICE_CACHE_TTL_SECONDS = 300; // 5 minutes
+  private readonly BTC_PRICE_CACHE_TTL_SECONDS = parseInt(
+    process.env.BTC_PRICE_CACHE_TTL || '300',
+    10,
+  );
   private readonly USD_LKR_CACHE_TTL_SECONDS = parseInt(
-    process.env.BITCOIN_PRICE_CACHE_TTL || '20',
+    process.env.USD_LKR_CACHE_TTL || '20',
+    10,
   );
   private readonly SATOSHIS_PER_BTC = 100_000_000;
 
@@ -56,7 +59,6 @@ export class BitcoinPriceService {
       return {
         btc_price: btcLkrPrice,
         currency: 'LKR',
-        satoshis_per_amount: this.SATOSHIS_PER_BTC / btcLkrPrice,
       };
     } catch (error) {
       this.logger.error(`Failed to get Bitcoin price for ${currency}:`, error);
