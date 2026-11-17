@@ -1,6 +1,6 @@
-import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { configureApp } from './app.setup';
 import { DatabaseSystemLogger } from './modules/knex/database-system-logger.service';
 import { randomUUID, webcrypto } from 'crypto';
 
@@ -30,22 +30,7 @@ async function bootstrap() {
   // Use the custom logger for the application
   app.useLogger(databaseLogger);
 
-  // Validate every request body against its DTO class; strip unknown fields
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-    }),
-  );
-
-  // Run onModuleDestroy (close DB pool / Redis) on SIGTERM during redeploys
-  app.enableShutdownHooks();
-
-  // Enable CORS for production deployment
-  app.enableCors({
-    origin: process.env.CORS_ORIGIN || '*',
-    credentials: true,
-  });
+  configureApp(app);
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
