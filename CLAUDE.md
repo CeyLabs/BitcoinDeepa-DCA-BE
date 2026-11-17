@@ -182,7 +182,7 @@ PORT=3000
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
-- `POST /transaction/reset-retry-counts` - Reset settlement retries (internal, requires `x-admin-key`)
+- `POST /transaction/reset-retry-count/:paymentId` - Re-enable settlement for one payment after checking it on BitcoinDeepa (internal, requires `x-admin-key`)
 - `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 

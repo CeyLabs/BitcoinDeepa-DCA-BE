@@ -9,6 +9,7 @@ import {
   Body,
   NotFoundException,
   Query,
+  Param,
   Logger,
 } from '@nestjs/common';
 import { Response } from 'express';
@@ -85,10 +86,10 @@ export class TransactionController {
     }
   }
 
-  @Post('reset-retry-counts')
+  @Post('reset-retry-count/:paymentId')
   @UseGuards(AdminKeyGuard)
-  async resetRetryCounts() {
-    return this.transactionService.resetRetryCounts();
+  async resetRetryCount(@Param('paymentId') paymentId: string) {
+    return this.transactionService.resetRetryCount(paymentId);
   }
 
   @Get('list')

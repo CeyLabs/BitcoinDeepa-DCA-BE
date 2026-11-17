@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
   Logger,
 } from '@nestjs/common';
@@ -117,17 +118,27 @@ export class TransactionService {
     private readonly bitcoinDeepaService: BitcoinDeepaService,
   ) {}
 
-  async resetRetryCounts(): Promise<{ reset_count: number }> {
+  /**
+   * Re-enable settlement for ONE payment, after a human has checked it.
+   * Deliberately not a bulk reset: rows stopped with an unknown outcome (e.g.
+   * a timeout) may already have been paid, so each needs checking on
+   * BitcoinDeepa before it is retried.
+   */
+  async resetRetryCount(
+    payhere_pay_id: string,
+  ): Promise<{ payhere_pay_id: string }> {
     const updated = await this.knexService
       .knex('transaction')
-      .where('settled', false)
-      .update({ retry_count: 0 });
+      .where({ payhere_pay_id, settled: false })
+      .update({ retry_count: 0, last_retry_at: null });
+    if (!updated) {
+      throw new NotFoundException(
+        `No unsettled transaction with payment_id ${payhere_pay_id}`,
+      );
+    }
 
-    this.logger.log(
-      `Reset retry_count to 0 for ${updated} unsettled transaction(s)`,
-    );
-
-    return { reset_count: updated };
+    this.logger.warn(`Settlement retries reset for ${payhere_pay_id}`);
+    return { payhere_pay_id };
   }
 
   /**
@@ -490,6 +501,17 @@ export class TransactionService {
       .whereNot('payhere_pay_id', payment_id)
       .first();
     if (priorSuccess) return null;
+
+    // Lock the user so two first payments arriving at the same moment (two
+    // checkouts) run this check one after the other; otherwise neither sees
+    // the other's uncommitted activation and both go active.
+    // NO KEY UPDATE, not FOR UPDATE: the subscription insert already holds an
+    // FK share lock on this user row, and FOR UPDATE would conflict with the
+    // other webhook's share lock - two concurrent first payments deadlock.
+    await trx('user')
+      .where('id', subscription.user_id)
+      .forNoKeyUpdate()
+      .first();
 
     const otherActive = await trx('subscription')
       .where('user_id', subscription.user_id)
