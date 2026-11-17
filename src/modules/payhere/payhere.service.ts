@@ -254,6 +254,14 @@ export class PayHereService {
         throw error;
       });
 
+    // PayHere reports its own errors as HTTP 200 with status -1. Reading that
+    // as "no payments" would make real payments look forged.
+    if (response.data.status !== 1) {
+      throw new Error(
+        `PayHere payment lookup for subscription ${payhere_sub_id} failed: ${response.data.msg}`,
+      );
+    }
+
     return (response.data.data ?? []).map((p) => ({
       payment_id: String(p.payment_id),
       status: p.status,

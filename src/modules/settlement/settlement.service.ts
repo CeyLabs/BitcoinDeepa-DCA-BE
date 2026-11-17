@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import axios from 'axios';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
@@ -7,6 +8,10 @@ import { PayHereService } from '../payhere/payhere.service';
 import { errorMessage } from '../../common/error-message';
 
 const MAX_SETTLEMENT_ATTEMPTS = 5;
+// PayHere lookup failures don't use attempts, so they need their own alert:
+// once a waiting payment is this old (or at once on 401/403), at most hourly.
+const LOOKUP_FAILURE_ALERT_AFTER_MS = 30 * 60_000;
+const LOOKUP_FAILURE_ALERT_INTERVAL_MS = 60 * 60_000;
 
 interface UnsettledTransaction {
   payhere_pay_id: string;
@@ -14,11 +19,13 @@ interface UnsettledTransaction {
   satoshis_purchased: number;
   retry_count: number;
   telegram_id: string;
+  created_at: Date;
 }
 
 @Injectable()
 export class SettlementService {
   private readonly logger = new Logger(SettlementService.name);
+  private lastLookupFailureAlertAt = 0;
 
   constructor(
     private readonly knexService: KnexService,
@@ -44,6 +51,7 @@ export class SettlementService {
             't.payhere_sub_id',
             't.satoshis_purchased',
             't.retry_count',
+            't.created_at',
             'u.id as telegram_id',
           )
           .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
@@ -132,6 +140,7 @@ export class SettlementService {
       this.logger.warn(
         `Settlement of ${payhere_pay_id} postponed: PayHere payment lookup failed (${errorMessage(error)})`,
       );
+      await this.alertLookupFailure(transaction, error);
       return;
     }
 
@@ -218,6 +227,42 @@ export class SettlementService {
           .catch(() => undefined);
       }
     }
+  }
+
+  /**
+   * Retrying a failed lookup forever is right for a PayHere outage, but a
+   * problem that never clears (wrong app secret, missing Subscription Manager
+   * permission, sandbox/live mix-up) would stop every payout silently. Alert
+   * at once on 401/403, otherwise once the payment has waited a while - and
+   * at most hourly, since lookups are retried every minute.
+   */
+  private async alertLookupFailure(
+    transaction: UnsettledTransaction,
+    error: unknown,
+  ): Promise<void> {
+    const status = axios.isAxiosError(error)
+      ? error.response?.status
+      : undefined;
+    const credentialsProblem = status === 401 || status === 403;
+    const waitedMs = Date.now() - new Date(transaction.created_at).getTime();
+    if (!credentialsProblem && waitedMs < LOOKUP_FAILURE_ALERT_AFTER_MS) return;
+    if (
+      Date.now() - this.lastLookupFailureAlertAt <
+      LOOKUP_FAILURE_ALERT_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastLookupFailureAlertAt = Date.now();
+
+    const reason = credentialsProblem
+      ? `PayHere rejected our credentials (HTTP ${status}) - check PAYHERE_APP_ID/PAYHERE_APP_SECRET, the app's Subscription Manager permission and PAYHERE_ENV`
+      : `PayHere payment lookups are still failing after ${Math.round(waitedMs / 60_000)} min`;
+    await this.telegramLogger
+      .logAlert(
+        'Settlement',
+        `Payouts are paused: ${reason}. Latest error for ${transaction.payhere_pay_id}: ${errorMessage(error)}. Settlement resumes by itself once lookups succeed.`,
+      )
+      .catch(() => undefined);
   }
 
   /**
