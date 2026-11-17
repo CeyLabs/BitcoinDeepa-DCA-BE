@@ -65,7 +65,10 @@ type BitcoinData = Pick<
 export interface DcaSummary {
   dca: {
     balance: number;
+    /** Amount that went into BTC (after fees) */
     spent: number;
+    /** Payment processor + BitcoinDeepa fees on those purchases */
+    fees: number;
     avg_btc_price: number;
   };
   total_balance: number;
@@ -742,7 +745,10 @@ export class TransactionService {
             .where('status', 'SUCCESS');
 
     let totalSatoshis = new Big(0);
-    let totalSpent = new Big(0); // what the user paid (gross, incl. fees)
+    // "Invested" excludes fees so Current Value vs Invested shows market
+    // movement only; fees are reported separately.
+    let totalSpent = new Big(0); // net amount that bought BTC
+    let totalFees = new Big(0);
     let totalBtcCost = new Big(0); // market value at purchase (for avg price)
 
     for (const tx of transactions) {
@@ -754,10 +760,13 @@ export class TransactionService {
         ? sats.div(SATOSHIS_PER_BTC).times(tx.btc_price_at_purchase)
         : new Big(0);
       totalBtcCost = totalBtcCost.plus(btcCost);
-      // Older rows may lack gross_amount - fall back to the BTC cost
+      // Rows from before the fee columns lack net_amount - use the BTC cost
       totalSpent = totalSpent.plus(
-        tx.gross_amount != null ? new Big(tx.gross_amount) : btcCost,
+        tx.net_amount != null ? new Big(tx.net_amount) : btcCost,
       );
+      totalFees = totalFees
+        .plus(tx.payment_processor_fee_amount ?? 0)
+        .plus(tx.bitcoindeepa_fee_amount ?? 0);
     }
 
     const averageBTCPrice =
@@ -771,6 +780,7 @@ export class TransactionService {
       dca: {
         balance: totalSatoshis.toNumber(),
         spent: totalSpent.toNumber(),
+        fees: totalFees.toNumber(),
         avg_btc_price: averageBTCPrice.toNumber(),
       },
       currency: 'LKR',
