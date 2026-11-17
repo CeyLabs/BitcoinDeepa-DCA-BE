@@ -1,6 +1,29 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
-import { KycStatus, KycStatusType } from './enums/kyc-status.enum';
+import {
+  DiditStatusMapping,
+  KycStatus,
+  KycStatusType,
+} from './enums/kyc-status.enum';
+
+const REJECTION_REASONS: Record<string, string> = {
+  Expired: 'Verification session expired',
+  Abandoned: 'Verification was abandoned by user',
+  'Kyc Expired': 'Previous KYC verification has expired',
+  'In Review': 'Verification is under manual review',
+  Resubmitted: 'Reviewer asked to redo some verification steps',
+};
+
+// Once a session has one of these results, a late "Not Started"/"In Progress"
+// update for the same session must not overwrite it.
+const FINAL_KYC_STATUSES: string[] = [
+  KycStatus.APPROVED,
+  KycStatus.DECLINED,
+  KycStatus.IN_REVIEW,
+  KycStatus.EXPIRED,
+  KycStatus.ABANDONED,
+  KycStatus.KYC_EXPIRED,
+];
 
 export interface User {
   id: string;
@@ -50,6 +73,8 @@ export interface KycStatusInfo {
 
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
+
   constructor(private readonly knexService: KnexService) {}
 
   async upsertTelegramUser(profile: TelegramProfile): Promise<void> {
@@ -109,6 +134,55 @@ export class UserService {
       kyc_session_id: sessionId,
       kyc_status: KycStatus.IN_PROGRESS,
     });
+  }
+
+  /**
+   * Save a Didit verification result (from the webhook, or read back from
+   * Didit when the webhook was missed). Returns the stored status, or null
+   * when the update was ignored.
+   */
+  async applyDiditResult(
+    userId: string,
+    currentStatus: string | undefined,
+    didit: { status: string; failure_reason?: string | null },
+  ): Promise<KycStatus | null> {
+    const dbStatus = DiditStatusMapping[didit.status];
+    if (!dbStatus) {
+      // e.g. "Awaiting User" (KYB only) - nothing to do for a KYC user
+      this.logger.warn(`Ignoring Didit status: ${didit.status}`);
+      return null;
+    }
+
+    const isProgressUpdate =
+      didit.status === 'Not Started' || didit.status === 'In Progress';
+    if (
+      isProgressUpdate &&
+      currentStatus &&
+      FINAL_KYC_STATUSES.includes(currentStatus)
+    ) {
+      this.logger.warn(
+        `Ignoring late "${didit.status}" update for user ${userId} (already ${currentStatus})`,
+      );
+      return null;
+    }
+
+    const approved = didit.status === 'Approved';
+    const rejectionReason = approved
+      ? null
+      : didit.status === 'Declined'
+        ? didit.failure_reason || 'Verification declined'
+        : (REJECTION_REASONS[didit.status] ?? null);
+
+    await this.updateKycStatus(userId, {
+      kyc_status: dbStatus,
+      kyc_verified_at: approved ? new Date() : null,
+      kyc_rejection_reason: rejectionReason,
+    });
+
+    this.logger.log(
+      `Updated KYC status for user ${userId} to ${dbStatus} (Didit: ${didit.status}${rejectionReason ? `, reason: ${rejectionReason}` : ''})`,
+    );
+    return dbStatus;
   }
 
   async updateKycStatus(

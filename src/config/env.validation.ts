@@ -20,7 +20,8 @@ const isProduction = (env: EnvironmentVariables) =>
  */
 class EnvironmentVariables {
   @IsOptional()
-  @IsIn(['development', 'production', 'test'])
+  // 'localhost' is a knexfile environment (local Postgres on port 3009)
+  @IsIn(['development', 'production', 'test', 'localhost'])
   NODE_ENV?: string;
 
   @IsOptional()

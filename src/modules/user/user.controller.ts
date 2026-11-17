@@ -106,6 +106,22 @@ export class UserController {
       ) {
         return { session_id: currentStatus.session_id, url: existing.url };
       }
+
+      // Didit already finished this session but its webhook never reached
+      // us. Record the result; a new session would throw away a passed (or
+      // pending) verification, and Didit's retried webhook for the old
+      // session would no longer find the user.
+      if (existing?.status === 'Approved' || existing?.status === 'In Review') {
+        await this.userService.applyDiditResult(user.id, currentStatus.status, {
+          status: existing.status,
+        });
+        throw new HttpException(
+          existing.status === 'Approved'
+            ? 'KYC already verified'
+            : 'KYC verification is under review',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
     }
 
     return this.telegramLoggerService.trackAction(

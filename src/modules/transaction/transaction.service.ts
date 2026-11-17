@@ -450,6 +450,22 @@ export class TransactionService {
         );
       }
       if (!existing.payhere_order_id) {
+        // Subscriptions from before order binding have no order_id yet. The
+        // first notification binds one - but subscription_id isn't signed, so
+        // an attacker could replay their own signed notification (for an
+        // order they made) against a victim's subscription and lock it to the
+        // wrong order. Every order since binding has a payhere_order row, so
+        // it must belong to this subscription's user. Old orders have no row
+        // and only arrive as genuine renewals.
+        const order = await trx<{ user_id: string }>('payhere_order')
+          .select('user_id')
+          .where('order_id', order_id)
+          .first();
+        if (order && order.user_id !== existing.user_id) {
+          throw new BadRequestException(
+            'order_id belongs to another user than the subscription',
+          );
+        }
         await this.assertOrderIdUnused(trx, order_id, subscription_id);
         await trx('subscription')
           .update({ payhere_order_id: order_id })
