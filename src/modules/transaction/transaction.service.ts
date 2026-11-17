@@ -2,7 +2,6 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
   Logger,
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -16,6 +15,7 @@ import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
+import { PayHereService } from '../payhere/payhere.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 import { errorMessage } from '../../common/error-message';
 
@@ -116,6 +116,7 @@ export class TransactionService {
     private readonly redisService: RedisService,
     private readonly telegramLoggerService: TelegramLoggerService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
+    private readonly payHereService: PayHereService,
   ) {}
 
   /**
@@ -148,10 +149,11 @@ export class TransactionService {
    * handlePayHereNotification (order_id + user binding), which stops a
    * captured notification being reused for another user or subscription.
    *
-   * We intentionally don't try to detect a replayed notification with a new
-   * payment_id beyond that: it needs a genuine signed notification (HTTPS
-   * interception or log access), and every heuristic we tried (e.g. "charged
-   * too soon") also flagged PayHere's own retries and sandbox renewals.
+   * A replay with an invented payment_id still passes this check, and
+   * getting a genuine signed notification is easy: notify_url is an unsigned
+   * checkout parameter, so a payer can point it at their own server. Such
+   * payments are recorded but never paid out - settlement only pays a
+   * payment_id that PayHere's API lists as RECEIVED.
    */
   isValidPayHereSignature(data: PayHereNotificationParams): boolean {
     const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
@@ -170,6 +172,33 @@ export class TransactionService {
     );
   }
 
+  /**
+   * Who a notification's payment belongs to, from our own records (never
+   * custom_1). For logging; resolveSubscription is what actually decides.
+   */
+  async getNotificationOwner(
+    order_id: string,
+    subscription_id: string,
+  ): Promise<string | null> {
+    const sub = await this.knexService
+      .knex<Subscription>('subscription')
+      .select('user_id')
+      .where('payhere_sub_id', subscription_id)
+      .first();
+    if (sub) return sub.user_id;
+    const order = await this.knexService
+      .knex<{ order_id: string; user_id: string }>('payhere_order')
+      .select('user_id')
+      .where('order_id', order_id)
+      .first();
+    return order?.user_id ?? null;
+  }
+
+  /**
+   * Record a PayHere notification. The caller must have checked
+   * isValidPayHereSignature first (the controller does, before anything is
+   * logged).
+   */
   async handlePayHereNotification(
     data: PayHereNotificationParams,
   ): Promise<void> {
@@ -183,15 +212,6 @@ export class TransactionService {
       message_type,
       item_rec_status,
     } = data;
-
-    if (!this.isValidPayHereSignature(data)) {
-      // Never log the expected signature - it would let anyone with log
-      // access forge this exact notification.
-      this.logger.error(
-        `MD5 signature verification failed for payment_id ${payment_id}, order_id ${order_id}`,
-      );
-      throw new UnauthorizedException('Md5 verification failed');
-    }
 
     if (!payment_id || !subscription_id || Number(subscription_id) < 0) {
       this.logger.error(
@@ -231,6 +251,11 @@ export class TransactionService {
       message_type === 'RECURRING_COMPLETE';
 
     const alerts: string[] = [];
+    // Set when this notification is what made the payment SUCCESS (a resent
+    // SUCCESS must not re-activate a plan the user has since cancelled).
+    let becameSuccess = false;
+    let duplicate: { payhere_sub_id: string; activeSubId: string } | null =
+      null;
     let createdSubscription: { user_id: string; package_id: string } | null =
       null;
     let subscriptionUserId = '';
@@ -283,6 +308,7 @@ export class TransactionService {
           await trx('transaction')
             .update(update)
             .where('payhere_pay_id', payment_id);
+          becameSuccess = status === 'SUCCESS' && current.status !== 'SUCCESS';
 
           if (status === 'CHARGEBACK' && current.status !== 'CHARGEBACK') {
             alerts.push(
@@ -306,19 +332,25 @@ export class TransactionService {
           ...(bitcoinData ?? {}),
         };
         await trx('transaction').insert(row);
+        becameSuccess = status === 'SUCCESS';
 
         this.logger.log(
           `New transaction ${payment_id} created (status ${status})`,
         );
       }
 
-      if (status === 'SUCCESS' && !subscriptionEnded) {
-        const activationAlert = await this.activateIfFirstSuccess(
+      if (becameSuccess && !subscriptionEnded) {
+        const duplicateOf = await this.activateIfFirstSuccess(
           trx,
           subscription,
           payment_id,
         );
-        if (activationAlert) alerts.push(activationAlert);
+        if (duplicateOf) {
+          duplicate = {
+            payhere_sub_id: subscription_id,
+            activeSubId: duplicateOf,
+          };
+        }
       }
 
       await trx.commit();
@@ -346,6 +378,15 @@ export class TransactionService {
         subscription_id,
         createdSubscription.user_id,
         createdSubscription.package_id,
+      );
+    }
+    if (duplicate) {
+      alerts.push(
+        await this.cancelDuplicateSubscription(
+          duplicate.payhere_sub_id,
+          duplicate.activeSubId,
+          subscriptionUserId,
+        ),
       );
     }
     for (const alert of alerts) {
@@ -484,9 +525,10 @@ export class TransactionService {
   }
 
   /**
-   * A subscription created from a failed/pending first charge starts inactive.
-   * Activate it on its first SUCCESS - but never re-activate a cancelled one
-   * (those already had a SUCCESS) and never create a second active plan.
+   * Subscriptions start inactive. Activate one on its first SUCCESS - but
+   * never re-activate a cancelled one (those already had a SUCCESS) and never
+   * create a second active plan. Returns the user's other active
+   * subscription id when this one is a duplicate (left inactive).
    */
   private async activateIfFirstSuccess(
     trx: Knex.Transaction,
@@ -513,13 +555,16 @@ export class TransactionService {
       .forNoKeyUpdate()
       .first();
 
-    const otherActive = await trx('subscription')
+    const otherActive: Subscription | undefined = await trx('subscription')
       .where('user_id', subscription.user_id)
       .where('is_active', true)
       .whereNot('payhere_sub_id', subscription.payhere_sub_id)
       .first();
     if (otherActive) {
-      return `Subscription ${subscription.payhere_sub_id} got its first SUCCESS (${payment_id}) but user ${subscription.user_id} already has active subscription ${otherActive.payhere_sub_id}. Left inactive - check for a double subscription.`;
+      this.logger.warn(
+        `Subscription ${subscription.payhere_sub_id} got its first SUCCESS (${payment_id}) but user ${subscription.user_id} already has active subscription ${otherActive.payhere_sub_id} - leaving it inactive`,
+      );
+      return otherActive.payhere_sub_id;
     }
 
     await trx('subscription')
@@ -529,6 +574,29 @@ export class TransactionService {
       `Subscription ${subscription.payhere_sub_id} activated by first successful payment ${payment_id}`,
     );
     return null;
+  }
+
+  /**
+   * A user paid a second checkout while another plan was active. Its first
+   * charge is still settled (they paid for those sats), but PayHere would
+   * keep billing a plan the user can't see or cancel - so cancel it there.
+   * Returns the alert text for the team.
+   */
+  private async cancelDuplicateSubscription(
+    payhere_sub_id: string,
+    activeSubId: string,
+    user_id: string,
+  ): Promise<string> {
+    const base = `Duplicate subscription ${payhere_sub_id}: user ${user_id} already has active plan ${activeSubId}, so it was left inactive (its first payment is still settled).`;
+    try {
+      const result =
+        await this.payHereService.cancelSubscription(payhere_sub_id);
+      return result.status === 1
+        ? `${base} Cancelled at PayHere.`
+        : `${base} PayHere refused to cancel it (${result.msg}) - cancel it manually.`;
+    } catch (error: unknown) {
+      return `${base} Cancelling at PayHere failed (${errorMessage(error)}) - cancel it manually.`;
+    }
   }
 
   private async notifySubscriptionCreated(

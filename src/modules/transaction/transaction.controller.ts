@@ -63,10 +63,15 @@ export class TransactionController {
     }
 
     try {
+      // Owner from our records - custom_1 is payer-editable
+      const owner = await this.transactionService.getNotificationOwner(
+        body.order_id,
+        body.subscription_id,
+      );
       const logMessage = await this.telegramLoggerService.logNewTransaction(
         body.payment_id,
         body.payhere_amount,
-        body.custom_1 ?? 'unknown',
+        owner ?? 'unknown',
         this.transactionService.getPayHereStatusMapped(body.status_code),
       );
 

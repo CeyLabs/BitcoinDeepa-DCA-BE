@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import { PayHereService } from '../payhere/payhere.service';
 import { errorMessage } from '../../common/error-message';
 
 const MAX_SETTLEMENT_ATTEMPTS = 5;
@@ -23,6 +24,7 @@ export class SettlementService {
     private readonly knexService: KnexService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
     private readonly telegramLogger: TelegramLoggerService,
+    private readonly payHereService: PayHereService,
   ) {}
 
   @Cron(CronExpression.EVERY_10_SECONDS)
@@ -112,6 +114,25 @@ export class SettlementService {
     }
 
     try {
+      const confirmed = await this.isConfirmedByPayHere(
+        payhere_pay_id,
+        payhere_sub_id,
+      );
+      if (!confirmed) {
+        const message = `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for subscription ${payhere_sub_id}`;
+        if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
+          const alert = `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) stopped: ${message}. Possibly a forged/replayed notification - check the PayHere dashboard.`;
+          this.logger.error(alert);
+          await this.telegramLogger.logAlert('Settlement', alert);
+        } else {
+          // PayHere's list can lag the notification; retry with backoff.
+          this.logger.warn(
+            `Settlement of ${payhere_pay_id} deferred (attempt ${currentRetryCount}/${MAX_SETTLEMENT_ATTEMPTS}): ${message}`,
+          );
+        }
+        return;
+      }
+
       const logMessage = await this.telegramLogger.logSettlement(
         payhere_pay_id,
         Number(satoshis_purchased),
@@ -170,7 +191,32 @@ export class SettlementService {
       this.logger.error(
         `Settlement error for ${payhere_pay_id}: ${errorMessage(error)}`,
       );
+      if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
+        await this.telegramLogger
+          .logAlert(
+            'Settlement',
+            `Settlement of ${payhere_pay_id} stopped after ${currentRetryCount} attempts: ${errorMessage(error)}`,
+          )
+          .catch(() => undefined);
+      }
     }
+  }
+
+  /**
+   * Only pay out payments PayHere itself lists as received. The webhook's
+   * md5sig doesn't cover payment_id, so a signed notification can be replayed
+   * with invented payment_ids - this is the check that stops those being
+   * paid. API errors throw (the attempt counts and is retried with backoff).
+   */
+  private async isConfirmedByPayHere(
+    payhere_pay_id: string,
+    payhere_sub_id: string,
+  ): Promise<boolean> {
+    const payments =
+      await this.payHereService.getSubscriptionPayments(payhere_sub_id);
+    return payments.some(
+      (p) => p.payment_id === String(payhere_pay_id) && p.status === 'RECEIVED',
+    );
   }
 
   /**

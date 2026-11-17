@@ -27,6 +27,12 @@ interface CancelSubscriptionResponse {
   msg: string;
 }
 
+export interface SubscriptionPayment {
+  payment_id: string;
+  /** e.g. RECEIVED for a successful charge */
+  status: string;
+}
+
 function md5String(input: string): string {
   try {
     return createHash('md5').update(input).digest('hex');
@@ -190,5 +196,34 @@ export class PayHereService {
       );
       throw error;
     }
+  }
+
+  /**
+   * Payments PayHere actually took for a subscription (Subscription Manager
+   * API). Used to confirm a notification's payment_id before paying out: the
+   * md5sig doesn't cover payment_id, and a payer can point notify_url at
+   * their own server to obtain a genuinely signed notification to replay.
+   * https://support.payhere.lk/api-&-mobile-sdk/subscription-manager-api
+   */
+  async getSubscriptionPayments(
+    payhere_sub_id: string,
+  ): Promise<SubscriptionPayment[]> {
+    const accessToken = await this.getAccessToken();
+    const url = `${this.getBaseUrl()}/merchant/v1/subscription/${encodeURIComponent(payhere_sub_id)}/payments`;
+    const response: {
+      data: {
+        status: number;
+        msg: string;
+        data?: { payment_id: number | string; status: string }[];
+      };
+    } = await axios.get(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 10000,
+    });
+
+    return (response.data.data ?? []).map((p) => ({
+      payment_id: String(p.payment_id),
+      status: p.status,
+    }));
   }
 }

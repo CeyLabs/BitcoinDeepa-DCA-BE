@@ -54,6 +54,18 @@ class EnvironmentVariables {
   @IsNotEmpty()
   PAYHERE_MERCHANT_SECRET?: string;
 
+  // OAuth app: settlement confirms every payment with PayHere before paying
+  // out, and plan cancellation goes through the same API.
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_APP_ID?: string;
+
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  PAYHERE_APP_SECRET?: string;
+
   @IsOptional()
   @IsIn(['sandbox', 'live'])
   PAYHERE_ENV?: string;
