@@ -237,7 +237,8 @@ class EnvironmentVariables {
   @IsUrl({ require_tld: false, require_protocol: true })
   R2_ENDPOINT?: string;
 
-  // Admin dashboard base URL, used in Telegram alert links
+  // Admin dashboard URL for Telegram alert links; defaults to the first
+  // ADMIN_APP_URL origin
   @IsOptional()
   @IsUrl({ require_tld: false })
   ADMIN_DASHBOARD_URL?: string;

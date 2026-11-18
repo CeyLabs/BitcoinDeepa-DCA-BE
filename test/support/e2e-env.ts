@@ -106,7 +106,6 @@ Object.assign(process.env, {
   R2_ACCESS_KEY_ID: '',
   R2_SECRET_ACCESS_KEY: '',
   R2_BUCKET: '',
-  ADMIN_DASHBOARD_URL: 'http://localhost:5173',
 });
 
 // CeyPay signs webhooks with ED25519; tests sign with this throwaway key.

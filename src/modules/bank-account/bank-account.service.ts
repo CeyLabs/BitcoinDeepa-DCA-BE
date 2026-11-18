@@ -28,6 +28,7 @@ import {
   type StatementContentType,
 } from './bank-account.constants';
 import { matchAccountName } from './name-match.util';
+import { adminAppOrigins } from '../admin/auth/admin-auth.constants';
 import type {
   AddBankAccountDto,
   StatementUploadDto,
@@ -232,7 +233,9 @@ export class BankAccountService {
       return inserted;
     });
 
-    const dashboard = process.env.ADMIN_DASHBOARD_URL;
+    const dashboard = (
+      process.env.ADMIN_DASHBOARD_URL || adminAppOrigins()[0]
+    )?.replace(/\/+$/, '');
     await this.telegramLogger.logAlert(
       'Bank review',
       // plain text: logAlert escapes it

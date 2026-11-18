@@ -201,7 +201,7 @@ CEYPAY_API_SECRET=sk_live_...
 CEYPAY_WEBHOOK_PUBLIC_KEY=...  # ED25519 public key (PEM, or base64 DER)
 CEYPAY_WEBHOOK_URL=  # Optional, defaults to BASE_URL/sell/ceypay-webhook
 R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=...
-ADMIN_DASHBOARD_URL=https://admin.example.com  # links in Telegram alerts
+ADMIN_DASHBOARD_URL=  # Optional, Telegram alert links; defaults to the first ADMIN_APP_URL
 
 # Server
 PORT=3000

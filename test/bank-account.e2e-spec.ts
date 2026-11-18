@@ -13,6 +13,7 @@ import {
   asUser,
   submitBankAccount,
 } from './support/bank-account-helpers';
+import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-logger.service';
 
 describe('Bank account verification (e2e)', () => {
   let ctx: TestContext;
@@ -67,7 +68,14 @@ describe('Bank account verification (e2e)', () => {
     });
 
     it('stores the account as PENDING_REVIEW with a name-match hint', async () => {
+      const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
       const id = await submitBankAccount(ctx, USER);
+      // the review link defaults to the first ADMIN_APP_URL origin
+      expect(alert).toHaveBeenCalledWith(
+        'Bank review',
+        expect.stringContaining(`${ADMIN_ORIGIN}/bank-reviews`),
+      );
+      alert.mockRestore();
       const row = await account(id);
       expect(row).toMatchObject({
         user_id: USER,
