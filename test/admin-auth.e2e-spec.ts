@@ -97,5 +97,7 @@ describe('Admin dashboard auth (e2e)', () => {
       .set('Origin', 'https://t.me')
       .expect(200);
     expect(res.headers['access-control-allow-origin']).toBe('*');
+    // never credentialed: only the dashboard's origins may read with cookies
+    expect(res.headers['access-control-allow-credentials']).toBeUndefined();
   });
 });

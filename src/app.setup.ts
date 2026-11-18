@@ -9,8 +9,10 @@ import {
 
 /**
  * CORS for every route. The admin dashboard sends its session cookie, so its
- * origins (ADMIN_APP_URL) get an exact-match, credentialed response; other
- * origins keep the CORS_ORIGIN policy.
+ * origins (ADMIN_APP_URL) get an exact-match, credentialed response. Other
+ * origins keep the CORS_ORIGIN policy WITHOUT credentials: the Mini App uses a
+ * Bearer token, and a credentialed response there would let that origin read
+ * admin data from a signed-in admin's browser.
  */
 function corsOptions(): cors.CorsOptionsDelegate<Request> {
   const adminOrigins = adminAppOrigins();
@@ -21,7 +23,7 @@ function corsOptions(): cors.CorsOptionsDelegate<Request> {
     }
     callback(null, {
       origin: process.env.CORS_ORIGIN || '*',
-      credentials: true,
+      credentials: false,
     });
   };
 }

@@ -131,10 +131,12 @@ export async function createAdminAuth({
     rateLimit: { enabled: production, window: 60, max: 30 },
     advanced: {
       cookiePrefix: 'bd-admin',
-      // The dashboard and API live on different sites in production, so the
-      // session cookie must be sent cross-site.
+      // The dashboard and the API share one registrable domain in production
+      // (admin.<domain> / api.<domain>), so the cookie is first-party: Lax is
+      // sent on the dashboard's requests, survives Safari's third-party
+      // cookie blocking, and isn't sent on cross-site POSTs.
       defaultCookieAttributes: production
-        ? { sameSite: 'none', secure: true }
+        ? { sameSite: 'lax', secure: true }
         : { sameSite: 'lax', secure: false },
     },
   });
