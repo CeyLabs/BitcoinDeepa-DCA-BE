@@ -24,7 +24,6 @@ export const sats = (netLkr: number) =>
   Math.floor((netLkr / (BTC_USD * USD_LKR)) * 100_000_000);
 
 /** Ceylon Cash BTC buying rate (sell flow) and CeyPay's USDT/LKR rate */
-export const BTC_LKR_BUYING = 20_000_000;
 export const CEYPAY_USDT_LKR = 330;
 export const BANKS = [
   { code: 7010, name: 'Bank of Ceylon' },
@@ -146,8 +145,8 @@ export async function createTestApp(): Promise<TestContext> {
   >(BitcoinPriceService);
   jest.spyOn(priceService, 'getUsdLkrRate').mockResolvedValue(USD_LKR);
   jest
-    .spyOn(app.get(BitcoinPriceService), 'getBtcLkrSellRate')
-    .mockResolvedValue({ buyingRateLkr: BTC_LKR_BUYING, usdPrice: BTC_USD });
+    .spyOn(app.get(BitcoinPriceService), 'getBtcUsdSellPrice')
+    .mockResolvedValue(BTC_USD);
   const notifyUser = jest
     .spyOn(app.get(TelegramLoggerService), 'notifyUser')
     .mockResolvedValue(true);

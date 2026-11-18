@@ -20,7 +20,8 @@ import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-l
 
 // 100,000 sats, 1% fee = 1,000 sats; 99,000 sats at 20,000,000 LKR/BTC
 const SATS = 100_000;
-const AMOUNT_LKR = 19_800;
+// 99,000 net sats × (65,000 USD × 330 LKR/USDT)
+const AMOUNT_LKR = 21_235.5;
 
 describe('Sell flow (e2e)', () => {
   let ctx: TestContext;
@@ -120,14 +121,14 @@ describe('Sell flow (e2e)', () => {
     it('gives the live price with the fee and the minimum sale', async () => {
       const res = await asUser(ctx, USER).get('/sell/price').expect(200);
       expect(res.body).toEqual({
-        btcLkrRate: 20_000_000,
+        btcLkrRate: 21_450_000,
         feeBasisPoints: 100,
         minSats: 1000,
         maxSats: 5_000_000,
       });
     });
 
-    it('quotes with our own FX, fee taken in sats', async () => {
+    it('prices at Ceylon Cash BTC/USD × CeyPay USDT/LKR, fee taken in sats', async () => {
       const res = await asUser(ctx, USER)
         .post('/sell/quote', { sats: SATS })
         .expect(201);
@@ -137,11 +138,13 @@ describe('Sell flow (e2e)', () => {
         feeBasisPoints: 100,
         feeSats: 1000,
         netSats: 99_000,
-        btcLkrRate: 20_000_000,
+        btcLkrRate: 21_450_000,
         amountLkr: AMOUNT_LKR,
       });
-      // CeyPay is not touched until the user confirms
-      expect(ctx.ceyPay.getQuote).not.toHaveBeenCalled();
+      // Only CeyPay's rate is read: no USDT quote is locked until the user confirms
+      for (const [usdt] of ctx.ceyPay.getQuote.mock.calls)
+        expect(usdt).toBe('1');
+      expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
     });
 
     it('refuses more than the balance, and dust', async () => {
@@ -167,7 +170,9 @@ describe('Sell flow (e2e)', () => {
       );
       // USDT sized from CeyPay's rate so it pays at least our LKR
       const [usdt] = ctx.ceyPay.getQuote.mock.calls.at(-1) as [string];
-      expect(Number(usdt) * CEYPAY_USDT_LKR).toBeGreaterThanOrEqual(AMOUNT_LKR);
+      expect(
+        Math.round(Number(usdt) * CEYPAY_USDT_LKR * 100),
+      ).toBeGreaterThanOrEqual(AMOUNT_LKR * 100);
       const bank = await ctx
         .knex('user_bank_account')
         .where({ id: bankId })
@@ -198,7 +203,7 @@ describe('Sell flow (e2e)', () => {
       });
       expect(ctx.notifyUser).toHaveBeenCalledWith(
         USER,
-        expect.stringContaining('19800.00 LKR'),
+        expect.stringContaining('21235.50 LKR'),
       );
 
       // a late failure webhook can't undo it

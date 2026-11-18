@@ -31,7 +31,8 @@ export class CacheKeys {
     price: (currency: string): string =>
       `${CacheKeys.PREFIX}:btc:price:${currency}`,
     usdLkr: (): string => `${CacheKeys.PREFIX}:exchange:usd:lkr`,
-    ceylonCashBtc: (): string => `${CacheKeys.PREFIX}:exchange:btc:ceyloncash`,
+    ceylonCashBtcUsd: (): string =>
+      `${CacheKeys.PREFIX}:exchange:btc-usd:ceyloncash`,
   };
 
   // Sell flow cache keys

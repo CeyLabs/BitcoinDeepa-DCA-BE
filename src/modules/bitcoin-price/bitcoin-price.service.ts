@@ -21,12 +21,6 @@ interface CeylonCashBtcResponse {
   usd_price?: number;
 }
 
-export interface BtcSellRate {
-  /** LKR we pay per 1 BTC when buying it from a user */
-  buyingRateLkr: number;
-  usdPrice: number | null;
-}
-
 interface BitcoinCacheData {
   price: number;
   percent_change_24h: number;
@@ -104,12 +98,12 @@ export class BitcoinPriceService {
   }
 
   /**
-   * BTC/LKR buying rate from our own Ceylon Cash FX (sell flow). Cached
-   * briefly; null when unavailable or invalid.
+   * BTC/USD from our own Ceylon Cash FX (sell flow; the LKR side comes from
+   * CeyPay's USDT/LKR rate). Cached briefly; null when unavailable or invalid.
    */
-  getBtcLkrSellRate(): Promise<BtcSellRate | null> {
+  getBtcUsdSellPrice(): Promise<number | null> {
     return this.redisService.getOrSet(
-      CacheKeys.bitcoin.ceylonCashBtc(),
+      CacheKeys.bitcoin.ceylonCashBtcUsd(),
       this.BTC_SELL_RATE_CACHE_TTL_SECONDS,
       async () => {
         try {
@@ -117,21 +111,15 @@ export class BitcoinPriceService {
             await axios.get('https://fx.ceyloncash.com/currency/BTC', {
               timeout: 10000,
             });
-          const rate = response.data?.buying_rate_lkr;
-          if (typeof rate !== 'number' || !(rate > 0)) {
-            this.logger.warn(
-              `Invalid BTC/LKR buying rate from Ceylon Cash: ${rate}`,
-            );
+          const usd = response.data?.usd_price;
+          if (typeof usd !== 'number' || !(usd > 0)) {
+            this.logger.warn(`Invalid BTC/USD price from Ceylon Cash: ${usd}`);
             return null;
           }
-          const usd = response.data?.usd_price;
-          return {
-            buyingRateLkr: rate,
-            usdPrice: typeof usd === 'number' && usd > 0 ? usd : null,
-          };
+          return usd;
         } catch (error) {
           this.logger.error(
-            `Ceylon Cash API error for BTC/LKR: ${errorMessage(error)}`,
+            `Ceylon Cash API error for BTC/USD: ${errorMessage(error)}`,
           );
           return null;
         }

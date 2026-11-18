@@ -12,6 +12,7 @@ import type { Knex } from 'knex';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
+import { errorMessage } from '../../common/error-message';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
 import {
@@ -163,6 +164,13 @@ export function priceSale(
   };
 }
 
+/**
+ * LKR per BTC: BTC/USD × CeyPay's USDT/LKR (USDT taken as 1 USD), rounded
+ * down to cents.
+ */
+export const btcLkrRate = (btcUsd: number, usdtLkr: number): number =>
+  new Big(btcUsd).times(usdtLkr).round(2, Big.roundDown).toNumber();
+
 /** USDT to quote so CeyPay pays at least `amountLkr` (8dp, rounded up). */
 export const usdtFor = (amountLkr: string, rateUsdtLkr: number): string =>
   new Big(amountLkr).div(rateUsdtLkr).round(8, Big.roundUp).toFixed(8);
@@ -253,12 +261,9 @@ export class SellService {
     minSats: number;
     maxSats: number;
   }> {
-    const rate = await this.bitcoinPrice.getBtcLkrSellRate();
-    if (!rate) {
-      throw new ServiceUnavailableException('Price is unavailable right now');
-    }
+    const rate = await this.sellRate();
     return {
-      btcLkrRate: rate.buyingRateLkr,
+      btcLkrRate: rate.btcLkr,
       feeBasisPoints: SellService.feeBasisPoints(),
       minSats: SellService.minSats(),
       maxSats: SellService.maxSats(),
@@ -291,12 +296,9 @@ export class SellService {
       throw new BadRequestException('Insufficient balance');
     }
 
-    const rate = await this.bitcoinPrice.getBtcLkrSellRate();
-    if (!rate) {
-      throw new ServiceUnavailableException('Price is unavailable right now');
-    }
+    const rate = await this.sellRate();
     const feeBasisPoints = SellService.feeBasisPoints();
-    const priced = priceSale(sats, feeBasisPoints, rate.buyingRateLkr);
+    const priced = priceSale(sats, feeBasisPoints, rate.btcLkr);
     if (priced.netSats <= 0 || Number(priced.amountLkr) <= 0) {
       throw new BadRequestException('Amount is too small to sell');
     }
@@ -316,8 +318,9 @@ export class SellService {
           fee_basis_points: feeBasisPoints,
           fee_sats: String(priced.feeSats),
           net_sats: String(priced.netSats),
-          btc_lkr_buying_rate: String(rate.buyingRateLkr),
-          btc_usd_price: rate.usdPrice === null ? null : String(rate.usdPrice),
+          btc_lkr_buying_rate: String(rate.btcLkr),
+          btc_usd_price: String(rate.btcUsd),
+          ceypay_rate_usdt_lkr: String(rate.usdtLkr),
           amount_lkr: priced.amountLkr,
           expires_at: new Date(
             Date.now() + SellService.quoteTtlSeconds() * 1000,
@@ -686,11 +689,31 @@ export class SellService {
   }
 
   /**
-   * Lock a CeyPay quote whose LKR amount covers ours. CeyPay quotes in USDT,
-   * so we size the USDT amount from its current rate (cached briefly).
+   * The rate we buy at: Ceylon Cash BTC/USD × CeyPay's USDT/LKR, so the LKR
+   * we promise matches what CeyPay pays for the same USDT. 503 when either
+   * is unavailable.
    */
-  private async lockCeyPayQuote(amountLkr: string) {
-    let rate = await this.redisService.getOrSet(
+  private async sellRate(): Promise<{
+    btcLkr: number;
+    btcUsd: number;
+    usdtLkr: number;
+  }> {
+    const [btcUsd, usdtLkr] = await Promise.all([
+      this.bitcoinPrice.getBtcUsdSellPrice(),
+      this.ceyPayRate().catch((error) => {
+        this.logger.error(`CeyPay USDT/LKR rate: ${errorMessage(error)}`);
+        return null;
+      }),
+    ]);
+    if (!btcUsd || !usdtLkr) {
+      throw new ServiceUnavailableException('Price is unavailable right now');
+    }
+    return { btcLkr: btcLkrRate(btcUsd, usdtLkr), btcUsd, usdtLkr };
+  }
+
+  /** CeyPay's current USDT/LKR rate (cached briefly). Throws when it has none. */
+  private async ceyPayRate(): Promise<number> {
+    const rate = await this.redisService.getOrSet(
       CacheKeys.sell.ceypayRate(),
       CEYPAY_RATE_CACHE_TTL_SECONDS,
       async () => (await this.ceyPay.getQuote('1')).rateUsdtLkr,
@@ -698,6 +721,15 @@ export class SellService {
     if (!rate || !(rate > 0)) {
       throw new CeyPayError('CeyPay returned no rate', undefined, true);
     }
+    return rate;
+  }
+
+  /**
+   * Lock a CeyPay quote whose LKR amount covers ours. CeyPay quotes in USDT,
+   * so we size the USDT amount from its current rate (cached briefly).
+   */
+  private async lockCeyPayQuote(amountLkr: string) {
+    let rate = await this.ceyPayRate();
     for (let attempt = 0; attempt < 2; attempt++) {
       const quote = await this.ceyPay.getQuote(usdtFor(amountLkr, rate));
       if (new Big(quote.amountLkr).gte(amountLkr)) return quote;
