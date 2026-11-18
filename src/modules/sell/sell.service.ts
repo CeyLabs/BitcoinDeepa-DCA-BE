@@ -24,7 +24,13 @@ import {
   BankAccountService,
   maskAccountNumber,
 } from '../bank-account/bank-account.service';
-import { SATS_PER_BTC, SellStatus } from './sell.constants';
+import {
+  COUNTED_SELL_STATUSES,
+  DEFAULT_SELL_DAILY_MAX_SATS,
+  DEFAULT_SELL_MAX_SATS,
+  SATS_PER_BTC,
+  SellStatus,
+} from './sell.constants';
 
 /** Payout attempts (CeyPay unreachable) before an order needs a human */
 export const MAX_PAYOUT_ATTEMPTS = 5;
@@ -52,6 +58,7 @@ export interface SellOrderRow {
   refunded: boolean;
   retry_count: number;
   last_retry_at: Date | null;
+  alerted_at: Date | null;
   completed_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -87,6 +94,8 @@ function userFacingReason(row: SellOrderRow): string | null {
       return /insufficient/i.test(row.failure_reason)
         ? 'Not enough sats in your wallet.'
         : 'Nothing was sold.';
+    case SellStatus.REFUNDING:
+      return "The bank transfer couldn't be completed. Returning your sats.";
     case SellStatus.NEEDS_REVIEW:
       return 'Our team is checking this sale.';
     default:
@@ -198,12 +207,51 @@ export class SellService {
     return parseInt(process.env.SELL_MIN_SATS || '1000', 10);
   }
 
+  private static maxSats(): number {
+    return parseInt(
+      process.env.SELL_MAX_SATS || String(DEFAULT_SELL_MAX_SATS),
+      10,
+    );
+  }
+
+  private static dailyMaxSats(): number {
+    return parseInt(
+      process.env.SELL_DAILY_MAX_SATS || String(DEFAULT_SELL_DAILY_MAX_SATS),
+      10,
+    );
+  }
+
+  /** Refuse a sale that would take the member past the rolling 24h limit. */
+  private async assertWithinDailyLimit(
+    db: Knex | Knex.Transaction,
+    userId: string,
+    sats: number,
+  ): Promise<void> {
+    const row = await db('sell_order')
+      .where('user_id', userId)
+      .whereIn('status', COUNTED_SELL_STATUSES)
+      .where('created_at', '>', db.raw("now() - interval '24 hours'"))
+      .sum<{ total: string | null }>('sats as total')
+      .first();
+    const used = Number(row?.total ?? 0);
+    const max = SellService.dailyMaxSats();
+    if (used + sats > max) {
+      const left = Math.max(0, max - used);
+      throw new BadRequestException(
+        left > 0
+          ? `You can sell up to ${left.toLocaleString('en-US')} more sats today`
+          : `You've reached today's limit of ${max.toLocaleString('en-US')} sats`,
+      );
+    }
+  }
+
   /** Live estimate for the UI; not a quote. */
   async getPrice(): Promise<{
     btcLkrRate: number;
     feeBasisPoints: number;
-    /** Smallest sale the API accepts, so the app's form uses the same rule */
+    /** Smallest and largest single sale, so the app's form uses the same rules */
     minSats: number;
+    maxSats: number;
   }> {
     const rate = await this.bitcoinPrice.getBtcLkrSellRate();
     if (!rate) {
@@ -213,6 +261,7 @@ export class SellService {
       btcLkrRate: rate.buyingRateLkr,
       feeBasisPoints: SellService.feeBasisPoints(),
       minSats: SellService.minSats(),
+      maxSats: SellService.maxSats(),
     };
   }
 
@@ -222,6 +271,13 @@ export class SellService {
         `Minimum sale is ${SellService.minSats()} sats`,
       );
     }
+    if (sats > SellService.maxSats()) {
+      throw new BadRequestException(
+        `Maximum sale is ${SellService.maxSats().toLocaleString('en-US')} sats`,
+      );
+    }
+    // Early answer; confirm checks again under a lock
+    await this.assertWithinDailyLimit(this.knex, userId, sats);
     const account = await this.bankAccounts.getVerifiedAccount(userId);
     if (!account) throw new BadRequestException('No verified bank account');
 
@@ -291,89 +347,105 @@ export class SellService {
   }
 
   /**
-   * Take the sats (memo `sell:<id>` makes the debit idempotent on the bot
-   * side), then create the CeyPay payout. The order row stays locked during
-   * the debit so a double-tap can't collect twice.
+   * Take the sats, then create the CeyPay payout.
+   *
+   * The order moves QUOTED -> COLLECTING in its own committed transaction
+   * before the bot is called, so a crash or a failed commit after the debit
+   * can't roll it back to QUOTED and lose the sats: a COLLECTING order that
+   * never moves on is handed to a human (recoverStuckOrders). Memo
+   * `sell:<id>` makes the debit idempotent on the bot side.
    */
   async confirm(userId: string, id: string): Promise<SellOrderView> {
-    type Outcome =
-      | { kind: 'collected'; order: SellOrderRow }
-      | { kind: 'unknown'; order: SellOrderRow }
-      | { kind: 'rejected'; order: SellOrderRow; message: string }
+    type Claim =
+      | { kind: 'claimed'; order: SellOrderRow }
       | { kind: 'expired' }
       | { kind: 'done'; order: SellOrderRow };
 
-    const outcome = await this.knex.transaction(
-      async (trx): Promise<Outcome> => {
-        const order = await trx<SellOrderRow>('sell_order')
-          .where({ id, user_id: userId })
-          .forUpdate()
-          .first();
-        if (!order) throw new NotFoundException('Order not found');
-        // Already confirmed (double-tap / retry): report where it is
-        if (order.status !== SellStatus.QUOTED) {
-          if (order.status === SellStatus.EXPIRED) return { kind: 'expired' };
-          return { kind: 'done', order };
-        }
-        if (new Date(order.expires_at).getTime() <= Date.now()) {
-          await this.setStatus(trx, id, [SellStatus.QUOTED], {
-            status: SellStatus.EXPIRED,
-          });
-          return { kind: 'expired' };
-        }
-
-        const account = await this.bankAccounts.getVerifiedAccount(userId, trx);
-        if (!account || account.id !== order.user_bank_account_id) {
-          throw new ConflictException(
-            'Your bank account changed. Please get a new quote.',
-          );
-        }
-
-        const result = await this.bitcoinDeepa.collectFunds(
-          Number(order.sats),
-          userId,
-          `sell:${order.id}`,
-        );
-        if (result.success || result.already_completed) {
-          const updated = await this.setStatus(trx, id, [SellStatus.QUOTED], {
-            status: SellStatus.SATS_COLLECTED,
-          });
-          return { kind: 'collected', order: updated! };
-        }
-        if (result.outcome_unknown) {
-          const updated = await this.setStatus(trx, id, [SellStatus.QUOTED], {
-            status: SellStatus.NEEDS_REVIEW,
-            failure_reason: `Collect outcome unknown: ${result.message ?? ''}`,
-          });
-          return { kind: 'unknown', order: updated! };
-        }
-        const message = result.message || 'Could not take the sats';
+    const claim = await this.knex.transaction(async (trx): Promise<Claim> => {
+      // One confirm per member at a time, so the daily limit can't be raced
+      await trx('user').where('id', userId).forUpdate().first();
+      const order = await trx<SellOrderRow>('sell_order')
+        .where({ id, user_id: userId })
+        .forUpdate()
+        .first();
+      if (!order) throw new NotFoundException('Order not found');
+      // Already confirmed (double-tap / retry): report where it is
+      if (order.status !== SellStatus.QUOTED) {
+        if (order.status === SellStatus.EXPIRED) return { kind: 'expired' };
+        return { kind: 'done', order };
+      }
+      if (new Date(order.expires_at).getTime() <= Date.now()) {
         await this.setStatus(trx, id, [SellStatus.QUOTED], {
           status: SellStatus.EXPIRED,
-          failure_reason: message,
         });
-        return { kind: 'rejected', order, message };
-      },
+        return { kind: 'expired' };
+      }
+
+      const account = await this.bankAccounts.getVerifiedAccount(userId, trx);
+      if (!account || account.id !== order.user_bank_account_id) {
+        throw new ConflictException(
+          'Your bank account changed. Please get a new quote.',
+        );
+      }
+      await this.assertWithinDailyLimit(trx, userId, Number(order.sats));
+
+      const claimed = await this.setStatus(trx, id, [SellStatus.QUOTED], {
+        status: SellStatus.COLLECTING,
+      });
+      return { kind: 'claimed', order: claimed! };
+    });
+
+    if (claim.kind === 'expired') {
+      throw new GoneException('Quote expired, please get a new one');
+    }
+    if (claim.kind === 'done') return toSellOrderView(claim.order);
+
+    // No lock held while the bot works
+    const order = claim.order;
+    const result = await this.bitcoinDeepa.collectFunds(
+      Number(order.sats),
+      userId,
+      `sell:${order.id}`,
     );
 
-    switch (outcome.kind) {
-      case 'expired':
-        throw new GoneException('Quote expired, please get a new one');
-      case 'rejected':
-        throw new BadRequestException(outcome.message);
-      case 'done':
-        return toSellOrderView(outcome.order);
-      case 'unknown':
+    if (result.success || result.already_completed) {
+      const collected = await this.setStatus(
+        this.knex,
+        id,
+        [SellStatus.COLLECTING],
+        { status: SellStatus.SATS_COLLECTED },
+      );
+      // Not COLLECTING any more: the stuck-order check took it meanwhile
+      if (collected) await this.createPayout(id);
+      return this.getOrder(userId, id);
+    }
+
+    if (result.outcome_unknown) {
+      const parked = await this.setStatus(
+        this.knex,
+        id,
+        [SellStatus.COLLECTING],
+        {
+          status: SellStatus.NEEDS_REVIEW,
+          failure_reason: `Collect outcome unknown: ${result.message ?? ''}`,
+        },
+      );
+      if (parked) {
         await this.telegramLogger.logAlert(
           'Sell',
-          `Sell order ${outcome.order.id}: collecting ${outcome.order.sats} sats from #UID${userId} timed out. ` +
-            `Check the bot ledger for memo sell:${outcome.order.id} before doing anything.`,
+          `Sell order ${id}: collecting ${order.sats} sats from #UID${userId} has an unknown outcome (${result.message ?? 'no answer'}). ` +
+            `Check the bot ledger for memo sell:${id} before doing anything.`,
         );
-        return toSellOrderView(outcome.order);
-      case 'collected':
-        await this.createPayout(outcome.order.id);
-        return this.getOrder(userId, id);
+      }
+      return this.getOrder(userId, id);
     }
+
+    const message = result.message || 'Could not take the sats';
+    await this.setStatus(this.knex, id, [SellStatus.COLLECTING], {
+      status: SellStatus.EXPIRED,
+      failure_reason: message,
+    });
+    throw new BadRequestException(message);
   }
 
   /**
@@ -516,7 +588,23 @@ export class SellService {
         completed_at: this.knex.fn.now(),
         failure_reason: null,
       });
-      if (!updated) return false;
+      if (!updated) {
+        // CeyPay paid the bank, but we already gave (or are giving) the sats
+        // back: the member got both. A human must sort this out.
+        const refundStates = [
+          SellStatus.REFUNDING,
+          SellStatus.REFUNDED,
+          SellStatus.NEEDS_REVIEW,
+        ];
+        if (refundStates.includes(order.status)) {
+          await this.telegramLogger.logAlert(
+            'Sell',
+            `Sell order ${orderId}: CeyPay reports the payout COMPLETED (payment ${offramp.paymentId}, bank ref ${offramp.bankRef ?? '-'}) ` +
+              `but the order is ${order.status}. The member may have both the LKR and the sats: check before doing anything.`,
+          );
+        }
+        return false;
+      }
       await this.notifyCompleted(updated);
       return true;
     }
@@ -543,18 +631,24 @@ export class SellService {
     const open = [SellStatus.SATS_COLLECTED, SellStatus.PAYOUT_PENDING];
     // Claim it first so the webhook and the poll can't both refund
     const claimed = await this.setStatus(this.knex, order.id, open, {
-      status: SellStatus.NEEDS_REVIEW,
-      failure_reason: `Refunding: ${reason}`,
+      status: SellStatus.REFUNDING,
+      failure_reason: reason,
     });
     if (!claimed) return false;
 
-    const result = await this.bitcoinDeepa.transferFunds(
-      Number(order.sats),
-      order.user_id,
-      `sell-refund:${order.id}`,
-    );
-    if (result.success || result.already_completed) {
-      await this.setStatus(this.knex, order.id, [SellStatus.NEEDS_REVIEW], {
+    // Mock collect never took the sats, so there is nothing to give back
+    const result = BitcoinDeepaService.isCollectMocked()
+      ? { success: true, message: 'Mock collect: nothing to return' }
+      : await this.bitcoinDeepa.transferFunds(
+          Number(order.sats),
+          order.user_id,
+          `sell-refund:${order.id}`,
+        );
+    if (
+      result.success ||
+      ('already_completed' in result && result.already_completed)
+    ) {
+      await this.setStatus(this.knex, order.id, [SellStatus.REFUNDING], {
         status: SellStatus.REFUNDED,
         refunded: true,
         failure_reason: reason,
@@ -566,16 +660,15 @@ export class SellService {
       return true;
     }
 
-    await this.knex('sell_order')
-      .where('id', order.id)
-      .update({
-        failure_reason: `Refund ${result.outcome_unknown ? 'outcome unknown' : 'failed'} (${result.message ?? ''}) after: ${reason}`,
-        updated_at: this.knex.fn.now(),
-      });
+    const unknown = 'outcome_unknown' in result && result.outcome_unknown;
+    await this.setStatus(this.knex, order.id, [SellStatus.REFUNDING], {
+      status: SellStatus.NEEDS_REVIEW,
+      failure_reason: `Refund ${unknown ? 'outcome unknown' : 'failed'} (${result.message ?? ''}) after: ${reason}`,
+    });
     await this.telegramLogger.logAlert(
       'Sell',
       `Sell order ${order.id}: payout failed (${reason}) and refunding ${order.sats} sats to #UID${order.user_id} ` +
-        `${result.outcome_unknown ? 'timed out' : `failed: ${result.message}`}. ` +
+        `${unknown ? 'timed out' : `failed: ${result.message}`}. ` +
         `Check the bot ledger for memo sell-refund:${order.id}.`,
     );
     return true;
@@ -622,6 +715,59 @@ export class SellService {
   }
 
   /** Atomically count a payout attempt (FOR UPDATE SKIP LOCKED). */
+  /**
+   * Orders stuck mid-transfer (the process died between committing the
+   * status and recording the bot's answer) go to a human, with the memo to
+   * check. Nothing is retried automatically: the debit or refund may or may
+   * not have happened.
+   */
+  async recoverStuckOrders(): Promise<number> {
+    const stuck: [SellStatus, number, (id: string) => string][] = [
+      [SellStatus.COLLECTING, 2, (id) => `sell:${id}`],
+      [SellStatus.REFUNDING, 5, (id) => `sell-refund:${id}`],
+    ];
+    let count = 0;
+    for (const [status, minutes, memo] of stuck) {
+      const rows = await this.knex<SellOrderRow>('sell_order')
+        .where('status', status)
+        .whereRaw(`updated_at <= now() - interval '${minutes} minutes'`)
+        .limit(50);
+      for (const row of rows) {
+        const parked = await this.setStatus(this.knex, row.id, [status], {
+          status: SellStatus.NEEDS_REVIEW,
+          failure_reason: `Stuck in ${status}${row.failure_reason ? ` (${row.failure_reason})` : ''}`,
+        });
+        if (!parked) continue;
+        count++;
+        await this.telegramLogger.logAlert(
+          'Sell',
+          `Sell order ${row.id} (${row.sats} sats, #UID${row.user_id}) was stuck in ${status}. ` +
+            `Check the bot ledger for memo ${memo(row.id)} to see whether it went through.`,
+        );
+      }
+    }
+    return count;
+  }
+
+  /** Payouts CeyPay hasn't finished after this long are reported (once). */
+  async alertStalePayouts(hours = 2): Promise<number> {
+    const rows = await this.knex<SellOrderRow>('sell_order')
+      .where('status', SellStatus.PAYOUT_PENDING)
+      .whereNull('alerted_at')
+      .whereRaw(`created_at <= now() - interval '${hours} hours'`)
+      .limit(50);
+    for (const row of rows) {
+      await this.knex('sell_order')
+        .where('id', row.id)
+        .update({ alerted_at: this.knex.fn.now() });
+      await this.telegramLogger.logAlert(
+        'Sell',
+        `Sell order ${row.id}: the CeyPay payout of ${row.amount_lkr} LKR (payment ${row.ceypay_payment_id ?? '-'}) is still pending after ${hours}h.`,
+      );
+    }
+    return rows.length;
+  }
+
   private async claimForPayout(id: string): Promise<SellOrderRow | null> {
     return this.knex.transaction(async (trx) => {
       const order = await trx<SellOrderRow>('sell_order')

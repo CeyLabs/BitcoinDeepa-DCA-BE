@@ -19,6 +19,7 @@ import {
   ListBankReviewsQueryDto,
   RejectBankAccountDto,
 } from './dto/bank-reviews.dto';
+import { SellEnabledGuard } from '../../../common/sell-enabled';
 
 const reviewer = ({ user }: AdminSession) => `admin:${user.email || user.id}`;
 const uuid = new ParseUUIDPipe({ version: '4' });
@@ -48,6 +49,7 @@ export class AdminBankReviewsController {
   }
 
   @Post(':id/approve')
+  @UseGuards(SellEnabledGuard)
   @HttpCode(HttpStatus.OK)
   async approve(
     @Param('id', uuid) id: string,

@@ -20,6 +20,10 @@ import {
 const isProduction = (env: EnvironmentVariables) =>
   env.NODE_ENV === 'production';
 
+/** Selling needs CeyPay and R2: required in production once it is switched on */
+const sellRequired = (env: EnvironmentVariables) =>
+  isProduction(env) && env.SELL_ENABLED === 'true';
+
 /** A cross-site (SameSite=None) admin cookie is for dev/staging only */
 @ValidatorConstraint({ name: 'notNoneInProduction' })
 class NotNoneInProduction implements ValidatorConstraintInterface {
@@ -163,7 +167,18 @@ class EnvironmentVariables {
   @Min(1)
   BITCOINDEEPA_TIMEOUT?: number;
 
-  // Sell flow (CeyPay aggregator off-ramp)
+  // Sell flow (CeyPay aggregator off-ramp). Off unless SELL_ENABLED=true:
+  // the sell and bank-account endpoints answer 503 and its crons don't run.
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  SELL_ENABLED?: string;
+
+  // Pretend the bot debited the sats (its collect endpoint isn't built yet).
+  // Sandbox CeyPay only, so fake sats can never be paid out for real.
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  BITCOINDEEPA_COLLECT_MOCK?: string;
+
   @IsOptional()
   @IsInt()
   @Min(0)
@@ -181,22 +196,34 @@ class EnvironmentVariables {
   @Min(1)
   SELL_MIN_SATS?: number;
 
-  @ValidateIf(isProduction)
+  // Largest single sale (default 5,000,000 sats)
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  SELL_MAX_SATS?: number;
+
+  // Most a member can sell in a rolling 24 hours (default 20,000,000 sats)
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  SELL_DAILY_MAX_SATS?: number;
+
+  @ValidateIf(sellRequired)
   @IsUrl({ require_tld: false })
   CEYPAY_API_URL?: string;
 
-  @ValidateIf(isProduction)
+  @ValidateIf(sellRequired)
   @IsString()
   @IsNotEmpty()
   CEYPAY_API_KEY_ID?: string;
 
-  @ValidateIf(isProduction)
+  @ValidateIf(sellRequired)
   @IsString()
   @IsNotEmpty()
   CEYPAY_API_SECRET?: string;
 
   // ED25519 public key (PEM or base64 DER) CeyPay signs webhooks with
-  @ValidateIf(isProduction)
+  @ValidateIf(sellRequired)
   @IsString()
   @IsNotEmpty()
   CEYPAY_WEBHOOK_PUBLIC_KEY?: string;
@@ -212,22 +239,22 @@ class EnvironmentVariables {
   CEYPAY_TIMEOUT?: number;
 
   // Cloudflare R2 (bank statements, private bucket)
-  @ValidateIf(isProduction)
+  @ValidateIf(sellRequired)
   @IsString()
   @IsNotEmpty()
   R2_ACCOUNT_ID?: string;
 
-  @ValidateIf(isProduction)
+  @ValidateIf(sellRequired)
   @IsString()
   @IsNotEmpty()
   R2_ACCESS_KEY_ID?: string;
 
-  @ValidateIf(isProduction)
+  @ValidateIf(sellRequired)
   @IsString()
   @IsNotEmpty()
   R2_SECRET_ACCESS_KEY?: string;
 
-  @ValidateIf(isProduction)
+  @ValidateIf(sellRequired)
   @IsString()
   @IsNotEmpty()
   R2_BUCKET?: string;
@@ -251,14 +278,20 @@ export function validateEnv(
     enableImplicitConversion: true,
   });
   const errors = validateSync(validated, { skipMissingProperties: false });
+  const problems = errors.map(
+    (e) => `${e.property}: ${Object.values(e.constraints ?? {}).join(', ')}`,
+  );
+  if (
+    validated.BITCOINDEEPA_COLLECT_MOCK === 'true' &&
+    !/sandbox/i.test(validated.CEYPAY_API_URL ?? '')
+  ) {
+    problems.push(
+      'BITCOINDEEPA_COLLECT_MOCK: only allowed with the CeyPay sandbox (CEYPAY_API_URL)',
+    );
+  }
 
-  if (errors.length > 0) {
-    const details = errors
-      .map(
-        (e) =>
-          `${e.property}: ${Object.values(e.constraints ?? {}).join(', ')}`,
-      )
-      .join('\n  ');
+  if (problems.length > 0) {
+    const details = problems.join('\n  ');
     throw new Error(`Invalid environment configuration:\n  ${details}`);
   }
   return validated;

@@ -68,6 +68,28 @@ export class SellSettlementService {
     }
   }
 
+  /** Orders stuck mid-transfer go to a human (see SellService.recoverStuckOrders). */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async recoverStuckOrders(): Promise<void> {
+    try {
+      await this.sellService.recoverStuckOrders();
+    } catch (error) {
+      this.logger.error(
+        `Recovering stuck sells failed: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /** Report payouts CeyPay hasn't finished after 2 hours (once each). */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async alertStalePayouts(): Promise<void> {
+    try {
+      await this.sellService.alertStalePayouts();
+    } catch (error) {
+      this.logger.error(`Stale payout check failed: ${errorMessage(error)}`);
+    }
+  }
+
   /** Fallback for missed webhooks: ask CeyPay about old pending payouts. */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async pollPendingPayouts(): Promise<void> {

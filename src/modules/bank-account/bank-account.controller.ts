@@ -18,6 +18,7 @@ import type { JwtPayload } from '../auth/auth.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { BankAccountService } from './bank-account.service';
 import { AddBankAccountDto, StatementUploadDto } from './dto/bank-account.dto';
+import { SellEnabledGuard } from '../../common/sell-enabled';
 
 @Controller('bank-accounts')
 @UseGuards(ConditionalAuthGuard)
@@ -29,6 +30,7 @@ export class BankAccountController {
 
   /** Supported banks (CeyPay list) */
   @Get('banks')
+  @UseGuards(SellEnabledGuard)
   getBanks() {
     return this.bankAccounts.getBanks();
   }
@@ -40,7 +42,7 @@ export class BankAccountController {
 
   /** Step 1: a temporary presigned PUT URL for the bank statement. */
   @Post('statement-upload')
-  @UseGuards(KycVerifiedGuard)
+  @UseGuards(SellEnabledGuard, KycVerifiedGuard)
   @RequireKyc()
   createStatementUpload(
     @CurrentUser() user: JwtPayload,
@@ -51,7 +53,7 @@ export class BankAccountController {
 
   /** Step 2: submit the account for admin review. */
   @Post()
-  @UseGuards(KycVerifiedGuard)
+  @UseGuards(SellEnabledGuard, KycVerifiedGuard)
   @RequireKyc()
   add(@CurrentUser() user: JwtPayload, @Body() body: AddBankAccountDto) {
     return this.telegramLogger.trackAction(

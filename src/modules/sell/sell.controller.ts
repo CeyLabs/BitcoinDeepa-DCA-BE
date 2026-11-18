@@ -25,7 +25,11 @@ import { TelegramLoggerService } from '../telegram-logger/telegram-logger.servic
 import { SellService } from './sell.service';
 import { BankVerifiedGuard } from '../bank-account/guards/bank-verified.guard';
 import { SellQuoteDto } from './dto/sell.dto';
-import { CeyPayWebhookDto } from './dto/ceypay-webhook.dto';
+import {
+  CEYPAY_WEBHOOK_EVENTS,
+  CeyPayWebhookDto,
+} from './dto/ceypay-webhook.dto';
+import { SellEnabledGuard } from '../../common/sell-enabled';
 
 @Controller('sell')
 export class SellController {
@@ -40,20 +44,30 @@ export class SellController {
   // ---- Selling ---------------------------------------------------------
 
   @Get('price')
-  @UseGuards(ConditionalAuthGuard)
+  @UseGuards(SellEnabledGuard, ConditionalAuthGuard)
   getPrice() {
     return this.sellService.getPrice();
   }
 
   @Post('quote')
-  @UseGuards(ConditionalAuthGuard, KycVerifiedGuard, BankVerifiedGuard)
+  @UseGuards(
+    SellEnabledGuard,
+    ConditionalAuthGuard,
+    KycVerifiedGuard,
+    BankVerifiedGuard,
+  )
   @RequireKyc()
   quote(@CurrentUser() user: JwtPayload, @Body() body: SellQuoteDto) {
     return this.sellService.quote(user.id, body.sats);
   }
 
   @Post('orders/:id/confirm')
-  @UseGuards(ConditionalAuthGuard, KycVerifiedGuard, BankVerifiedGuard)
+  @UseGuards(
+    SellEnabledGuard,
+    ConditionalAuthGuard,
+    KycVerifiedGuard,
+    BankVerifiedGuard,
+  )
   @RequireKyc()
   @HttpCode(HttpStatus.OK)
   confirm(
@@ -96,6 +110,10 @@ export class SellController {
       !this.ceyPay.verifyWebhookSignature(req.rawBody, timestamp, signature)
     ) {
       throw new UnauthorizedException('Invalid webhook signature');
+    }
+    if (!(CEYPAY_WEBHOOK_EVENTS as readonly string[]).includes(body.event)) {
+      this.logger.log(`Ignoring CeyPay event ${body.event}`);
+      return { received: true };
     }
 
     const applied = await this.sellService.applyOfframp(body.externalRef, {

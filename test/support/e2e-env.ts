@@ -97,6 +97,7 @@ Object.assign(process.env, {
   BITCOINDEEPA_SELL_FEE_BASIS_POINTS: '100',
   SELL_QUOTE_TTL_SECONDS: '60',
   SELL_MIN_SATS: '1000',
+  SELL_ENABLED: 'true',
   CEYPAY_API_URL: 'https://ceypay.invalid',
   CEYPAY_API_KEY_ID: 'ak_live_test',
   CEYPAY_API_SECRET: 'sk_live_test',

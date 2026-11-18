@@ -141,6 +141,29 @@ describe('BitcoinDeepaService', () => {
         already_completed: false,
       });
     });
+
+    it('treats a 500 as an unknown outcome (the debit may have happened)', async () => {
+      post.mockRejectedValue({
+        message: 'Request failed',
+        response: { status: 500, data: { error: 'boom' } },
+      });
+      await expect(service.collectFunds(1, '42', 'm')).resolves.toMatchObject({
+        success: false,
+        outcome_unknown: true,
+      });
+    });
+
+    it('with the mock on, succeeds without calling the bot', async () => {
+      process.env.BITCOINDEEPA_COLLECT_MOCK = 'true';
+      try {
+        await expect(service.collectFunds(1, '42', 'm')).resolves.toMatchObject(
+          { success: true },
+        );
+        expect(post).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.BITCOINDEEPA_COLLECT_MOCK;
+      }
+    });
   });
 
   it('fetches bot transaction history with limit/offset', async () => {

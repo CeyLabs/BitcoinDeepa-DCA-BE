@@ -50,23 +50,34 @@ describe('validateEnv', () => {
     ).toThrow(/PAYHERE_APP_SECRET/);
   });
 
-  it('requires CeyPay and R2 for the sell flow in production', () => {
+  it('requires CeyPay and R2 in production only once selling is enabled', () => {
+    const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
+    const on = { ...prod, SELL_ENABLED: 'true' };
+    expect(() => validateEnv({ ...on, CEYPAY_API_SECRET: '' })).toThrow(
+      /CEYPAY_API_SECRET/,
+    );
+    expect(() => validateEnv({ ...on, R2_BUCKET: '' })).toThrow(/R2_BUCKET/);
+    // switched off: the buy flow deploys without any sell configuration
+    expect(() =>
+      validateEnv({ ...prod, CEYPAY_API_SECRET: '', R2_BUCKET: '' }),
+    ).not.toThrow();
+  });
+
+  it('allows the bot collect mock only with the CeyPay sandbox', () => {
     expect(() =>
       validateEnv({
         ...base,
-        NODE_ENV: 'production',
-        ...prodSecrets,
-        CEYPAY_API_SECRET: '',
+        BITCOINDEEPA_COLLECT_MOCK: 'true',
+        CEYPAY_API_URL: 'https://api.ceypay.io',
       }),
-    ).toThrow(/CEYPAY_API_SECRET/);
+    ).toThrow(/BITCOINDEEPA_COLLECT_MOCK/);
     expect(() =>
       validateEnv({
         ...base,
-        NODE_ENV: 'production',
-        ...prodSecrets,
-        R2_BUCKET: '',
+        BITCOINDEEPA_COLLECT_MOCK: 'true',
+        CEYPAY_API_URL: 'https://sandbox-api.ceypay.io',
       }),
-    ).toThrow(/R2_BUCKET/);
+    ).not.toThrow();
   });
 
   it('requires a strong admin auth secret in production', () => {

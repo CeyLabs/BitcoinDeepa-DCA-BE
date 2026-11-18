@@ -88,6 +88,19 @@ export class BitcoinDeepaService {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
     this.hmacSecret = process.env.BITCOINDEEPA_HMAC_SECRET || '';
     this.timeout = parseInt(process.env.BITCOINDEEPA_TIMEOUT || '10000', 10);
+    if (BitcoinDeepaService.isCollectMocked()) {
+      this.logger.warn(
+        'BITCOINDEEPA_COLLECT_MOCK is on: sell debits are NOT sent to the bot (sandbox only)',
+      );
+    }
+  }
+
+  /**
+   * Until the bot's collect endpoint exists, dev can pretend every debit
+   * succeeded. Env validation only allows it with the CeyPay sandbox.
+   */
+  static isCollectMocked(): boolean {
+    return process.env.BITCOINDEEPA_COLLECT_MOCK === 'true';
   }
 
   isConfigured(): boolean {
@@ -189,13 +202,21 @@ export class BitcoinDeepaService {
 
   /**
    * Debit satoshis from a user's wallet into the platform wallet (sell flow).
-   * Same result semantics as transferFunds.
+   * Same result semantics as transferFunds, except that any 5xx is an unknown
+   * outcome: the debit may have happened before the error, and the endpoint's
+   * contract doesn't promise otherwise yet.
    */
   async collectFunds(
     amount: number,
     fromTelegramId: string,
     memo: string,
   ): Promise<FundTransferResponse> {
+    if (BitcoinDeepaService.isCollectMocked()) {
+      this.logger.warn(
+        `MOCK collect: ${amount} sats from user ${fromTelegramId} (${memo}) treated as debited`,
+      );
+      return { success: true, message: 'Mock collect (not sent to the bot)' };
+    }
     const requestBody: FundCollectRequest = {
       telegram_id: Number(fromTelegramId),
       amount: Number(amount),
@@ -219,6 +240,9 @@ export class BitcoinDeepaService {
       this.logger.error(
         `BitcoinDeepa collect failed: ${amount} sats from user ${fromTelegramId}: ${message} (status: ${error.response?.status})`,
       );
+      if (Number(error.response?.status) >= 500) {
+        return { success: false, message, outcome_unknown: true };
+      }
       return BitcoinDeepaService.toFailedTransfer(error, message);
     }
   }

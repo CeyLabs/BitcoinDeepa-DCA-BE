@@ -59,6 +59,21 @@ describe('Sell flow (e2e)', () => {
     });
   });
 
+  describe('switched off (SELL_ENABLED)', () => {
+    afterEach(() => {
+      process.env.SELL_ENABLED = 'true';
+    });
+
+    it('answers 503 to new sales and bank accounts, but still shows orders', async () => {
+      process.env.SELL_ENABLED = 'false';
+      await asUser(ctx, USER).get('/sell/price').expect(503);
+      await asUser(ctx, USER).post('/sell/quote', { sats: SATS }).expect(503);
+      await asUser(ctx, USER).get('/bank-accounts/banks').expect(503);
+      await asUser(ctx, USER).get('/sell/orders').expect(200);
+      await asUser(ctx, USER).get('/bank-accounts').expect(200);
+    });
+  });
+
   describe('who can sell', () => {
     it('blocks a user without a bank account', async () => {
       const res = await asUser(ctx, USER)
@@ -108,6 +123,7 @@ describe('Sell flow (e2e)', () => {
         btcLkrRate: 20_000_000,
         feeBasisPoints: 100,
         minSats: 1000,
+        maxSats: 5_000_000,
       });
     });
 
@@ -194,6 +210,83 @@ describe('Sell flow (e2e)', () => {
       }).expect(200);
       expect((await order(q.id)).status).toBe('COMPLETED');
       expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+    });
+
+    it('commits COLLECTING before the bot debit, so a crash leaves a trace', async () => {
+      const q = await quote();
+      let statusDuringDebit: string | undefined;
+      ctx.bitcoinDeepa.collectFunds.mockImplementationOnce(async () => {
+        // read from another connection: the status is already committed
+        statusDuringDebit = (await order(q.id)).status;
+        return { success: true };
+      });
+      await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(200);
+      expect(statusDuringDebit).toBe('COLLECTING');
+    });
+
+    it('hands an order stuck in COLLECTING or REFUNDING to a human', async () => {
+      const a = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: a.id })
+        .update({
+          status: 'COLLECTING',
+          updated_at: ctx.knex.raw("now() - interval '3 minutes'"),
+        });
+      await settlement.recoverStuckOrders();
+      expect(await order(a.id)).toMatchObject({ status: 'NEEDS_REVIEW' });
+      expect(logAlert).toHaveBeenCalledWith(
+        'Sell',
+        expect.stringContaining(`memo sell:${a.id}`),
+      );
+
+      // a fresh one is left alone
+      const b = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: b.id })
+        .update({ status: 'REFUNDING' });
+      await settlement.recoverStuckOrders();
+      expect((await order(b.id)).status).toBe('REFUNDING');
+    });
+
+    it('enforces the per-sale and the daily limits', async () => {
+      await asUser(ctx, USER)
+        .post('/sell/quote', { sats: 5_000_001 })
+        .expect(400);
+
+      // 19.95M already sold today: only 50k left
+      const q = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: q.id })
+        .update({ status: 'COMPLETED', sats: '19950000' });
+      const res = await asUser(ctx, USER)
+        .post('/sell/quote', { sats: SATS })
+        .expect(400);
+      expect(res.body.message).toBe(
+        'You can sell up to 50,000 more sats today',
+      );
+    });
+
+    it('checks the daily limit again at confirm', async () => {
+      const q = await quote();
+      // another sale finished between the quote and the confirm
+      const other = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: other.id })
+        .update({ status: 'COMPLETED', sats: '19950000' });
+      await ctx
+        .knex('sell_order')
+        .where({ id: q.id })
+        .update({
+          status: 'QUOTED',
+          expires_at: new Date(Date.now() + 60_000),
+        });
+      await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(400);
+      expect(ctx.bitcoinDeepa.collectFunds).not.toHaveBeenCalled();
+      expect((await order(q.id)).status).toBe('QUOTED');
     });
 
     it('confirming twice collects once', async () => {
@@ -333,6 +426,11 @@ describe('Sell flow (e2e)', () => {
       const q = await quote();
       await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(200);
       const row = await order(q.id);
+      let statusDuringRefund: string | undefined;
+      ctx.bitcoinDeepa.transferFunds.mockImplementationOnce(async () => {
+        statusDuringRefund = (await order(q.id)).status;
+        return { success: true };
+      });
 
       await webhook({
         event: 'payment.failed',
@@ -345,7 +443,22 @@ describe('Sell flow (e2e)', () => {
         refunded: true,
         failure_reason: 'Invalid account',
       });
+      // a refund in progress is REFUNDING, not "needs review"
+      expect(statusDuringRefund).toBe('REFUNDING');
       expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
+
+      // CeyPay later says it paid after all: the member has both, so alert
+      await webhook({
+        event: 'payment.completed',
+        paymentId: row.ceypay_payment_id,
+        externalRef: q.id,
+        bankRef: 'BOC-9',
+      }).expect(200);
+      expect((await order(q.id)).status).toBe('REFUNDED');
+      expect(logAlert).toHaveBeenCalledWith(
+        'Sell',
+        expect.stringContaining('may have both the LKR and the sats'),
+      );
 
       // replayed webhook: no second refund
       await webhook({
@@ -405,6 +518,33 @@ describe('Sell flow (e2e)', () => {
 
       await webhook(body, Date.now() - 10 * 60_000).expect(401);
       expect((await order(q.id)).status).toBe('PAYOUT_PENDING');
+    });
+
+    it('acknowledges event types it does not handle', async () => {
+      const q = await quote();
+      await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(200);
+      const row = await order(q.id);
+      await webhook({
+        event: 'payment.processing',
+        paymentId: row.ceypay_payment_id,
+        externalRef: q.id,
+      }).expect(200);
+      expect((await order(q.id)).status).toBe('PAYOUT_PENDING');
+    });
+
+    it('alerts once about a payout still pending after 2 hours', async () => {
+      const q = await quote();
+      await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(200);
+      await ctx
+        .knex('sell_order')
+        .where({ id: q.id })
+        .update({ created_at: ctx.knex.raw("now() - interval '3 hours'") });
+      await settlement.alertStalePayouts();
+      await settlement.alertStalePayouts();
+      const stale = logAlert.mock.calls.filter(([, text]) =>
+        String(text).includes('still pending after 2h'),
+      );
+      expect(stale).toHaveLength(1);
     });
 
     it("ignores a webhook whose payment doesn't match the order", async () => {
