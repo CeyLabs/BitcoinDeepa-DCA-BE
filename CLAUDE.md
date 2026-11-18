@@ -211,7 +211,7 @@ PORT=3000
 - `GET /admin/analytics/summary` - Users, KYC, subscriptions and settled SUCCESS-payment totals (LKR, fees, sats), plus `unsettled` (SUCCESS payments whose sats weren't sent: count, LKR, sats)
 - `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily settled LKR, payment count, unsettled LKR and new users (Asia/Colombo days)
 - `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&from=&to=&q=` - Paginated transactions, newest first, with member and plan. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
-- `GET /admin/members?page=&pageSize=&kyc=&subscription=active|none&q=` - Paginated members, newest first, with active plan and SUCCESS-payment totals (LKR, sats). `q` matches Telegram id, name, email or phone
+- `GET /admin/members?page=&pageSize=&kyc=&subscription=active|none&q=` - Paginated members, newest first, with active plan, settled SUCCESS-payment totals (LKR, sats) and unsettled LKR. `q` matches Telegram id, name, email or phone
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)

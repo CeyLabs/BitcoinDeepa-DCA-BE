@@ -79,21 +79,23 @@ describe('Admin members list (e2e)', () => {
       status: string,
       gross: number,
       sats: number,
+      settled = status === 'SUCCESS',
     ) => ({
       payhere_pay_id: id,
       payhere_sub_id: sub,
       status,
       gross_amount: gross,
       satoshis_purchased: sats,
+      settled,
     });
-    await ctx
-      .knex('transaction')
-      .insert([
-        tx('T1', 'S1', 'SUCCESS', 1000, 5000),
-        tx('T2', 'S1', 'SUCCESS', 3000, 15000),
-        tx('T3', 'S1', 'FAILED', 1000, 5000),
-        tx('T4', 'S2', 'SUCCESS', 500, 2500),
-      ]);
+    await ctx.knex('transaction').insert([
+      tx('T1', 'S1', 'SUCCESS', 1000, 5000),
+      tx('T2', 'S1', 'SUCCESS', 3000, 15000),
+      tx('T3', 'S1', 'FAILED', 1000, 5000),
+      tx('T4', 'S2', 'SUCCESS', 500, 2500),
+      // paid, but the sats weren't sent: reported apart
+      tx('T5', 'S1', 'SUCCESS', 700, 3500, false),
+    ]);
   });
 
   it('needs an admin session', async () => {
@@ -123,11 +125,13 @@ describe('Admin members list (e2e)', () => {
       activePlan: 'Shrimp Weekly',
       totalPaidLkr: 4000,
       satoshis: 20000,
+      unsettledLkr: 700,
     });
     expect(other).toMatchObject({
       activePlan: null,
       totalPaidLkr: 500,
       satoshis: 2500,
+      unsettledLkr: 0,
     });
   });
 

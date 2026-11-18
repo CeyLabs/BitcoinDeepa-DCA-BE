@@ -16,9 +16,11 @@ export interface AdminMember {
   joinedAt: string;
   /** Plan of the newest active subscription, if any */
   activePlan: string | null;
-  /** SUCCESS payments only */
+  /** Settled SUCCESS payments: what the member paid and got sats for */
   totalPaidLkr: number;
   satoshis: number;
+  /** SUCCESS payments whose sats weren't sent (yet) */
+  unsettledLkr: number;
 }
 
 type Row = {
@@ -34,6 +36,7 @@ type Row = {
   active_plan: string | null;
   total_paid: string;
   satoshis: string;
+  unsettled: string;
 };
 
 const hasActiveSubscription = (knex: Knex) =>
@@ -88,8 +91,11 @@ export class AdminMembersService {
           'plan.active_plan',
           'paid.total_paid',
           'paid.satoshis',
+          'paid.unsettled',
         )
-        // Only the current page's members get these per-member lookups
+        // Per-member lookups. Postgres runs them for every row before the
+        // offset too (fine at this size); if this gets slow, pick the page's
+        // ids in a subquery first and join these onto that.
         .joinRaw(
           `left join lateral (
             select p.name as active_plan
@@ -102,8 +108,9 @@ export class AdminMembersService {
         )
         .joinRaw(
           `left join lateral (
-            select coalesce(sum(t.gross_amount), 0) as total_paid,
-                   coalesce(sum(t.satoshis_purchased), 0) as satoshis
+            select coalesce(sum(t.gross_amount) filter (where t.settled), 0) as total_paid,
+                   coalesce(sum(t.satoshis_purchased) filter (where t.settled), 0) as satoshis,
+                   coalesce(sum(t.gross_amount) filter (where not t.settled), 0) as unsettled
             from "transaction" t
             join subscription s on s.payhere_sub_id = t.payhere_sub_id
             where s.user_id = u.id and t.status = 'SUCCESS'
@@ -129,6 +136,7 @@ export class AdminMembersService {
       activePlan: row.active_plan,
       totalPaidLkr: Number(row.total_paid),
       satoshis: Number(row.satoshis),
+      unsettledLkr: Number(row.unsettled),
     }));
     return toPage(items, Number(countRow?.count ?? 0), query);
   }
