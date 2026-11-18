@@ -198,6 +198,30 @@ describe('Settlement (e2e)', () => {
     expect(await tx()).toMatchObject({ settled: false, retry_count: 1 });
   });
 
+  it('pays on id and status when PayHere lists no amount, and says so (daily)', async () => {
+    const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
+    ctx.payHerePayments.mockResolvedValue([
+      { payment_id: 'P1', status: 'RECEIVED', amount: null, order_id: null },
+    ]);
+    await settlement.retryUnsettledTransactions();
+    expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
+    const missing = () =>
+      alert.mock.calls.filter(([, text]) =>
+        String(text).includes('amount check is not running'),
+      );
+    expect(missing()).toHaveLength(1);
+
+    // a second such payment the same day: paid, no second alert
+    await ctx.knex('transaction').where({ payhere_pay_id: 'P1' }).update({
+      settled: false,
+      retry_count: 0,
+      last_retry_at: null,
+    });
+    await settlement.retryUnsettledTransactions();
+    expect(missing()).toHaveLength(1);
+    alert.mockRestore();
+  });
+
   it('pays only payment ids PayHere confirms (stops replayed notifications)', async () => {
     const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
     ctx.payHerePayments.mockResolvedValueOnce([]); // PayHere never took P1
