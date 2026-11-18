@@ -1,4 +1,5 @@
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsInt, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 /**
  * Only the fields we use. Unknown fields are stripped by the global
@@ -19,4 +20,15 @@ export class WebhookDto {
   @IsOptional()
   @IsString()
   failure_reason?: string;
+
+  /** Same on every retry of one event: used to apply each event once */
+  @IsOptional()
+  @IsString()
+  event_id?: string;
+
+  /** Unix seconds, inside the signed body (unlike the X-Timestamp header) */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  timestamp?: number;
 }

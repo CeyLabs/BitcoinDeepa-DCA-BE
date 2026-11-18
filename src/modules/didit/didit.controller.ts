@@ -12,10 +12,16 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { UserService } from '../user/user.service';
+import { RedisService } from '../redis/redis.service';
 import { WebhookDto } from './dto/webhook.dto';
 import * as crypto from 'crypto';
 
 const MAX_WEBHOOK_AGE_SECONDS = 300;
+// The body's own (signed) timestamp may be older than the header's on a
+// retry, so it gets a wider window; replays inside it are stopped by
+// event_id instead.
+const MAX_EVENT_AGE_SECONDS = 24 * 60 * 60;
+const EVENT_CLAIM_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 function safeEqualHex(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
@@ -31,6 +37,7 @@ export class DiditController {
   constructor(
     private readonly userService: UserService,
     private readonly configService: ConfigService,
+    private readonly redisService: RedisService,
   ) {
     this.webhookSecret =
       this.configService.get<string>('DIDIT_WEBHOOK_SECRET') || '';
@@ -44,6 +51,30 @@ export class DiditController {
     @Headers('x-timestamp') timestamp: string | undefined,
   ): Promise<{ success: boolean }> {
     this.verifySignature(req.rawBody, { signature, timestamp });
+
+    // X-Timestamp isn't signed (only the body is), so the signed body
+    // timestamp and event_id are what stop a captured webhook being replayed.
+    if (webhookData.timestamp !== undefined) {
+      const age = Math.floor(Date.now() / 1000) - webhookData.timestamp;
+      if (age > MAX_EVENT_AGE_SECONDS || age < -MAX_WEBHOOK_AGE_SECONDS) {
+        this.logger.error(
+          `Didit webhook rejected: event timestamp ${webhookData.timestamp} out of range`,
+        );
+        throw new HttpException('Unauthorized', HttpStatus.UNAUTHORIZED);
+      }
+    }
+    const eventKey = webhookData.event_id
+      ? `dca:didit:event:${webhookData.event_id}`
+      : null;
+    if (
+      eventKey &&
+      !(await this.redisService.setIfAbsent(eventKey, EVENT_CLAIM_TTL_SECONDS))
+    ) {
+      this.logger.warn(
+        `Ignoring repeated Didit event ${webhookData.event_id} for session ${webhookData.session_id}`,
+      );
+      return { success: true };
+    }
 
     this.logger.log(
       `Received Didit webhook for session ${webhookData.session_id} (status: ${webhookData.status})`,
@@ -67,6 +98,8 @@ export class DiditController {
       );
       return { success: true };
     } catch (error) {
+      // Not applied: release the claim so Didit's retry is processed
+      if (eventKey) await this.redisService.del(eventKey);
       this.logger.error(`Error processing Didit webhook:`, error);
       if (error instanceof HttpException) {
         throw error;

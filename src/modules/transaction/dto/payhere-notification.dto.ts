@@ -10,12 +10,15 @@ export class PayHereNotificationDto {
   @IsNotEmpty()
   order_id: string;
 
+  // Optional here so a notification without them still reaches
+  // handlePayHereNotification, which logs and rejects it (a 400 from the
+  // ValidationPipe would drop it silently).
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   payment_id: string;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   subscription_id: string;
 
   @IsString()

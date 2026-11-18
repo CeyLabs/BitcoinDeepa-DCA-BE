@@ -31,6 +31,10 @@ export interface SubscriptionPayment {
   payment_id: string;
   /** e.g. RECEIVED for a successful charge */
   status: string;
+  /** Amount PayHere charged, as it returns it (e.g. "1000.00"); null if absent */
+  amount: string | null;
+  /** The subscription's checkout order_id (the same on every charge) */
+  order_id: string | null;
 }
 
 // Every PayHere API call is bounded: settlement handles payments one after
@@ -242,7 +246,12 @@ export class PayHereService {
       data: {
         status: number;
         msg: string;
-        data?: { payment_id: number | string; status: string }[];
+        data?: {
+          payment_id: number | string;
+          status: string;
+          amount?: number | string;
+          order_id?: string;
+        }[];
       };
     } = await axios
       .get(url, {
@@ -265,6 +274,9 @@ export class PayHereService {
     return (response.data.data ?? []).map((p) => ({
       payment_id: String(p.payment_id),
       status: p.status,
+      amount:
+        p.amount === undefined || p.amount === null ? null : String(p.amount),
+      order_id: p.order_id ?? null,
     }));
   }
 }

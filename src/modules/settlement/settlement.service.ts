@@ -15,6 +15,7 @@ const LOOKUP_FAILURE_ALERT_INTERVAL_MS = 60 * 60_000;
 
 interface UnsettledTransaction {
   payhere_pay_id: string;
+  gross_amount: string | number | null;
   payhere_sub_id: string;
   satoshis_purchased: number;
   retry_count: number;
@@ -50,6 +51,7 @@ export class SettlementService {
             't.payhere_pay_id',
             't.payhere_sub_id',
             't.satoshis_purchased',
+            't.gross_amount',
             't.retry_count',
             't.created_at',
             'u.id as telegram_id',
@@ -83,6 +85,7 @@ export class SettlementService {
     const {
       payhere_pay_id,
       payhere_sub_id,
+      gross_amount,
       telegram_id,
       satoshis_purchased,
       retry_count = 0,
@@ -126,6 +129,7 @@ export class SettlementService {
       confirmed = await this.isConfirmedByPayHere(
         payhere_pay_id,
         payhere_sub_id,
+        gross_amount,
       );
     } catch (error) {
       // PayHere's API failing says nothing about this payment, so it must not
@@ -167,10 +171,7 @@ export class SettlementService {
         currentRetryCount,
       );
 
-      const memo = await this.generateTransferMemo(
-        payhere_pay_id,
-        payhere_sub_id,
-      );
+      const memo = SettlementService.transferMemo(payhere_pay_id);
       const result = await this.bitcoinDeepaService.transferFunds(
         satoshis_purchased,
         telegram_id,
@@ -271,43 +272,52 @@ export class SettlementService {
    * with invented payment_ids - this is the check that stops those being
    * paid. API errors throw (the caller retries without using an attempt).
    */
+  /**
+   * The payment must be listed by PayHere as RECEIVED, and for the amount we
+   * recorded, so the payout rests on PayHere's own figures and not only on the
+   * notification. When PayHere's list omits the amount, id + status decide.
+   */
   private async isConfirmedByPayHere(
     payhere_pay_id: string,
     payhere_sub_id: string,
+    gross_amount: string | number | null,
   ): Promise<boolean> {
     const payments =
       await this.payHereService.getSubscriptionPayments(payhere_sub_id);
-    return payments.some(
+    const payment = payments.find(
       (p) => p.payment_id === String(payhere_pay_id) && p.status === 'RECEIVED',
     );
+    if (!payment) return false;
+    if (payment.amount === null || gross_amount === null) {
+      this.logger.warn(
+        `PayHere payment ${payhere_pay_id} has no amount to compare; confirmed on id and status only`,
+      );
+      return true;
+    }
+    const matches = SettlementService.sameAmount(payment.amount, gross_amount);
+    if (!matches) {
+      this.logger.warn(
+        `PayHere payment ${payhere_pay_id} amount ${payment.amount} does not match recorded ${gross_amount}`,
+      );
+    }
+    return matches;
+  }
+
+  private static sameAmount(a: string | number, b: string | number): boolean {
+    const x = Number(String(a).replace(/,/g, ''));
+    const y = Number(String(b).replace(/,/g, ''));
+    return Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) < 0.005;
   }
 
   /**
    * Generate memo for fund transfer with package name
    */
-  private async generateTransferMemo(
-    payhere_pay_id: string,
-    subscription_id: string,
-  ): Promise<string> {
-    let memo = `DCA Purchase (Ref: ${payhere_pay_id})`;
-
-    try {
-      const subscriptionWithPackage = await this.knexService
-        .knex('subscription as s')
-        .select('p.name as package_name')
-        .join('package as p', 's.package_id', 'p.id')
-        .where('s.payhere_sub_id', subscription_id)
-        .first();
-
-      if (subscriptionWithPackage?.package_name) {
-        memo = `${subscriptionWithPackage.package_name} DCA plan (Ref: ${payhere_pay_id})`;
-      }
-    } catch (packageError) {
-      this.logger.warn(
-        `Could not fetch package name for subscription ${subscription_id}: ${errorMessage(packageError)}`,
-      );
-    }
-
-    return memo;
+  /**
+   * The memo is the transfer's idempotency key on the BitcoinDeepa API (a
+   * repeated memo is rejected as already done), so it must be identical on
+   * every attempt: built from the payment id alone, nothing that can change.
+   */
+  static transferMemo(payhere_pay_id: string): string {
+    return `DCA purchase (Ref: ${payhere_pay_id})`;
   }
 }

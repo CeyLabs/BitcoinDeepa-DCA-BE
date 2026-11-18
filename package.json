@@ -19,6 +19,7 @@
     "migrate": "npx knex migrate:latest",
     "migrate:rollback": "npx knex migrate:rollback",
     "seed": "npx knex seed:run",
+    "backfill:payhere-orders": "ts-node src/scripts/backfill-payhere-order-id.ts",
     "db:reset": "npm run migrate:rollback && npm run migrate && npm run seed",
     "test": "jest",
     "test:watch": "jest --watch",

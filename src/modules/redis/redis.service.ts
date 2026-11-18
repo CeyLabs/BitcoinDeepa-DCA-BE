@@ -128,6 +128,21 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Atomically claim `key` for `ttlSeconds` (SET NX). true = claimed now,
+   * false = already claimed. With Redis unavailable it answers true, so a
+   * cache outage never blocks the caller (claims are a best-effort dedupe).
+   */
+  async setIfAbsent(key: string, ttlSeconds: number): Promise<boolean> {
+    if (!this.redis) return true;
+    try {
+      return (await this.redis.set(key, '1', 'EX', ttlSeconds, 'NX')) === 'OK';
+    } catch (error) {
+      this.logger.warn(`Cache SET NX failed for ${key}: ${String(error)}`);
+      return true;
+    }
+  }
+
+  /**
    * Return the cached value, or run `loader`, cache its result and return it.
    * null/undefined results are not cached.
    */

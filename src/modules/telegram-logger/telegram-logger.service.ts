@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { JwtPayload } from '../auth/auth.service';
 import { Package } from '../package/package.service';
+import { escapeHtml } from '../../common/escape-html';
 
 export interface TgMessage {
   id: number | null;
@@ -68,9 +69,13 @@ export class TelegramLoggerService {
     await this.sendMessage(message, true);
   }
 
-  /** Something that needs a human to look at it (fraud signal, manual fix). */
+  /**
+   * Something that needs a human to look at it (fraud signal, manual fix).
+   * `text` is plain text: it is escaped, since an error message containing
+   * `<` or `&` would make Telegram reject the whole (HTML) alert.
+   */
   async logAlert(source: string, text: string): Promise<void> {
-    const message = `⚠️ <b>ALERT (${source})</b>\n${text}`;
+    const message = `⚠️ <b>ALERT (${escapeHtml(source)})</b>\n${escapeHtml(text)}`;
     await this.sendMessage(message);
   }
 
