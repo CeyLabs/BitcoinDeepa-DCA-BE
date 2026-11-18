@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { Knex } from 'knex';
 import { KnexService } from '../../knex/knex.service';
+import { likeEscape, type Page, toPage } from '../common/pagination';
 import type {
   ListTransactionsQueryDto,
   TransactionStatus,
@@ -20,14 +21,6 @@ export interface AdminTransaction {
   packageName: string | null;
 }
 
-export interface TransactionPage {
-  items: AdminTransaction[];
-  total: number;
-  page: number;
-  pageSize: number;
-  pageCount: number;
-}
-
 type Row = {
   payhere_pay_id: string;
   created_at: Date;
@@ -45,14 +38,11 @@ type Row = {
 const toNumber = (value: string | null) =>
   value === null ? null : Number(value);
 
-/** Escape LIKE wildcards so a search for "100%" matches literally. */
-const likeEscape = (value: string) => value.replace(/[\\%_]/g, '\\$&');
-
 @Injectable()
 export class AdminTransactionsService {
   constructor(private readonly knexService: KnexService) {}
 
-  async list(query: ListTransactionsQueryDto): Promise<TransactionPage> {
+  async list(query: ListTransactionsQueryDto): Promise<Page<AdminTransaction>> {
     const { page, pageSize, status, from, to, q } = query;
     const knex = this.knexService.knex;
 
@@ -115,28 +105,22 @@ export class AdminTransactionsService {
         .limit(pageSize) as Promise<Row[]>,
     ]);
 
-    const total = Number(countRow?.count ?? 0);
-    return {
-      items: rows.map((row) => ({
-        id: row.payhere_pay_id,
-        createdAt: new Date(row.created_at).toISOString(),
-        status: row.status,
-        settled: row.settled,
-        grossLkr: toNumber(row.gross_amount),
-        netLkr: toNumber(row.net_amount),
-        satoshis: toNumber(row.satoshis_purchased),
-        user: row.user_id
-          ? {
-              id: row.user_id,
-              name: [row.first_name, row.last_name].filter(Boolean).join(' '),
-            }
-          : null,
-        packageName: row.package_name,
-      })),
-      total,
-      page,
-      pageSize,
-      pageCount: Math.max(1, Math.ceil(total / pageSize)),
-    };
+    const items = rows.map((row) => ({
+      id: row.payhere_pay_id,
+      createdAt: new Date(row.created_at).toISOString(),
+      status: row.status,
+      settled: row.settled,
+      grossLkr: toNumber(row.gross_amount),
+      netLkr: toNumber(row.net_amount),
+      satoshis: toNumber(row.satoshis_purchased),
+      user: row.user_id
+        ? {
+            id: row.user_id,
+            name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+          }
+        : null,
+      packageName: row.package_name,
+    }));
+    return toPage(items, Number(countRow?.count ?? 0), query);
   }
 }
