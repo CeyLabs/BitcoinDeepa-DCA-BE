@@ -5,6 +5,7 @@ import { KnexService } from '../knex/knex.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { PayHereService } from '../payhere/payhere.service';
+import { RedisService } from '../redis/redis.service';
 import { errorMessage } from '../../common/error-message';
 
 const MAX_SETTLEMENT_ATTEMPTS = 5;
@@ -33,6 +34,7 @@ export class SettlementService {
     private readonly bitcoinDeepaService: BitcoinDeepaService,
     private readonly telegramLogger: TelegramLoggerService,
     private readonly payHereService: PayHereService,
+    private readonly redisService: RedisService,
   ) {}
 
   @Cron(CronExpression.EVERY_10_SECONDS)
@@ -271,11 +273,11 @@ export class SettlementService {
    * md5sig doesn't cover payment_id, so a signed notification can be replayed
    * with invented payment_ids - this is the check that stops those being
    * paid. API errors throw (the caller retries without using an attempt).
-   */
-  /**
-   * The payment must be listed by PayHere as RECEIVED, and for the amount we
-   * recorded, so the payout rests on PayHere's own figures and not only on the
-   * notification. When PayHere's list omits the amount, id + status decide.
+   *
+   * The payment must be listed as RECEIVED and for the amount we recorded.
+   * When PayHere's list has no amount, id + status decide, and an alert goes
+   * out (at most daily): if that happens for normal payments, the amount
+   * check isn't running (e.g. PayHere names the field differently).
    */
   private async isConfirmedByPayHere(
     payhere_pay_id: string,
@@ -289,9 +291,22 @@ export class SettlementService {
     );
     if (!payment) return false;
     if (payment.amount === null || gross_amount === null) {
+      const missing = payment.amount === null ? "PayHere's list" : 'our record';
       this.logger.warn(
-        `PayHere payment ${payhere_pay_id} has no amount to compare; confirmed on id and status only`,
+        `PayHere payment ${payhere_pay_id}: no amount in ${missing}; confirmed on id and status only`,
       );
+      if (
+        await this.redisService.setIfAbsent(
+          'dca:alert:payhere-amount-missing',
+          24 * 60 * 60,
+        )
+      ) {
+        await this.telegramLogger.logAlert(
+          'Settlement',
+          `PayHere payment ${payhere_pay_id} had no amount in ${missing}, so it was confirmed on id and status only. ` +
+            `If this repeats for normal payments, the amount check is not running. (Reported at most once a day.)`,
+        );
+      }
       return true;
     }
     const matches = SettlementService.sameAmount(payment.amount, gross_amount);

@@ -124,6 +124,10 @@ export class TransactionService {
    * Deliberately not a bulk reset: rows stopped with an unknown outcome (e.g.
    * a timeout) may already have been paid, so each needs checking on
    * BitcoinDeepa before it is retried.
+   *
+   * Payments attempted before the memo became `DCA purchase (Ref: <id>)` were
+   * sent as `<package> DCA plan (Ref: <id>)`. The bot dedupes on the memo, so
+   * it won't recognise a retry of one of those: check those by hand first.
    */
   async resetRetryCount(
     payhere_pay_id: string,
