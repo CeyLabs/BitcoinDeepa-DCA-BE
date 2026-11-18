@@ -44,8 +44,8 @@ export interface SellOrderRow {
   status: SellStatus;
   sats: string;
   fee_basis_points: number;
-  fee_sats: string;
-  net_sats: string;
+  gross_lkr: string;
+  fee_lkr: string;
   btc_lkr_buying_rate: string;
   btc_usd_price: string | null;
   amount_lkr: string;
@@ -70,8 +70,9 @@ export interface SellOrderView {
   status: SellStatus;
   sats: number;
   feeBasisPoints: number;
-  feeSats: number;
-  netSats: number;
+  /** The whole sale at the rate, before the fee */
+  grossLkr: number;
+  feeLkr: number;
   btcLkrRate: number;
   amountLkr: number;
   expiresAt: string;
@@ -109,8 +110,8 @@ export const toSellOrderView = (row: SellOrderRow): SellOrderView => ({
   status: row.status,
   sats: Number(row.sats),
   feeBasisPoints: row.fee_basis_points,
-  feeSats: Number(row.fee_sats),
-  netSats: Number(row.net_sats),
+  grossLkr: Number(row.gross_lkr),
+  feeLkr: Number(row.fee_lkr),
   btcLkrRate: Number(row.btc_lkr_buying_rate),
   amountLkr: Number(row.amount_lkr),
   expiresAt: new Date(row.expires_at).toISOString(),
@@ -142,25 +143,27 @@ export function ceyPayWebhookUrl(
   return `${base}/sell/ceypay-webhook`;
 }
 
-/** Fee is taken in sats (rounded up), the rest is priced in LKR (rounded down). */
+/**
+ * Prices the whole sale in LKR (rounded down), then takes the fee off it in
+ * LKR (rounded up). `amountLkr` is what the user gets.
+ */
 export function priceSale(
   sats: number,
   feeBasisPoints: number,
-  btcLkrBuyingRate: number,
-): { feeSats: number; netSats: number; amountLkr: string } {
-  const feeSats = new Big(sats)
+  btcLkrRate: number,
+): { grossLkr: string; feeLkr: string; amountLkr: string } {
+  const grossLkr = new Big(sats)
+    .div(SATS_PER_BTC)
+    .times(btcLkrRate)
+    .round(2, Big.roundDown);
+  const feeLkr = grossLkr
     .times(feeBasisPoints)
     .div(10000)
-    .round(0, Big.roundUp);
-  const netSats = new Big(sats).minus(feeSats);
-  const amountLkr = netSats
-    .div(SATS_PER_BTC)
-    .times(btcLkrBuyingRate)
-    .round(2, Big.roundDown);
+    .round(2, Big.roundUp);
   return {
-    feeSats: feeSats.toNumber(),
-    netSats: netSats.toNumber(),
-    amountLkr: amountLkr.toFixed(2),
+    grossLkr: grossLkr.toFixed(2),
+    feeLkr: feeLkr.toFixed(2),
+    amountLkr: grossLkr.minus(feeLkr).toFixed(2),
   };
 }
 
@@ -299,7 +302,7 @@ export class SellService {
     const rate = await this.sellRate();
     const feeBasisPoints = SellService.feeBasisPoints();
     const priced = priceSale(sats, feeBasisPoints, rate.btcLkr);
-    if (priced.netSats <= 0 || Number(priced.amountLkr) <= 0) {
+    if (Number(priced.amountLkr) <= 0) {
       throw new BadRequestException('Amount is too small to sell');
     }
 
@@ -316,8 +319,8 @@ export class SellService {
           status: SellStatus.QUOTED,
           sats: String(sats),
           fee_basis_points: feeBasisPoints,
-          fee_sats: String(priced.feeSats),
-          net_sats: String(priced.netSats),
+          gross_lkr: priced.grossLkr,
+          fee_lkr: priced.feeLkr,
           btc_lkr_buying_rate: String(rate.btcLkr),
           btc_usd_price: String(rate.btcUsd),
           ceypay_rate_usdt_lkr: String(rate.usdtLkr),

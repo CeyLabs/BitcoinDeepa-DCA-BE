@@ -6,28 +6,28 @@ import {
 } from './sell.service';
 
 describe('priceSale', () => {
-  it('takes the fee in sats (rounded up) and prices the rest in LKR (rounded down)', () => {
+  it('prices the whole sale (rounded down) and takes the fee in LKR (rounded up)', () => {
     // 100,000 sats, 1% fee, 1 BTC = 20,000,000 LKR
     expect(priceSale(100_000, 100, 20_000_000)).toEqual({
-      feeSats: 1000,
-      netSats: 99_000,
+      grossLkr: '20000.00',
+      feeLkr: '200.00',
       amountLkr: '19800.00',
     });
   });
 
-  it('rounds a fractional fee up', () => {
-    expect(priceSale(1001, 100, 20_000_000).feeSats).toBe(11);
-  });
-
-  it('never rounds LKR up', () => {
-    // 12,345 sats at 21,444,240.35 LKR/BTC = 2647.29... LKR
-    expect(priceSale(12_345, 0, 21_444_240.35).amountLkr).toBe('2647.29');
+  it('rounds a fractional fee up to the cent', () => {
+    // 1% of 2647.29 = 26.4729
+    expect(priceSale(12_345, 100, 21_444_240.35)).toEqual({
+      grossLkr: '2647.29',
+      feeLkr: '26.48',
+      amountLkr: '2620.81',
+    });
   });
 
   it('works with no fee', () => {
     expect(priceSale(50_000, 0, 20_000_000)).toEqual({
-      feeSats: 0,
-      netSats: 50_000,
+      grossLkr: '10000.00',
+      feeLkr: '0.00',
       amountLkr: '10000.00',
     });
   });

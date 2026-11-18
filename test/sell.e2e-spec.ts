@@ -20,7 +20,7 @@ import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-l
 
 // 100,000 sats, 1% fee = 1,000 sats; 99,000 sats at 20,000,000 LKR/BTC
 const SATS = 100_000;
-// 99,000 net sats × (65,000 USD × 330 LKR/USDT)
+// 100,000 sats × (65,000 USD × 330 LKR/USDT) = 21,450 LKR, minus the 1% fee
 const AMOUNT_LKR = 21_235.5;
 
 describe('Sell flow (e2e)', () => {
@@ -128,7 +128,7 @@ describe('Sell flow (e2e)', () => {
       });
     });
 
-    it('prices at Ceylon Cash BTC/USD × CeyPay USDT/LKR, fee taken in sats', async () => {
+    it('prices at Ceylon Cash BTC/USD × CeyPay USDT/LKR, fee taken in LKR', async () => {
       const res = await asUser(ctx, USER)
         .post('/sell/quote', { sats: SATS })
         .expect(201);
@@ -136,8 +136,8 @@ describe('Sell flow (e2e)', () => {
         status: 'QUOTED',
         sats: SATS,
         feeBasisPoints: 100,
-        feeSats: 1000,
-        netSats: 99_000,
+        grossLkr: 21_450,
+        feeLkr: 214.5,
         btcLkrRate: 21_450_000,
         amountLkr: AMOUNT_LKR,
       });

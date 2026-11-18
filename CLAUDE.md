@@ -88,7 +88,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - **Limits:** `SELL_MIN_SATS` (1,000), `SELL_MAX_SATS` per sale (5,000,000), `SELL_DAILY_MAX_SATS` per member over a rolling 24h (20,000,000; counts `COUNTED_SELL_STATUSES`). Checked at quote and again at confirm under a lock on the member's `user` row
    - **Bot collect mock:** `BITCOINDEEPA_COLLECT_MOCK=true` treats every debit as done without calling the bot (its collect endpoint isn't built yet) and skips the refund transfer. Env validation refuses it unless `CEYPAY_API_URL` is the sandbox. Collect 5xx = unknown outcome (the contract isn't fixed yet)
    - **Who can sell:** KYC `APPROVED` (`KycVerifiedGuard`) **and** a verified bank account (`BankVerifiedGuard` from bank-account). Both are re-checked at confirm, and the account again at payout time
-   - **Pricing:** BTC/LKR = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`, `BitcoinPriceService.getBtcUsdSellPrice()`, cached 30s) × CeyPay's USDT/LKR (cached 30s), rounded down to cents, so our LKR matches what CeyPay pays for the same USDT. Both rates are stored on the order. CoinMarketCap is not used for selling. Fee `BITCOINDEEPA_SELL_FEE_BASIS_POINTS` is taken in sats (rounded up); LKR is rounded down. Quotes live `SELL_QUOTE_TTL_SECONDS`
+   - **Pricing:** BTC/LKR = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`, `BitcoinPriceService.getBtcUsdSellPrice()`, cached 30s) × CeyPay's USDT/LKR (cached 30s), rounded down to cents, so our LKR matches what CeyPay pays for the same USDT. Both rates are stored on the order. CoinMarketCap is not used for selling. The whole sale is priced in LKR (`gross_lkr`, rounded down), then the fee `BITCOINDEEPA_SELL_FEE_BASIS_POINTS` comes off it in LKR (`fee_lkr`, rounded up); `amount_lkr` is what the user gets. All sats collected stay with us. Quotes live `SELL_QUOTE_TTL_SECONDS`
    - **Confirm:** commits `QUOTED` → `COLLECTING` first (so a crash after the debit can't roll back to `QUOTED`), then, with no lock held, debits the user via the bot's `POST /api/v1/collect` (`BitcoinDeepaService.collectFunds`, memo `sell:<orderId>` = idempotent), then locks a CeyPay USDT quote sized so CeyPay's `amountLkr` >= ours and creates the off-ramp (`externalRef` = order id, CeyPay dedupes on it). The user always gets the LKR we quoted; CeyPay's USDT numbers are bookkeeping (it pays from our prefunded LKR float)
    - **Statuses** (`sell_order.status`, forward-only conditional updates): `QUOTED` → `COLLECTING` → `SATS_COLLECTED` → `PAYOUT_PENDING` → `COMPLETED`; `QUOTED`/`COLLECTING` → `EXPIRED` (nothing moved); payout failure → `REFUNDING` → `REFUNDED` (full sats back, memo `sell-refund:<id>`); any unknown transfer outcome (collect/refund timeout or 5xx, payout retries exhausted, stuck in `COLLECTING` > 2 min or `REFUNDING` > 5 min) → `NEEDS_REVIEW` + Telegram alert, never retried automatically. A `COMPLETED` webhook for a refunded order alerts (member may have both)
    - **CeyPay webhook** `POST /sell/ceypay-webhook`: ED25519 (`CEYPAY_WEBHOOK_PUBLIC_KEY`) over `X-Webhook-Timestamp` (ms, ±5 min) + raw body. Bound to the order by `externalRef` + `paymentId`. Crons: expire quotes (1 min), retry payout creation with 2^n min backoff up to 5 attempts (30s), poll CeyPay for `PAYOUT_PENDING` older than 10 min (5 min), stuck `COLLECTING`/`REFUNDING` → `NEEDS_REVIEW` (1 min), alert once on a payout pending > 2 h (10 min). Unknown webhook event types are acknowledged and ignored
@@ -103,7 +103,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
 - `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
 - `user_bank_account`: Payout bank accounts (status PENDING_REVIEW/VERIFIED/REJECTED, statement R2 key, name-match score, reviewer, CeyPay bank id). `user.ceypay_user_id` links the user to CeyPay
-- `sell_order`: Sell orders (sats, fee, net sats, BTC/LKR buying rate, promised LKR, CeyPay quote/payment ids, bank ref, status, retries)
+- `sell_order`: Sell orders (sats, gross LKR, fee LKR, BTC/LKR rate, promised LKR, CeyPay quote/payment ids, bank ref, status, retries)
 
 **Relationships:**
 - Users → Subscriptions (1:many)
@@ -199,7 +199,7 @@ DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Required in production; optional in 
 DIDIT_CALLBACK_BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
 
 # Sell flow (required in production)
-BITCOINDEEPA_SELL_FEE_BASIS_POINTS=100  # taken in sats
+BITCOINDEEPA_SELL_FEE_BASIS_POINTS=100  # taken off the LKR amount
 SELL_QUOTE_TTL_SECONDS=60
 SELL_MIN_SATS=1000
 CEYPAY_API_URL=https://api.ceypay.io
