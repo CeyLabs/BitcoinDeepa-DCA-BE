@@ -10,7 +10,7 @@ Run tests through these scripts, not `npx jest` directly: they set `--experiment
 
 ## E2E database
 
-E2E tests **truncate tables**, so they need their own disposable Postgres and Redis and refuse to run against the database in `.env`.
+E2E tests **truncate tables**, so they need their own disposable Postgres and Redis and refuse to run against the database in `.env`. They also refuse a non-local `TEST_DATABASE_URL` unless `ALLOW_REMOTE_TEST_DB=1` is set.
 
 ```bash
 docker run -d --name bd-test-pg -e POSTGRES_USER=bd_test -e POSTGRES_PASSWORD=bd_test \

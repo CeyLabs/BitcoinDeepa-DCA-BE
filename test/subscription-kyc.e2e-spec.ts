@@ -47,7 +47,7 @@ describe('Auth, KYC, subscriptions and read endpoints (e2e)', () => {
   beforeAll(async () => {
     ctx = await createTestApp();
   });
-  afterAll(() => ctx.close());
+  afterAll(() => ctx?.close());
   beforeEach(() => resetData(ctx));
 
   describe('authentication', () => {
@@ -211,6 +211,57 @@ describe('Auth, KYC, subscriptions and read endpoints (e2e)', () => {
         .set(auth(OTHER_USER))
         .send({ package_id: PACKAGE_WEEKLY })
         .expect(201);
+    });
+
+    it('applies each Didit event once and refuses stale ones', async () => {
+      await ctx
+        .knex('user')
+        .where({ id: OTHER_USER })
+        .update({ kyc_status: 'IN_PROGRESS', kyc_session_id: 'sess-r' });
+      const now = Math.floor(Date.now() / 1000);
+      const declined = diditWebhook({
+        event_id: 'evt-1',
+        timestamp: now,
+        session_id: 'sess-r',
+        status: 'Declined',
+      });
+      await http()
+        .post('/didit/webhook')
+        .set(declined.headers)
+        .send(declined.raw)
+        .expect(201);
+      await ctx
+        .knex('user')
+        .where({ id: OTHER_USER })
+        .update({ kyc_status: 'APPROVED' });
+
+      // the same event again (a replay, or a retry) changes nothing
+      const again = diditWebhook({
+        event_id: 'evt-1',
+        timestamp: now,
+        session_id: 'sess-r',
+        status: 'Declined',
+      });
+      await http()
+        .post('/didit/webhook')
+        .set(again.headers)
+        .send(again.raw)
+        .expect(201);
+      const row = await ctx.knex('user').where({ id: OTHER_USER }).first();
+      expect(row.kyc_status).toBe('APPROVED');
+
+      // a signed body from two days ago is refused, whatever X-Timestamp says
+      const stale = diditWebhook({
+        event_id: 'evt-2',
+        timestamp: now - 2 * 24 * 3600,
+        session_id: 'sess-r',
+        status: 'Declined',
+      });
+      await http()
+        .post('/didit/webhook')
+        .set(stale.headers)
+        .send(stale.raw)
+        .expect(401);
     });
 
     it('resumes an open Didit session instead of creating a new one', async () => {

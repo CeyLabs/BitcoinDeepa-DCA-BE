@@ -154,8 +154,18 @@ describe('PayHereService', () => {
       await expect(
         service.getSubscriptionPayments('420000032251'),
       ).resolves.toEqual([
-        { payment_id: '320025023469', status: 'RECEIVED' },
-        { payment_id: '320025023470', status: 'CHARGEBACK' },
+        {
+          payment_id: '320025023469',
+          status: 'RECEIVED',
+          amount: '1000',
+          order_id: null,
+        },
+        {
+          payment_id: '320025023470',
+          status: 'CHARGEBACK',
+          amount: '1000',
+          order_id: null,
+        },
       ]);
       const [url, cfg] = get.mock.calls[0];
       expect(url).toBe(

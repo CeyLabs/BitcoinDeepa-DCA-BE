@@ -22,7 +22,7 @@ describe('Settlement (e2e)', () => {
     ctx = await createTestApp();
     settlement = ctx.app.get(SettlementService);
   });
-  afterAll(() => ctx.close());
+  afterAll(() => ctx?.close());
 
   beforeEach(async () => {
     await resetData(ctx);
@@ -57,8 +57,8 @@ describe('Settlement (e2e)', () => {
     const [amount, to, memo] = ctx.bitcoinDeepa.transferFunds.mock.calls[0];
     expect(Number(amount)).toBe(sats(980));
     expect(to).toBe(USER);
-    expect(memo).toContain('Shrimp Weekly');
-    expect(memo).toContain('P1');
+    // the idempotency key on the bot API: the same on every attempt
+    expect(memo).toBe('DCA purchase (Ref: P1)');
     expect(await tx()).toMatchObject({ settled: true, retry_count: 1 });
 
     await settlement.retryUnsettledTransactions();
@@ -189,6 +189,15 @@ describe('Settlement (e2e)', () => {
     await reset('P1').expect(404); // settled payments can't be reset
   });
 
+  it("doesn't pay when PayHere's amount differs from the recorded one", async () => {
+    ctx.payHerePayments.mockResolvedValueOnce([
+      { payment_id: 'P1', status: 'RECEIVED', amount: '1.00', order_id: null },
+    ]);
+    await settlement.retryUnsettledTransactions();
+    expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+    expect(await tx()).toMatchObject({ settled: false, retry_count: 1 });
+  });
+
   it('pays only payment ids PayHere confirms (stops replayed notifications)', async () => {
     const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
     ctx.payHerePayments.mockResolvedValueOnce([]); // PayHere never took P1
@@ -203,7 +212,12 @@ describe('Settlement (e2e)', () => {
       .where({ payhere_pay_id: 'P1' })
       .update({ retry_count: 4, last_retry_at: new Date(0) });
     ctx.payHerePayments.mockResolvedValueOnce([
-      { payment_id: 'P1', status: 'CHARGEBACK' },
+      {
+        payment_id: 'P1',
+        status: 'CHARGEBACK',
+        amount: '1000',
+        order_id: null,
+      },
     ]);
     await settlement.retryUnsettledTransactions();
     expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();

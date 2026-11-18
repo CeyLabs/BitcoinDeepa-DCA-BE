@@ -41,7 +41,7 @@ describe('PayHere webhook (e2e)', () => {
   beforeAll(async () => {
     ctx = await createTestApp();
   });
-  afterAll(() => ctx.close());
+  afterAll(() => ctx?.close());
   beforeEach(() => resetData(ctx));
 
   describe('authentication of notifications', () => {

@@ -6,6 +6,7 @@ import { DiditController } from './didit.controller';
 import { UserService } from '../user/user.service';
 import { KycStatus } from '../user/enums/kyc-status.enum';
 import { WebhookDto } from './dto/webhook.dto';
+import { RedisService } from '../redis/redis.service';
 
 const SECRET = 'didit-secret';
 const now = () => String(Math.floor(Date.now() / 1000));
@@ -22,7 +23,15 @@ function setup(secret = SECRET, currentStatus: string = KycStatus.IN_PROGRESS) {
       .mockResolvedValue(undefined),
   };
   const config = { get: () => secret } as unknown as ConfigService;
-  const controller = new DiditController(realUserService, config);
+  // In-memory stand-in for the event_id claims
+  const claimed = new Set<string>();
+  const redis = {
+    setIfAbsent: jest.fn((key: string) =>
+      Promise.resolve(claimed.has(key) ? false : (claimed.add(key), true)),
+    ),
+    del: jest.fn((key: string) => Promise.resolve(void claimed.delete(key))),
+  } as unknown as RedisService;
+  const controller = new DiditController(realUserService, config, redis);
   return { controller, userService };
 }
 

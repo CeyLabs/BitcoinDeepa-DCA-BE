@@ -101,12 +101,15 @@ export async function createTestApp(): Promise<TestContext> {
   const payHerePayments = jest
     .spyOn(app.get(PayHereService), 'getSubscriptionPayments')
     .mockImplementation(async (payhere_sub_id: string) => {
-      const rows: { payhere_pay_id: string }[] = await knex('transaction')
-        .select('payhere_pay_id')
-        .where({ payhere_sub_id, status: 'SUCCESS' });
+      const rows: { payhere_pay_id: string; gross_amount: string | null }[] =
+        await knex('transaction')
+          .select('payhere_pay_id', 'gross_amount')
+          .where({ payhere_sub_id, status: 'SUCCESS' });
       return rows.map((r) => ({
         payment_id: r.payhere_pay_id,
         status: 'RECEIVED',
+        amount: r.gross_amount,
+        order_id: null,
       }));
     });
 

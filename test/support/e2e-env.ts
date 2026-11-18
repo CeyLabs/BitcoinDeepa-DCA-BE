@@ -21,6 +21,18 @@ if (!testDb || !testRedis) {
   );
 }
 
+// resetData() truncates every table: only ever run against a local database,
+// unless ALLOW_REMOTE_TEST_DB=1 says the remote one is disposable.
+const host = new URL(testDb).hostname;
+if (
+  !['localhost', '127.0.0.1', '::1', '[::1]'].includes(host) &&
+  process.env.ALLOW_REMOTE_TEST_DB !== '1'
+) {
+  throw new Error(
+    `TEST_DATABASE_URL host "${host}" is not local. E2E tests truncate tables; set ALLOW_REMOTE_TEST_DB=1 if that database is disposable.`,
+  );
+}
+
 // Never point the tests at the database configured in .env.
 const envFile = path.join(__dirname, '../../.env');
 if (fs.existsSync(envFile)) {
@@ -51,6 +63,8 @@ if (fs.existsSync(envFile)) {
 Object.assign(process.env, {
   NODE_ENV: 'test',
   DATABASE_URL: testDb,
+  // the analytics migration grants on the database by name
+  PG_DB: new URL(testDb).pathname.slice(1),
   REDIS_URL: testRedis,
   JWT_SECRET: 'test-jwt-secret',
   ENABLE_AUTH: 'true',
