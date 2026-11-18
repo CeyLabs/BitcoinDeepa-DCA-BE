@@ -8,6 +8,9 @@ const prodSecrets = {
   PAYHERE_APP_ID: 'a',
   PAYHERE_APP_SECRET: 'as',
   DIDIT_WEBHOOK_SECRET: 'd',
+  BETTER_AUTH_SECRET: 'x'.repeat(32),
+  BASE_URL: 'https://api.example.com',
+  ADMIN_APP_URL: 'https://admin.example.com',
 };
 
 describe('validateEnv', () => {
@@ -37,6 +40,42 @@ describe('validateEnv', () => {
         PAYHERE_APP_SECRET: '',
       }),
     ).toThrow(/PAYHERE_APP_SECRET/);
+  });
+
+  it('requires a strong admin auth secret in production', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        BETTER_AUTH_SECRET: 'too-short',
+      }),
+    ).toThrow(/BETTER_AUTH_SECRET/);
+  });
+
+  it('requires BASE_URL in production; BETTER_AUTH_URL is optional', () => {
+    const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
+    expect(() => validateEnv({ ...prod, BASE_URL: '' })).toThrow(/BASE_URL/);
+    expect(() =>
+      validateEnv({ ...prod, BETTER_AUTH_URL: 'not a url' }),
+    ).toThrow(/BETTER_AUTH_URL/);
+  });
+
+  it('allows a SameSite=None admin cookie outside production only', () => {
+    expect(() =>
+      validateEnv({ ...base, ADMIN_COOKIE_SAME_SITE: 'none' }),
+    ).not.toThrow();
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        ADMIN_COOKIE_SAME_SITE: 'none',
+      }),
+    ).toThrow(/ADMIN_COOKIE_SAME_SITE/);
+    expect(() =>
+      validateEnv({ ...base, ADMIN_COOKIE_SAME_SITE: 'strict' }),
+    ).toThrow(/ADMIN_COOKIE_SAME_SITE/);
   });
 
   it('converts numeric strings and rejects out-of-range values', () => {

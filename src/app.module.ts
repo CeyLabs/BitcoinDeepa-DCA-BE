@@ -10,6 +10,7 @@ import { RedisModule } from './modules/redis/redis.module';
 import { HealthModule } from './modules/health/health.module';
 import { SettlementModule } from './modules/settlement/settlement.module';
 import { DiditModule } from './modules/didit/didit.module';
+import { AdminModule } from './modules/admin/admin.module';
 import { validateEnv } from './config/env.validation';
 
 @Module({
@@ -25,6 +26,7 @@ import { validateEnv } from './config/env.validation';
     HealthModule,
     SettlementModule,
     DiditModule,
+    AdminModule,
   ],
 })
 export class AppModule {}

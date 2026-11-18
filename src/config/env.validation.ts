@@ -7,12 +7,31 @@ import {
   IsString,
   Max,
   Min,
+  MinLength,
+  IsUrl,
+  Validate,
   ValidateIf,
+  type ValidationArguments,
+  ValidatorConstraint,
+  type ValidatorConstraintInterface,
   validateSync,
 } from 'class-validator';
 
 const isProduction = (env: EnvironmentVariables) =>
   env.NODE_ENV === 'production';
+
+/** A cross-site (SameSite=None) admin cookie is for dev/staging only */
+@ValidatorConstraint({ name: 'notNoneInProduction' })
+class NotNoneInProduction implements ValidatorConstraintInterface {
+  validate(value: unknown, args: ValidationArguments): boolean {
+    return !(
+      value === 'none' && isProduction(args.object as EnvironmentVariables)
+    );
+  }
+  defaultMessage(): string {
+    return "must be 'lax' in production (dashboard and API on one domain)";
+  }
+}
 
 /**
  * Validated at startup by ConfigModule.forRoot - the app refuses to boot on
@@ -43,6 +62,36 @@ class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   TELEGRAM_BOT_TOKEN?: string;
+
+  // Admin dashboard (Better Auth). Optional in development: Better Auth then
+  // uses its built-in dev secret and http://localhost:PORT.
+  @ValidateIf(isProduction)
+  @IsString()
+  @MinLength(32)
+  BETTER_AUTH_SECRET?: string;
+
+  // Public URL of this API, e.g. https://api.example.com
+  @ValidateIf(isProduction)
+  @IsUrl({ require_tld: false, require_protocol: true })
+  BASE_URL?: string;
+
+  // Better Auth's URL; defaults to BASE_URL
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  BETTER_AUTH_URL?: string;
+
+  // 'none' lets a dev/staging dashboard on another site (vercel.app vs
+  // railway.app) keep its session. Refused in production; Safari still blocks it.
+  @IsOptional()
+  @IsIn(['lax', 'none'])
+  @Validate(NotNoneInProduction)
+  ADMIN_COOKIE_SAME_SITE?: string;
+
+  // Comma-separated admin dashboard origin(s), e.g. https://admin.example.com
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  ADMIN_APP_URL?: string;
 
   // PayHere
   @ValidateIf(isProduction)
