@@ -1,4 +1,4 @@
-import { priceSale, usdtFor } from './sell.service';
+import { ceyPayWebhookUrl, priceSale, usdtFor } from './sell.service';
 
 describe('priceSale', () => {
   it('takes the fee in sats (rounded up) and prices the rest in LKR (rounded down)', () => {
@@ -33,5 +33,31 @@ describe('usdtFor', () => {
     const usdt = usdtFor('19800.00', 330.5);
     expect(usdt).toBe('59.90922845');
     expect(Number(usdt) * 330.5).toBeGreaterThanOrEqual(19800);
+  });
+});
+
+describe('ceyPayWebhookUrl', () => {
+  it('prefers CEYPAY_WEBHOOK_URL', () => {
+    expect(
+      ceyPayWebhookUrl({
+        CEYPAY_WEBHOOK_URL: 'https://hooks.example.com/x',
+        BASE_URL: 'https://api.example.com',
+      }),
+    ).toBe('https://hooks.example.com/x');
+  });
+
+  it('derives it from a public https BASE_URL', () => {
+    expect(ceyPayWebhookUrl({ BASE_URL: 'https://api.example.com/' })).toBe(
+      'https://api.example.com/sell/ceypay-webhook',
+    );
+  });
+
+  it('sends none for a local or missing BASE_URL (CeyPay would refuse it)', () => {
+    expect(
+      ceyPayWebhookUrl({ BASE_URL: 'http://localhost:3100' }),
+    ).toBeUndefined();
+    expect(ceyPayWebhookUrl({ BASE_URL: 'https://localhost' })).toBeUndefined();
+    expect(ceyPayWebhookUrl({ BASE_URL: 'not a url' })).toBeUndefined();
+    expect(ceyPayWebhookUrl({})).toBeUndefined();
   });
 });

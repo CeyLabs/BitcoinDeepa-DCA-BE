@@ -112,6 +112,26 @@ export const toSellOrderView = (row: SellOrderRow): SellOrderView => ({
     : null,
 });
 
+/**
+ * CEYPAY_WEBHOOK_URL, else BASE_URL + the webhook route. CeyPay refuses
+ * non-public URLs (e.g. http://localhost), which would fail every payout, so a
+ * local BASE_URL sends none and the status cron settles the sale instead.
+ */
+export function ceyPayWebhookUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (env.CEYPAY_WEBHOOK_URL) return env.CEYPAY_WEBHOOK_URL;
+  const base = env.BASE_URL?.replace(/\/+$/, '');
+  if (!base) return undefined;
+  try {
+    const { protocol, hostname } = new URL(base);
+    if (protocol !== 'https:' || !hostname.includes('.')) return undefined;
+  } catch {
+    return undefined;
+  }
+  return `${base}/sell/ceypay-webhook`;
+}
+
 /** Fee is taken in sats (rounded up), the rest is priced in LKR (rounded down). */
 export function priceSale(
   sats: number,
@@ -176,13 +196,6 @@ export class SellService {
 
   private static minSats(): number {
     return parseInt(process.env.SELL_MIN_SATS || '1000', 10);
-  }
-
-  /** CEYPAY_WEBHOOK_URL, else BASE_URL + the webhook route */
-  private static webhookUrl(): string | undefined {
-    if (process.env.CEYPAY_WEBHOOK_URL) return process.env.CEYPAY_WEBHOOK_URL;
-    const base = process.env.BASE_URL?.replace(/\/+$/, '');
-    return base ? `${base}/sell/ceypay-webhook` : undefined;
   }
 
   /** Live estimate for the UI; not a quote. */
@@ -406,7 +419,7 @@ export class SellService {
         userId: account.ceypay_user_id,
         userBankId: account.ceypay_user_bank_id,
         externalRef: order.id,
-        webhookUrl: SellService.webhookUrl(),
+        webhookUrl: ceyPayWebhookUrl(),
       });
     } catch (error) {
       const err =
