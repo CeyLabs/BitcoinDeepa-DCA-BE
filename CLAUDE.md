@@ -255,7 +255,7 @@ PORT=3000
 - `DELETE /bank-accounts/:id` - Soft delete (409 while a sale on it is in flight)
 
 ### Sell (sats → LKR)
-- `GET /sell/price` - Live BTC/LKR buying rate + fee (estimate only)
+- `GET /sell/price` - Live BTC/LKR buying rate, fee and minimum sale (`SELL_MIN_SATS`) (estimate only)
 - `POST /sell/quote` - `{ sats }` → `QUOTED` order (KYC + verified bank account)
 - `POST /sell/orders/:id/confirm` - Collect sats and create the CeyPay payout (KYC + verified bank account; 410 if expired)
 - `GET /sell/orders`, `GET /sell/orders/:id` - User's sell orders

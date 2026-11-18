@@ -102,6 +102,15 @@ describe('Sell flow (e2e)', () => {
       bankId = await verifiedBankAccount(ctx, USER, cookies);
     });
 
+    it('gives the live price with the fee and the minimum sale', async () => {
+      const res = await asUser(ctx, USER).get('/sell/price').expect(200);
+      expect(res.body).toEqual({
+        btcLkrRate: 20_000_000,
+        feeBasisPoints: 100,
+        minSats: 1000,
+      });
+    });
+
     it('quotes with our own FX, fee taken in sats', async () => {
       const res = await asUser(ctx, USER)
         .post('/sell/quote', { sats: SATS })

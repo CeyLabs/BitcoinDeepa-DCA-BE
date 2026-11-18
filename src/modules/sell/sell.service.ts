@@ -199,7 +199,12 @@ export class SellService {
   }
 
   /** Live estimate for the UI; not a quote. */
-  async getPrice(): Promise<{ btcLkrRate: number; feeBasisPoints: number }> {
+  async getPrice(): Promise<{
+    btcLkrRate: number;
+    feeBasisPoints: number;
+    /** Smallest sale the API accepts, so the app's form uses the same rule */
+    minSats: number;
+  }> {
     const rate = await this.bitcoinPrice.getBtcLkrSellRate();
     if (!rate) {
       throw new ServiceUnavailableException('Price is unavailable right now');
@@ -207,6 +212,7 @@ export class SellService {
     return {
       btcLkrRate: rate.buyingRateLkr,
       feeBasisPoints: SellService.feeBasisPoints(),
+      minSats: SellService.minSats(),
     };
   }
 
