@@ -100,7 +100,8 @@ Object.assign(process.env, {
   CEYPAY_API_URL: 'https://ceypay.invalid',
   CEYPAY_API_KEY_ID: 'ak_live_test',
   CEYPAY_API_SECRET: 'sk_live_test',
-  CEYPAY_WEBHOOK_URL: 'https://example.test/sell/ceypay-webhook',
+  // the CeyPay webhook URL is derived from it
+  BASE_URL: 'https://example.test/',
   R2_ACCOUNT_ID: '',
   R2_ACCESS_KEY_ID: '',
   R2_SECRET_ACCESS_KEY: '',

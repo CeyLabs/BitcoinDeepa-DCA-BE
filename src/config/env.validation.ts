@@ -201,8 +201,9 @@ class EnvironmentVariables {
   @IsNotEmpty()
   CEYPAY_WEBHOOK_PUBLIC_KEY?: string;
 
-  @ValidateIf(isProduction)
-  @IsUrl({ require_tld: false })
+  // Defaults to BASE_URL + /sell/ceypay-webhook
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
   CEYPAY_WEBHOOK_URL?: string;
 
   @IsOptional()

@@ -15,7 +15,6 @@ const prodSecrets = {
   CEYPAY_API_KEY_ID: 'ak_live_x',
   CEYPAY_API_SECRET: 'sk_live_x',
   CEYPAY_WEBHOOK_PUBLIC_KEY: 'pk',
-  CEYPAY_WEBHOOK_URL: 'https://api.example.com/sell/ceypay-webhook',
   R2_ACCOUNT_ID: 'r2',
   R2_ACCESS_KEY_ID: 'r2k',
   R2_SECRET_ACCESS_KEY: 'r2s',

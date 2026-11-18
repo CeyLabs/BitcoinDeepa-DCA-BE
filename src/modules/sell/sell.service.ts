@@ -178,6 +178,13 @@ export class SellService {
     return parseInt(process.env.SELL_MIN_SATS || '1000', 10);
   }
 
+  /** CEYPAY_WEBHOOK_URL, else BASE_URL + the webhook route */
+  private static webhookUrl(): string | undefined {
+    if (process.env.CEYPAY_WEBHOOK_URL) return process.env.CEYPAY_WEBHOOK_URL;
+    const base = process.env.BASE_URL?.replace(/\/+$/, '');
+    return base ? `${base}/sell/ceypay-webhook` : undefined;
+  }
+
   /** Live estimate for the UI; not a quote. */
   async getPrice(): Promise<{ btcLkrRate: number; feeBasisPoints: number }> {
     const rate = await this.bitcoinPrice.getBtcLkrSellRate();
@@ -399,7 +406,7 @@ export class SellService {
         userId: account.ceypay_user_id,
         userBankId: account.ceypay_user_bank_id,
         externalRef: order.id,
-        webhookUrl: process.env.CEYPAY_WEBHOOK_URL || undefined,
+        webhookUrl: SellService.webhookUrl(),
       });
     } catch (error) {
       const err =

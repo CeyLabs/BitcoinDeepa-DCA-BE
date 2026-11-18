@@ -199,7 +199,7 @@ CEYPAY_API_URL=https://api.ceypay.io
 CEYPAY_API_KEY_ID=ak_live_...  # BitcoinDeepa's CeyPay merchant must be account_type AGGREGATOR
 CEYPAY_API_SECRET=sk_live_...
 CEYPAY_WEBHOOK_PUBLIC_KEY=...  # ED25519 public key (PEM, or base64 DER)
-CEYPAY_WEBHOOK_URL=https://<this api>/sell/ceypay-webhook
+CEYPAY_WEBHOOK_URL=  # Optional, defaults to BASE_URL/sell/ceypay-webhook
 R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=...
 ADMIN_DASHBOARD_URL=https://admin.example.com  # links in Telegram alerts
 
