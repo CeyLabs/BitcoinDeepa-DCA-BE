@@ -7,6 +7,8 @@ import {
   IsString,
   Max,
   Min,
+  MinLength,
+  IsUrl,
   ValidateIf,
   validateSync,
 } from 'class-validator';
@@ -43,6 +45,23 @@ class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   TELEGRAM_BOT_TOKEN?: string;
+
+  // Admin dashboard (Better Auth). Optional in development: Better Auth then
+  // uses its built-in dev secret and http://localhost:PORT.
+  @ValidateIf(isProduction)
+  @IsString()
+  @MinLength(32)
+  BETTER_AUTH_SECRET?: string;
+
+  @ValidateIf(isProduction)
+  @IsUrl({ require_tld: false })
+  BETTER_AUTH_URL?: string;
+
+  // Comma-separated admin dashboard origin(s), e.g. https://admin.example.com
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  ADMIN_APP_URL?: string;
 
   // PayHere
   @ValidateIf(isProduction)

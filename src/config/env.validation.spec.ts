@@ -8,6 +8,9 @@ const prodSecrets = {
   PAYHERE_APP_ID: 'a',
   PAYHERE_APP_SECRET: 'as',
   DIDIT_WEBHOOK_SECRET: 'd',
+  BETTER_AUTH_SECRET: 'x'.repeat(32),
+  BETTER_AUTH_URL: 'https://api.example.com',
+  ADMIN_APP_URL: 'https://admin.example.com',
 };
 
 describe('validateEnv', () => {
@@ -37,6 +40,17 @@ describe('validateEnv', () => {
         PAYHERE_APP_SECRET: '',
       }),
     ).toThrow(/PAYHERE_APP_SECRET/);
+  });
+
+  it('requires a strong admin auth secret in production', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        BETTER_AUTH_SECRET: 'too-short',
+      }),
+    ).toThrow(/BETTER_AUTH_SECRET/);
   });
 
   it('converts numeric strings and rejects out-of-range values', () => {

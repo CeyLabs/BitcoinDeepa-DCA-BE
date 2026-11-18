@@ -67,6 +67,15 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Sessions API v3 (`/v3/session/`); late `Not Started`/`In Progress` webhooks never overwrite a final KYC result; `Resubmitted` → `IN_PROGRESS`
    - Uses strongly typed KYC status enum for database consistency
 
+10. **Admin Module** (`src/modules/admin/`) - everything behind the admin dashboard. `AdminModule` bundles one Nest module per area (`auth/` for now). Add new admin areas as sibling folders and import them in `admin.module.ts`
+   - **auth/**: Better Auth (email + password) for the admin dashboard (BitcoinDeepa-Admin-FE), mounted on Express at `/api/admin-auth/*` in `app.setup.ts` (before Nest's body parsers)
+   - Tables `admin_user`, `admin_session`, `admin_account`, `admin_verification` (snake_case; mapping in `admin-auth.config.ts`). Separate from the Telegram `user` table; the analytics role has no access
+   - Only `role = 'admin'` users can get a session (`databaseHooks.session.create.before`); public sign-up is disabled
+   - Create admins with `bun run admin:create --email <email> --name "<name>"` (prod build: `node dist/src/scripts/create-admin.js ...`; password prompted or `ADMIN_PASSWORD`)
+   - Protect admin endpoints with `@UseGuards(AdminSessionGuard)` and read the session with `@CurrentAdmin()`
+   - better-auth is ESM-only: it's loaded with a real dynamic `import()` (same trick as jose), so never import it statically outside `import type`
+   - CORS: origins in `ADMIN_APP_URL` get an exact-match credentialed response; other origins keep `CORS_ORIGIN`. Production cookies are `SameSite=None; Secure`
+
 ### Database Schema
 
 **Tables:**
@@ -134,6 +143,9 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/dbname
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 JWT_SECRET=your_jwt_secret_key  # Required - app refuses to start without it
 ADMIN_API_KEY=your_admin_key  # Required for internal endpoints (x-admin-key header)
+BETTER_AUTH_SECRET=...  # Admin dashboard auth, >= 32 chars (required in production)
+BETTER_AUTH_URL=https://api.example.com  # Public URL of this API (required in production)
+ADMIN_APP_URL=https://admin.example.com  # Admin dashboard origin(s), comma-separated (required in production)
 ENABLE_AUTH=true  # Set to 'false' for development (bypasses auth)
 
 # PayHere Integration
@@ -190,6 +202,10 @@ PORT=3000
 
 ### KYC Verification
 - `POST /didit/webhook` - Didit webhook for KYC status updates (public)
+
+### Admin dashboard
+- `/api/admin-auth/*` - Better Auth endpoints (`sign-in/email`, `sign-out`, `get-session`, ...)
+- `GET /admin/me` - Current admin (admin session cookie)
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
@@ -357,6 +373,7 @@ src/
 │   ├── subscription/      # Subscription logic
 │   ├── transaction/       # Payment processing
 │   ├── payhere/          # PayHere integration
+│   ├── admin/            # Admin dashboard API (auth/, ...)
 │   └── knex/             # Database connection
 ├── migrations/           # Database schema migrations
 └── seeds/               # Initial data seeding
