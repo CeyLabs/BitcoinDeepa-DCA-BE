@@ -92,6 +92,57 @@ describe('BitcoinDeepaService', () => {
     expect(result.outcome_unknown).toBeUndefined();
   });
 
+  describe('collectFunds (sell flow)', () => {
+    it('posts a signed debit of the user to /api/v1/collect', async () => {
+      post.mockResolvedValue({ status: 200, data: { success: true } });
+      await service.collectFunds(5000, '42', 'sell:abc');
+
+      const [url, body, config] = post.mock.calls[0];
+      const headers = config!.headers as Record<string, string>;
+      expect(url).toBe('https://bd.test/api/v1/collect');
+      expect(JSON.parse(body as string)).toEqual({
+        telegram_id: 42,
+        amount: 5000,
+        memo: 'sell:abc',
+      });
+      const expected = createHmac('sha256', 'hmac-secret')
+        .update(`POST/api/v1/collect${headers['X-Timestamp']}${body as string}`)
+        .digest('hex');
+      expect(headers['X-HMAC-Signature']).toBe(expected);
+    });
+
+    it('flags a timeout as outcome_unknown', async () => {
+      post.mockRejectedValue(new Error('timeout'));
+      await expect(service.collectFunds(1, '42', 'm')).resolves.toMatchObject({
+        success: false,
+        outcome_unknown: true,
+      });
+    });
+
+    it('treats a duplicate memo as already done', async () => {
+      post.mockRejectedValue({
+        message: 'Request failed',
+        response: { status: 409, data: { error: 'memo already exists' } },
+      });
+      await expect(service.collectFunds(1, '42', 'm')).resolves.toMatchObject({
+        success: false,
+        already_completed: true,
+      });
+    });
+
+    it('returns a plain failure for insufficient balance', async () => {
+      post.mockRejectedValue({
+        message: 'Request failed',
+        response: { status: 400, data: { error: 'insufficient balance' } },
+      });
+      await expect(service.collectFunds(1, '42', 'm')).resolves.toEqual({
+        success: false,
+        message: 'insufficient balance',
+        already_completed: false,
+      });
+    });
+  });
+
   it('fetches bot transaction history with limit/offset', async () => {
     const data = {
       success: true,

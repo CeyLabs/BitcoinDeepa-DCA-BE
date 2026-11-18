@@ -11,6 +11,15 @@ const prodSecrets = {
   BETTER_AUTH_SECRET: 'x'.repeat(32),
   BASE_URL: 'https://api.example.com',
   ADMIN_APP_URL: 'https://admin.example.com',
+  CEYPAY_API_URL: 'https://api.ceypay.io',
+  CEYPAY_API_KEY_ID: 'ak_live_x',
+  CEYPAY_API_SECRET: 'sk_live_x',
+  CEYPAY_WEBHOOK_PUBLIC_KEY: 'pk',
+  CEYPAY_WEBHOOK_URL: 'https://api.example.com/sell/ceypay-webhook',
+  R2_ACCOUNT_ID: 'r2',
+  R2_ACCESS_KEY_ID: 'r2k',
+  R2_SECRET_ACCESS_KEY: 'r2s',
+  R2_BUCKET: 'statements',
 };
 
 describe('validateEnv', () => {
@@ -40,6 +49,25 @@ describe('validateEnv', () => {
         PAYHERE_APP_SECRET: '',
       }),
     ).toThrow(/PAYHERE_APP_SECRET/);
+  });
+
+  it('requires CeyPay and R2 for the sell flow in production', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        CEYPAY_API_SECRET: '',
+      }),
+    ).toThrow(/CEYPAY_API_SECRET/);
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        R2_BUCKET: '',
+      }),
+    ).toThrow(/R2_BUCKET/);
   });
 
   it('requires a strong admin auth secret in production', () => {

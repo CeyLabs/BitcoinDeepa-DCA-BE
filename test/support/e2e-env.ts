@@ -12,6 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { parse } from 'dotenv';
+import { generateKeyPairSync } from 'crypto';
 
 const testDb = process.env.TEST_DATABASE_URL;
 const testRedis = process.env.TEST_REDIS_URL;
@@ -93,4 +94,25 @@ Object.assign(process.env, {
   DIDIT_BASE_URL: 'https://didit.invalid',
   ENABLE_BITCOIN_TRACKING: 'true',
   ANALYTICS_READONLY_PASSWORD: 'test-analytics',
+  BITCOINDEEPA_SELL_FEE_BASIS_POINTS: '100',
+  SELL_QUOTE_TTL_SECONDS: '60',
+  SELL_MIN_SATS: '1000',
+  CEYPAY_API_URL: 'https://ceypay.invalid',
+  CEYPAY_API_KEY_ID: 'ak_live_test',
+  CEYPAY_API_SECRET: 'sk_live_test',
+  CEYPAY_WEBHOOK_URL: 'https://example.test/sell/ceypay-webhook',
+  R2_ACCOUNT_ID: '',
+  R2_ACCESS_KEY_ID: '',
+  R2_SECRET_ACCESS_KEY: '',
+  R2_BUCKET: '',
+  ADMIN_DASHBOARD_URL: 'http://localhost:5173',
 });
+
+// CeyPay signs webhooks with ED25519; tests sign with this throwaway key.
+const ceypayWebhookKeys = generateKeyPairSync('ed25519');
+process.env.CEYPAY_WEBHOOK_PUBLIC_KEY = ceypayWebhookKeys.publicKey
+  .export({ type: 'spki', format: 'pem' })
+  .toString();
+process.env.TEST_CEYPAY_WEBHOOK_PRIVATE_KEY = ceypayWebhookKeys.privateKey
+  .export({ type: 'pkcs8', format: 'pem' })
+  .toString();

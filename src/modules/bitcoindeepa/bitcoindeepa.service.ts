@@ -16,6 +16,13 @@ export interface FundTransferResponse {
   outcome_unknown?: boolean; // True if we got no response (timeout/network) - the transfer may have happened
 }
 
+/** Debit a user's wallet into the platform wallet (sell flow). */
+export interface FundCollectRequest {
+  telegram_id: number;
+  amount: number; // satoshis
+  memo: string; // unique per sell order; the API rejects a duplicate memo
+}
+
 export interface UserBalanceRequest {
   telegram_id: number;
 }
@@ -73,6 +80,7 @@ export class BitcoinDeepaService {
   private readonly hmacSecret: string;
   private readonly timeout: number;
   private readonly sendEndpoint = '/api/v1/send';
+  private readonly collectEndpoint = '/api/v1/collect';
   private readonly balanceEndpoint = '/api/v1/userbalance';
   private readonly userTransactionsEndpoint = '/api/v1/usertransactions';
 
@@ -117,6 +125,34 @@ export class BitcoinDeepaService {
   }
 
   /**
+   * Turn a failed send/collect into a result:
+   * - no HTTP response (timeout, connection reset), or a gateway error from a
+   *   proxy in front of the API (502/503/504): it may still have gone
+   *   through, so it must not be blindly retried (outcome_unknown)
+   * - the API reports a duplicate memo/ref as an error: treat it as done
+   */
+  private static toFailedTransfer(
+    error: unknown,
+    message: string,
+  ): FundTransferResponse {
+    const httpStatus = (error as { response?: { status?: number } })?.response
+      ?.status;
+    if (
+      httpStatus === undefined ||
+      GATEWAY_ERROR_STATUSES.includes(Number(httpStatus))
+    ) {
+      return { success: false, message, outcome_unknown: true };
+    }
+    const lower = String(message).toLowerCase();
+    return {
+      success: false,
+      message,
+      already_completed:
+        lower.includes('already completed') || lower.includes('already exists'),
+    };
+  }
+
+  /**
    * Transfer satoshis to user's wallet via BitcoinDeepa API
    */
   async transferFunds(
@@ -147,27 +183,43 @@ export class BitcoinDeepaService {
       this.logger.error(
         `BitcoinDeepa transfer failed: ${amount} sats to user ${toTelegramId}: ${message} (status: ${error.response?.status})`,
       );
+      return BitcoinDeepaService.toFailedTransfer(error, message);
+    }
+  }
 
-      // No HTTP response (timeout, connection reset), or a gateway error from
-      // a proxy in front of the API (502/503/504): the transfer may still
-      // have gone through, so it must not be blindly retried.
-      const httpStatus: unknown = error.response?.status;
-      if (
-        httpStatus === undefined ||
-        GATEWAY_ERROR_STATUSES.includes(Number(httpStatus))
-      ) {
-        return { success: false, message, outcome_unknown: true };
-      }
+  /**
+   * Debit satoshis from a user's wallet into the platform wallet (sell flow).
+   * Same result semantics as transferFunds.
+   */
+  async collectFunds(
+    amount: number,
+    fromTelegramId: string,
+    memo: string,
+  ): Promise<FundTransferResponse> {
+    const requestBody: FundCollectRequest = {
+      telegram_id: Number(fromTelegramId),
+      amount: Number(amount),
+      memo,
+    };
 
-      // The API reports a duplicate memo/ref as an error; treat it as done.
-      const lower = String(message).toLowerCase();
-      return {
-        success: false,
-        message,
-        already_completed:
-          lower.includes('already completed') ||
-          lower.includes('already exists'),
-      };
+    try {
+      const response = await this.signedPost<FundTransferResponse>(
+        this.collectEndpoint,
+        requestBody,
+      );
+      this.logger.log(
+        `BitcoinDeepa collect OK: ${amount} sats from user ${fromTelegramId} (status ${response.status})`,
+      );
+      return response.data;
+    } catch (error: any) {
+      const message = BitcoinDeepaService.errorMessage(
+        error,
+        'Fund collect failed',
+      );
+      this.logger.error(
+        `BitcoinDeepa collect failed: ${amount} sats from user ${fromTelegramId}: ${message} (status: ${error.response?.status})`,
+      );
+      return BitcoinDeepaService.toFailedTransfer(error, message);
     }
   }
 

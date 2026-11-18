@@ -75,6 +75,22 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Protect admin endpoints with `@UseGuards(AdminSessionGuard)` and read the session with `@CurrentAdmin()`
    - better-auth is ESM-only: it's loaded with a real dynamic `import()` (same trick as jose), so never import it statically outside `import type`
    - CORS: origins in `ADMIN_APP_URL` get an exact-match credentialed response; other origins keep `CORS_ORIGIN`, without credentials. Cookies are `SameSite=Lax` (`Secure` in production), so **sign-in only works when the dashboard and the API share a registrable domain** (`admin.<domain>` / `api.<domain>`). A dashboard on another site (a `vercel.app` preview against a `railway.app` API; `*.up.railway.app` and `*.vercel.app` are public suffixes, so even two Railway subdomains are different sites) signs in and then gets 401s. For dev/staging only, `ADMIN_COOKIE_SAME_SITE=none` makes it `SameSite=None; Secure` (HTTPS required; refused in production; Safari still blocks it). Admin requests other than GET/HEAD/OPTIONS must carry an `Origin` from `ADMIN_APP_URL` (CSRF)
+   - **bank-reviews/**: admin review of users' payout bank accounts (uses `BankAccountService`)
+
+11. **Bank Account Module** (`src/modules/bank-account/`) - users' payout bank accounts and their admin verification
+   - User uploads a statement to R2 via a temporary presigned PUT (`POST /bank-accounts/statement-upload`), then submits the account (`POST /bank-accounts`). The backend `HEAD`s the object (exists, under the user's prefix, PDF/JPEG/PNG, <= 8 MB)
+   - Every account starts `PENDING_REVIEW` (one in review/verified per user). `name_match_score` (ported CeyFi `name-match.util.ts`, account name vs profile name) is only a reviewer hint
+   - Admin approve registers it with CeyPay (aggregator user + bank account) inside the row lock, then sets `VERIFIED`; CeyPay failure leaves it pending (502). Reject needs a reason; the same account can be resubmitted. The user gets a Telegram DM either way
+   - `BankVerifiedGuard` (exported) gates anything that pays out to the account. Removing an account is blocked while a sell order on it is in flight
+
+12. **Sell Module** (`src/modules/sell/`) - users sell sats for LKR paid to their verified bank account by CeyPay
+   - **Who can sell:** KYC `APPROVED` (`KycVerifiedGuard`) **and** a verified bank account (`BankVerifiedGuard` from bank-account). Both are re-checked at confirm, and the account again at payout time
+   - **Pricing uses our own FX:** `BitcoinPriceService.getBtcLkrSellRate()` = Ceylon Cash `fx.ceyloncash.com/currency/BTC` `buying_rate_lkr` (cached 30s). CoinMarketCap is not used for selling. Fee `BITCOINDEEPA_SELL_FEE_BASIS_POINTS` is taken in sats (rounded up); LKR is rounded down. Quotes live `SELL_QUOTE_TTL_SECONDS`
+   - **Confirm:** row-locked; debits the user via the bot's `POST /api/v1/collect` (`BitcoinDeepaService.collectFunds`, memo `sell:<orderId>` = idempotent), then locks a CeyPay USDT quote sized so CeyPay's `amountLkr` >= ours and creates the off-ramp (`externalRef` = order id, CeyPay dedupes on it). The user always gets the LKR we quoted; CeyPay's USDT numbers are bookkeeping (it pays from our prefunded LKR float)
+   - **Statuses** (`sell_order.status`, forward-only conditional updates): `QUOTED` → `SATS_COLLECTED` → `PAYOUT_PENDING` → `COMPLETED`; `QUOTED` → `EXPIRED`; payout failure → `REFUNDED` (full sats back, memo `sell-refund:<id>`); any unknown transfer outcome (collect/refund timeout, payout retries exhausted) → `NEEDS_REVIEW` + Telegram alert, never retried automatically
+   - **CeyPay webhook** `POST /sell/ceypay-webhook`: ED25519 (`CEYPAY_WEBHOOK_PUBLIC_KEY`) over `X-Webhook-Timestamp` (ms, ±5 min) + raw body. Bound to the order by `externalRef` + `paymentId`. Crons: expire quotes (1 min), retry payout creation with 2^n min backoff up to 5 attempts (30s), poll CeyPay for `PAYOUT_PENDING` older than 10 min (5 min)
+   - **CeyPay client** (`src/modules/ceypay/`): aggregator API, `x-api-key` (key id) + `x-timestamp` (ms) + `x-signature` = hex HMAC-SHA256 with key `sha256hex(secret)` over `ts + METHOD + path?query + body`. `CeyPayError.outcomeUnknown` = no response/5xx/429
+   - **R2** (`src/modules/storage/`): private bucket; statements are only ever reached through 5-minute presigned URLs (bucket CORS must allow PUT from the TMA origin)
 
 ### Database Schema
 
@@ -83,6 +99,8 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - `user`: User profiles (Telegram ID as PK, personal info, address, KYC status and verification data)
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
 - `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
+- `user_bank_account`: Payout bank accounts (status PENDING_REVIEW/VERIFIED/REJECTED, statement R2 key, name-match score, reviewer, CeyPay bank id). `user.ceypay_user_id` links the user to CeyPay
+- `sell_order`: Sell orders (sats, fee, net sats, BTC/LKR buying rate, promised LKR, CeyPay quote/payment ids, bank ref, status, retries)
 
 **Relationships:**
 - Users → Subscriptions (1:many)
@@ -173,6 +191,18 @@ DIDIT_BASE_URL=https://verification.didit.me  # Didit API base URL (v3 sessions 
 DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Required in production; optional in dev
 DIDIT_CALLBACK_BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
 
+# Sell flow (required in production)
+BITCOINDEEPA_SELL_FEE_BASIS_POINTS=100  # taken in sats
+SELL_QUOTE_TTL_SECONDS=60
+SELL_MIN_SATS=1000
+CEYPAY_API_URL=https://api.ceypay.io
+CEYPAY_API_KEY_ID=ak_live_...  # BitcoinDeepa's CeyPay merchant must be account_type AGGREGATOR
+CEYPAY_API_SECRET=sk_live_...
+CEYPAY_WEBHOOK_PUBLIC_KEY=...  # ED25519 public key (PEM, or base64 DER)
+CEYPAY_WEBHOOK_URL=https://<this api>/sell/ceypay-webhook
+R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=...
+ADMIN_DASHBOARD_URL=https://admin.example.com  # links in Telegram alerts
+
 # Server
 PORT=3000
 ```
@@ -212,6 +242,21 @@ PORT=3000
 - `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily settled LKR, payment count, unsettled LKR and new users (Asia/Colombo days)
 - `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&from=&to=&q=` - Paginated transactions, newest first, with member and plan. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
 - `GET /admin/members?page=&pageSize=&kyc=&subscription=active|none&q=` - Paginated members, newest first, with active plan, settled SUCCESS-payment totals (LKR, sats) and unsettled LKR. `q` matches Telegram id, name, email or phone
+
+### Bank accounts
+- `GET /bank-accounts/banks` - Supported banks (CeyPay list, cached 1h)
+- `GET /bank-accounts` - User's active bank accounts with review status (account number masked)
+- `POST /bank-accounts/statement-upload` - `{ contentType: application/pdf|image/jpeg|image/png, size <= 8MB }` → temporary presigned PUT URL + `key` (KYC required)
+- `POST /bank-accounts` - `{ bankCode, accountNumber, accountName, statementKey }` → PENDING_REVIEW (KYC required)
+- `DELETE /bank-accounts/:id` - Soft delete (409 while a sale on it is in flight)
+
+### Sell (sats → LKR)
+- `GET /sell/price` - Live BTC/LKR buying rate + fee (estimate only)
+- `POST /sell/quote` - `{ sats }` → `QUOTED` order (KYC + verified bank account)
+- `POST /sell/orders/:id/confirm` - Collect sats and create the CeyPay payout (KYC + verified bank account; 410 if expired)
+- `GET /sell/orders`, `GET /sell/orders/:id` - User's sell orders
+- `POST /sell/ceypay-webhook` - CeyPay off-ramp result (public, ED25519-signed)
+- Admin: `GET /admin/bank-reviews?status=&page=&pageSize=&q=` (default PENDING_REVIEW, oldest first), `GET /admin/bank-reviews/pending-count`, `GET /admin/bank-reviews/:id/statement` (5-min link), `POST /admin/bank-reviews/:id/approve`, `POST /admin/bank-reviews/:id/reject { reason }`
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
@@ -292,7 +337,7 @@ try {
 
 ### Configuration
 - `ConfigModule.forRoot({ isGlobal: true, validate })` loads `.env` and validates it at startup (`src/config/env.validation.ts`). Add new env vars there; the app refuses to boot on missing/invalid values.
-- Production additionally requires `TELEGRAM_BOT_TOKEN`, `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET` and `DIDIT_WEBHOOK_SECRET`.
+- Production additionally requires `TELEGRAM_BOT_TOKEN`, `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET`, `DIDIT_WEBHOOK_SECRET`, and the CeyPay + R2 sell-flow variables.
 - `app.enableShutdownHooks()` is on, so `onModuleDestroy` (DB pool, Redis) runs on SIGTERM.
 
 ### Database Migrations
@@ -336,7 +381,7 @@ The platform implements a dual-fee system with separate payment processor and pl
 
 **Payment Processors:**
 - `PAYHERE`: Default payment processor (Sri Lankan payment gateway)
-- `CEYPAY`: Alternative processor (enum value only - not implemented yet)
+- `CEYPAY`: enum value on `subscription` only - not used for buying. CeyPay is used for the sell flow's LKR payouts (see Sell Module)
 
 **Fee Calculation:**
 ```typescript
@@ -379,7 +424,11 @@ src/
 │   ├── subscription/      # Subscription logic
 │   ├── transaction/       # Payment processing
 │   ├── payhere/          # PayHere integration
-│   ├── admin/            # Admin dashboard API: auth/, analytics/, transactions/
+│   ├── bank-account/     # Payout bank accounts + admin verification
+│   ├── sell/             # Sell sats for LKR (quotes, CeyPay payouts, refunds)
+│   ├── ceypay/           # CeyPay aggregator off-ramp client
+│   ├── storage/          # Cloudflare R2 (presigned URLs)
+│   ├── admin/            # Admin dashboard API: auth/, analytics/, transactions/, members/, bank-reviews/
 │   └── knex/             # Database connection
 ├── migrations/           # Database schema migrations
 └── seeds/               # Initial data seeding

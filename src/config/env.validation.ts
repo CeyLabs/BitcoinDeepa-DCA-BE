@@ -162,6 +162,84 @@ class EnvironmentVariables {
   @IsInt()
   @Min(1)
   BITCOINDEEPA_TIMEOUT?: number;
+
+  // Sell flow (CeyPay aggregator off-ramp)
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  BITCOINDEEPA_SELL_FEE_BASIS_POINTS?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(10)
+  @Max(600)
+  SELL_QUOTE_TTL_SECONDS?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  SELL_MIN_SATS?: number;
+
+  @ValidateIf(isProduction)
+  @IsUrl({ require_tld: false })
+  CEYPAY_API_URL?: string;
+
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  CEYPAY_API_KEY_ID?: string;
+
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  CEYPAY_API_SECRET?: string;
+
+  // ED25519 public key (PEM or base64 DER) CeyPay signs webhooks with
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  CEYPAY_WEBHOOK_PUBLIC_KEY?: string;
+
+  @ValidateIf(isProduction)
+  @IsUrl({ require_tld: false })
+  CEYPAY_WEBHOOK_URL?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  CEYPAY_TIMEOUT?: number;
+
+  // Cloudflare R2 (bank statements, private bucket)
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  R2_ACCOUNT_ID?: string;
+
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  R2_ACCESS_KEY_ID?: string;
+
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  R2_SECRET_ACCESS_KEY?: string;
+
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  R2_BUCKET?: string;
+
+  // Optional S3-compatible endpoint override (local MinIO / tests)
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  R2_ENDPOINT?: string;
+
+  // Admin dashboard base URL, used in Telegram alert links
+  @IsOptional()
+  @IsUrl({ require_tld: false })
+  ADMIN_DASHBOARD_URL?: string;
 }
 
 export function validateEnv(

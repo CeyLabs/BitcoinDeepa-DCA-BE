@@ -2,7 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { SchedulerRegistry } from '@nestjs/schedule';
-import { createHash, createHmac } from 'crypto';
+import { createHash, createHmac, randomUUID, sign } from 'crypto';
 import type { Knex } from 'knex';
 import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/app.setup';
@@ -13,12 +13,23 @@ import { BitcoinPriceService } from '../../src/modules/bitcoin-price/bitcoin-pri
 import { BitcoinDeepaService } from '../../src/modules/bitcoindeepa/bitcoindeepa.service';
 import { PayHereService } from '../../src/modules/payhere/payhere.service';
 import { DiditService } from '../../src/modules/didit/didit.service';
+import { CeyPayService } from '../../src/modules/ceypay/ceypay.service';
+import { R2StorageService } from '../../src/modules/storage/r2-storage.service';
+import { TelegramLoggerService } from '../../src/modules/telegram-logger/telegram-logger.service';
 
 /** Fixed market data so satoshi amounts are deterministic. */
 export const BTC_USD = 65_000;
 export const USD_LKR = 300; // => 1 BTC = 19,500,000 LKR
 export const sats = (netLkr: number) =>
   Math.floor((netLkr / (BTC_USD * USD_LKR)) * 100_000_000);
+
+/** Ceylon Cash BTC buying rate (sell flow) and CeyPay's USDT/LKR rate */
+export const BTC_LKR_BUYING = 20_000_000;
+export const CEYPAY_USDT_LKR = 330;
+export const BANKS = [
+  { code: 7010, name: 'Bank of Ceylon' },
+  { code: 7056, name: 'Commercial Bank PLC' },
+];
 
 export const PACKAGE_WEEKLY = '00000000-0000-0000-0000-000000000001';
 export const PACKAGE_MONTHLY = '00000000-0000-0000-0000-000000000004';
@@ -31,10 +42,29 @@ export interface TestContext {
   bitcoinDeepa: {
     isConfigured: jest.Mock;
     transferFunds: jest.Mock;
+    collectFunds: jest.Mock;
     getUserBalance: jest.Mock;
     getUserTransactions: jest.Mock;
   };
   didit: { createVerificationSession: jest.Mock; getSession: jest.Mock };
+  ceyPay: {
+    isConfigured: jest.Mock;
+    getBanks: jest.Mock;
+    upsertUser: jest.Mock;
+    addBankAccount: jest.Mock;
+    getQuote: jest.Mock;
+    createOfframp: jest.Mock;
+    getOfframp: jest.Mock;
+    verifyWebhookSignature: jest.Mock;
+  };
+  storage: {
+    isConfigured: jest.Mock;
+    presignUpload: jest.Mock;
+    presignDownload: jest.Mock;
+    head: jest.Mock;
+  };
+  /** Telegram DMs to users (never sent for real) */
+  notifyUser: jest.SpyInstance;
   payHereCancel: jest.SpyInstance;
   /** PayHere's payment lookup used by settlement (see below) */
   payHerePayments: jest.SpyInstance;
@@ -46,6 +76,7 @@ export async function createTestApp(): Promise<TestContext> {
   const bitcoinDeepa = {
     isConfigured: jest.fn().mockReturnValue(true),
     transferFunds: jest.fn().mockResolvedValue({ success: true }),
+    collectFunds: jest.fn().mockResolvedValue({ success: true }),
     getUserBalance: jest
       .fn()
       .mockResolvedValue({ success: true, balance: 0, balance_lkr: '0.00' }),
@@ -60,6 +91,28 @@ export async function createTestApp(): Promise<TestContext> {
     getSession: jest.fn().mockResolvedValue(null),
   };
 
+  // CeyPay's API is mocked, but webhook signatures are checked for real
+  const realCeyPay = new CeyPayService();
+  const ceyPay = {
+    isConfigured: jest.fn().mockReturnValue(true),
+    getBanks: jest.fn().mockResolvedValue(BANKS),
+    upsertUser: jest.fn(),
+    addBankAccount: jest.fn(),
+    getQuote: jest.fn(),
+    createOfframp: jest.fn(),
+    getOfframp: jest.fn(),
+    verifyWebhookSignature: jest.fn(
+      (...args: Parameters<CeyPayService['verifyWebhookSignature']>) =>
+        realCeyPay.verifyWebhookSignature(...args),
+    ),
+  };
+  const storage = {
+    isConfigured: jest.fn().mockReturnValue(true),
+    presignUpload: jest.fn(),
+    presignDownload: jest.fn(),
+    head: jest.fn(),
+  };
+
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(CoinMarketCapService)
     .useValue({
@@ -71,6 +124,10 @@ export async function createTestApp(): Promise<TestContext> {
     .useValue(bitcoinDeepa)
     .overrideProvider(DiditService)
     .useValue(didit)
+    .overrideProvider(CeyPayService)
+    .useValue(ceyPay)
+    .overrideProvider(R2StorageService)
+    .useValue(storage)
     .compile();
 
   const app = moduleRef.createNestApplication({ rawBody: true });
@@ -88,6 +145,12 @@ export async function createTestApp(): Promise<TestContext> {
     { getUsdLkrRate: () => Promise<number | null> }
   >(BitcoinPriceService);
   jest.spyOn(priceService, 'getUsdLkrRate').mockResolvedValue(USD_LKR);
+  jest
+    .spyOn(app.get(BitcoinPriceService), 'getBtcLkrSellRate')
+    .mockResolvedValue({ buyingRateLkr: BTC_LKR_BUYING, usdPrice: BTC_USD });
+  const notifyUser = jest
+    .spyOn(app.get(TelegramLoggerService), 'notifyUser')
+    .mockResolvedValue(true);
 
   const payHereCancel = jest
     .spyOn(app.get(PayHereService), 'cancelSubscription')
@@ -119,6 +182,9 @@ export async function createTestApp(): Promise<TestContext> {
     knex,
     bitcoinDeepa,
     didit,
+    ceyPay,
+    storage,
+    notifyUser,
     payHereCancel,
     payHerePayments,
     tokenFor: (userId) => jwt.sign({ id: userId, username: `u${userId}` }),
@@ -130,7 +196,7 @@ export async function createTestApp(): Promise<TestContext> {
 export async function resetData(ctx: TestContext): Promise<void> {
   const { knex, app } = ctx;
   await knex.raw(
-    'TRUNCATE "transaction", subscription, payhere_order, "user", package, admin_user, admin_verification RESTART IDENTITY CASCADE',
+    'TRUNCATE sell_order, user_bank_account, "transaction", subscription, payhere_order, "user", package, admin_user, admin_verification RESTART IDENTITY CASCADE',
   );
   await knex('package').insert([
     {
@@ -173,6 +239,74 @@ export async function resetData(ctx: TestContext): Promise<void> {
   ]);
   await app.get(RedisService).delByPattern('dca:*');
   jest.clearAllMocks();
+  resetSellMocks(ctx);
+}
+
+/** Default CeyPay / R2 / wallet behaviour for the sell flow. */
+export function resetSellMocks(ctx: TestContext): void {
+  const { ceyPay, storage, bitcoinDeepa } = ctx;
+  ceyPay.getBanks.mockResolvedValue(BANKS);
+  ceyPay.upsertUser.mockImplementation((externalUserId: string) =>
+    Promise.resolve({ userId: randomUUID(), externalUserId }),
+  );
+  ceyPay.addBankAccount.mockImplementation(
+    (
+      _userId: string,
+      a: { bankCode: number; accountNumber: string; accountName: string },
+    ) => Promise.resolve({ userBankId: randomUUID(), ...a, bankName: 'Bank' }),
+  );
+  ceyPay.getQuote.mockImplementation((amountUsdt: string) =>
+    Promise.resolve({
+      fxLockId: randomUUID(),
+      rateUsdtLkr: CEYPAY_USDT_LKR,
+      amountUsdt: Number(amountUsdt),
+      amountLkr: Math.round(Number(amountUsdt) * CEYPAY_USDT_LKR * 100) / 100,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+  );
+  ceyPay.createOfframp.mockImplementation((body: { externalRef: string }) =>
+    Promise.resolve({
+      paymentId: randomUUID(),
+      status: 'PENDING',
+      externalRef: body.externalRef,
+    }),
+  );
+  storage.presignUpload.mockImplementation((key: string) =>
+    Promise.resolve(`https://r2.test/${key}?X-Amz-Signature=put`),
+  );
+  storage.presignDownload.mockImplementation((key: string) =>
+    Promise.resolve(`https://r2.test/${key}?X-Amz-Signature=get`),
+  );
+  storage.head.mockResolvedValue({
+    size: 120_000,
+    contentType: 'application/pdf',
+  });
+  bitcoinDeepa.collectFunds.mockResolvedValue({ success: true });
+  bitcoinDeepa.getUserBalance.mockResolvedValue({
+    success: true,
+    balance: 0,
+    balance_lkr: '0.00',
+  });
+}
+
+/** Headers + raw body for a CeyPay webhook signed like CeyPay does. */
+export function ceypayWebhook(
+  body: Record<string, unknown>,
+  timestamp = Date.now(),
+) {
+  const raw = JSON.stringify(body);
+  return {
+    raw,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Webhook-Timestamp': String(timestamp),
+      'X-Webhook-Signature': sign(
+        null,
+        Buffer.from(`${timestamp}${raw}`),
+        process.env.TEST_CEYPAY_WEBHOOK_PRIVATE_KEY!,
+      ).toString('base64'),
+    },
+  };
 }
 
 const md5U = (s: string) =>

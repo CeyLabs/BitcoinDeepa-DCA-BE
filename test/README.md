@@ -24,7 +24,7 @@ bun run test:e2e
 
 The database must be named `bitcoindeepa_dca` (the analytics migration grants on that name). Migrations run automatically.
 
-External services are stubbed in `test/support/test-app.ts`: CoinMarketCap (BTC = 65,000 USD), USD/LKR FX (300), BitcoinDeepa, Didit and PayHere's cancel API. Webhooks are sent with real PayHere md5 / Didit HMAC signatures using test secrets from `test/support/e2e-env.ts`. Cron jobs are stopped and called directly by the tests.
+External services are stubbed in `test/support/test-app.ts`: CoinMarketCap (BTC = 65,000 USD), USD/LKR FX (300), Ceylon Cash BTC buying rate (20,000,000 LKR), BitcoinDeepa, Didit, PayHere's cancel API, CeyPay (USDT/LKR 330) and R2. CeyPay webhooks are signed with a throwaway ED25519 key generated in `e2e-env.ts`; Telegram user DMs are mocked. Webhooks are sent with real PayHere md5 / Didit HMAC signatures using test secrets from `test/support/e2e-env.ts`. Cron jobs are stopped and called directly by the tests.
 
 ## Live provider check (optional)
 
