@@ -68,7 +68,8 @@ async function main(): Promise<void> {
       pool,
       secret: process.env.BETTER_AUTH_SECRET,
       baseURL:
-        process.env.BETTER_AUTH_URL ??
+        process.env.BETTER_AUTH_URL ||
+        process.env.BASE_URL ||
         `http://localhost:${process.env.PORT ?? 3000}`,
       production: process.env.NODE_ENV === 'production',
     });

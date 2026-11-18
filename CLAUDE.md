@@ -144,7 +144,8 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 JWT_SECRET=your_jwt_secret_key  # Required - app refuses to start without it
 ADMIN_API_KEY=your_admin_key  # Required for internal endpoints (x-admin-key header)
 BETTER_AUTH_SECRET=...  # Admin dashboard auth, >= 32 chars (required in production)
-BETTER_AUTH_URL=https://api.example.com  # Public URL of this API (required in production)
+BASE_URL=https://api.example.com  # Public URL of this API (required in production)
+BETTER_AUTH_URL=  # Optional, defaults to BASE_URL
 ADMIN_APP_URL=https://admin.example.com  # Admin dashboard origin(s), comma-separated (required in production)
 ENABLE_AUTH=true  # Set to 'false' for development (bypasses auth)
 

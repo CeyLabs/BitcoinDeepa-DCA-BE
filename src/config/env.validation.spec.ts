@@ -9,7 +9,7 @@ const prodSecrets = {
   PAYHERE_APP_SECRET: 'as',
   DIDIT_WEBHOOK_SECRET: 'd',
   BETTER_AUTH_SECRET: 'x'.repeat(32),
-  BETTER_AUTH_URL: 'https://api.example.com',
+  BASE_URL: 'https://api.example.com',
   ADMIN_APP_URL: 'https://admin.example.com',
 };
 
@@ -51,6 +51,14 @@ describe('validateEnv', () => {
         BETTER_AUTH_SECRET: 'too-short',
       }),
     ).toThrow(/BETTER_AUTH_SECRET/);
+  });
+
+  it('requires BASE_URL in production; BETTER_AUTH_URL is optional', () => {
+    const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
+    expect(() => validateEnv({ ...prod, BASE_URL: '' })).toThrow(/BASE_URL/);
+    expect(() =>
+      validateEnv({ ...prod, BETTER_AUTH_URL: 'not a url' }),
+    ).toThrow(/BETTER_AUTH_URL/);
   });
 
   it('converts numeric strings and rejects out-of-range values', () => {

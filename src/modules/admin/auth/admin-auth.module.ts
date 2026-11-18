@@ -41,7 +41,8 @@ export function createAdminAuthPool(): Pool {
           pool,
           secret: configService.get<string>('BETTER_AUTH_SECRET'),
           baseURL:
-            configService.get<string>('BETTER_AUTH_URL') ??
+            configService.get<string>('BETTER_AUTH_URL') ||
+            configService.get<string>('BASE_URL') ||
             `http://localhost:${configService.get<string>('PORT') ?? 3000}`,
           production: configService.get<string>('NODE_ENV') === 'production',
         }),

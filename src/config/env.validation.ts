@@ -53,8 +53,14 @@ class EnvironmentVariables {
   @MinLength(32)
   BETTER_AUTH_SECRET?: string;
 
+  // Public URL of this API, e.g. https://api.example.com
   @ValidateIf(isProduction)
-  @IsUrl({ require_tld: false })
+  @IsUrl({ require_tld: false, require_protocol: true })
+  BASE_URL?: string;
+
+  // Better Auth's URL; defaults to BASE_URL
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
   BETTER_AUTH_URL?: string;
 
   // Comma-separated admin dashboard origin(s), e.g. https://admin.example.com
