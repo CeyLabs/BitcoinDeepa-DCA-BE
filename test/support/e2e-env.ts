@@ -98,6 +98,8 @@ Object.assign(process.env, {
   SELL_QUOTE_TTL_SECONDS: '60',
   SELL_MIN_SATS: '1000',
   SELL_ENABLED: 'true',
+  // never inherit a developer's dev-only mock from .env
+  BITCOINDEEPA_COLLECT_MOCK: 'false',
   CEYPAY_API_URL: 'https://ceypay.invalid',
   CEYPAY_API_KEY_ID: 'ak_live_test',
   CEYPAY_API_SECRET: 'sk_live_test',
