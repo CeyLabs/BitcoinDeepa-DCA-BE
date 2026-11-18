@@ -67,7 +67,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Sessions API v3 (`/v3/session/`); late `Not Started`/`In Progress` webhooks never overwrite a final KYC result; `Resubmitted` → `IN_PROGRESS`
    - Uses strongly typed KYC status enum for database consistency
 
-10. **Admin Module** (`src/modules/admin/`) - everything behind the admin dashboard. `AdminModule` bundles one Nest module per area (`auth/` for now). Add new admin areas as sibling folders and import them in `admin.module.ts`
+10. **Admin Module** (`src/modules/admin/`) - everything behind the admin dashboard. `AdminModule` bundles one Nest module per area: `auth/`, `analytics/`, `transactions/`. Add new admin areas as sibling folders and import them in `admin.module.ts`
    - **auth/**: Better Auth (email + password) for the admin dashboard (BitcoinDeepa-Admin-FE), mounted on Express at `/api/admin-auth/*` in `app.setup.ts` (before Nest's body parsers)
    - Tables `admin_user`, `admin_session`, `admin_account`, `admin_verification` (snake_case; mapping in `admin-auth.config.ts`). Separate from the Telegram `user` table; the analytics role has no access
    - Only `role = 'admin'` users can get a session (`databaseHooks.session.create.before`); public sign-up is disabled
@@ -208,6 +208,9 @@ PORT=3000
 ### Admin dashboard
 - `/api/admin-auth/*` - Better Auth endpoints (`sign-in/email`, `sign-out`, `get-session`, ...)
 - `GET /admin/me` - Current admin (admin session cookie)
+- `GET /admin/analytics/summary` - Users, KYC, subscriptions and settled SUCCESS-payment totals (LKR, fees, sats), plus `unsettled` (SUCCESS payments whose sats weren't sent: count, LKR, sats)
+- `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily settled LKR, payment count, unsettled LKR and new users (Asia/Colombo days)
+- `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&from=&to=&q=` - Paginated transactions, newest first, with member and plan. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
@@ -375,7 +378,7 @@ src/
 │   ├── subscription/      # Subscription logic
 │   ├── transaction/       # Payment processing
 │   ├── payhere/          # PayHere integration
-│   ├── admin/            # Admin dashboard API (auth/, ...)
+│   ├── admin/            # Admin dashboard API: auth/, analytics/, transactions/
 │   └── knex/             # Database connection
 ├── migrations/           # Database schema migrations
 └── seeds/               # Initial data seeding
