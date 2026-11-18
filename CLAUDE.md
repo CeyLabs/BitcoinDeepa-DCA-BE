@@ -208,8 +208,8 @@ PORT=3000
 ### Admin dashboard
 - `/api/admin-auth/*` - Better Auth endpoints (`sign-in/email`, `sign-out`, `get-session`, ...)
 - `GET /admin/me` - Current admin (admin session cookie)
-- `GET /admin/analytics/summary` - Users, KYC, subscriptions and SUCCESS-payment totals (LKR, fees, sats)
-- `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily LKR collected, payment count and new users (Asia/Colombo days)
+- `GET /admin/analytics/summary` - Users, KYC, subscriptions and settled SUCCESS-payment totals (LKR, fees, sats), plus `unsettled` (SUCCESS payments whose sats weren't sent: count, LKR, sats)
+- `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily settled LKR, payment count, unsettled LKR and new users (Asia/Colombo days)
 - `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&from=&to=&q=` - Paginated transactions, newest first, with member and plan. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
 
 ### Transactions

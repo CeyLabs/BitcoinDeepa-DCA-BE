@@ -15,20 +15,29 @@ export interface AnalyticsSummary {
     satoshis: number;
     grossLkrLast30Days: number;
   };
+  /** SUCCESS payments whose sats were not sent (yet): awaiting settlement,
+   *  never confirmed by PayHere, or stopped after the last attempt */
+  unsettled: { count: number; grossLkr: number; satoshis: number };
 }
 
 export interface DailyPoint {
   date: string; // YYYY-MM-DD (Asia/Colombo)
+  /** Settled SUCCESS payments */
   grossLkr: number;
   payments: number;
+  /** SUCCESS payments not settled */
+  unsettledGrossLkr: number;
   newUsers: number;
 }
 
 const num = (value: unknown): number => Number(value ?? 0);
 
 /**
- * Read-only aggregates for the admin dashboard. "Collected" means SUCCESS
- * payments only (chargebacks, pending and failed are excluded).
+ * Read-only aggregates for the admin dashboard. "Collected" means SETTLED
+ * SUCCESS payments (the member got their sats). SUCCESS payments not settled
+ * (awaiting payout, never confirmed by PayHere, stopped) are reported apart,
+ * so a forged or stuck payment never inflates revenue. Chargebacks, pending
+ * and failed payments are excluded.
  */
 @Injectable()
 export class AdminAnalyticsService {
@@ -51,12 +60,15 @@ export class AdminAnalyticsService {
         p.*
       from (
         select
-          count(*) as successful,
-          coalesce(sum(gross_amount), 0) as gross,
-          coalesce(sum(net_amount), 0) as net,
-          coalesce(sum(bitcoindeepa_fee_amount), 0) as bitcoindeepa_fees,
-          coalesce(sum(satoshis_purchased), 0) as satoshis,
-          coalesce(sum(gross_amount) filter (where created_at >= now() - interval '30 days'), 0) as gross_30d
+          count(*) filter (where settled) as successful,
+          coalesce(sum(gross_amount) filter (where settled), 0) as gross,
+          coalesce(sum(net_amount) filter (where settled), 0) as net,
+          coalesce(sum(bitcoindeepa_fee_amount) filter (where settled), 0) as bitcoindeepa_fees,
+          coalesce(sum(satoshis_purchased) filter (where settled), 0) as satoshis,
+          coalesce(sum(gross_amount) filter (where settled and created_at >= now() - interval '30 days'), 0) as gross_30d,
+          count(*) filter (where not settled) as unsettled,
+          coalesce(sum(gross_amount) filter (where not settled), 0) as unsettled_gross,
+          coalesce(sum(satoshis_purchased) filter (where not settled), 0) as unsettled_satoshis
         from "transaction"
         where status = 'SUCCESS'
       ) p
@@ -81,6 +93,11 @@ export class AdminAnalyticsService {
         satoshis: num(r.satoshis),
         grossLkrLast30Days: num(r.gross_30d),
       },
+      unsettled: {
+        count: num(r.unsettled),
+        grossLkr: num(r.unsettled_gross),
+        satoshis: num(r.unsettled_satoshis),
+      },
     };
   }
 
@@ -91,6 +108,7 @@ export class AdminAnalyticsService {
         date: string;
         gross: string;
         payments: string;
+        unsettled_gross: string;
         new_users: string;
       }[];
     }>(
@@ -104,8 +122,9 @@ export class AdminAnalyticsService {
       ),
       payments as (
         select (created_at at time zone :tz)::date as date,
-               sum(gross_amount) as gross,
-               count(*) as payments
+               coalesce(sum(gross_amount) filter (where settled), 0) as gross,
+               count(*) filter (where settled) as payments,
+               coalesce(sum(gross_amount) filter (where not settled), 0) as unsettled_gross
         from "transaction"
         where status = 'SUCCESS'
           and created_at >= now() - make_interval(days => :days::int + 1)
@@ -120,6 +139,7 @@ export class AdminAnalyticsService {
       select to_char(d.date, 'YYYY-MM-DD') as date,
              coalesce(p.gross, 0) as gross,
              coalesce(p.payments, 0) as payments,
+             coalesce(p.unsettled_gross, 0) as unsettled_gross,
              coalesce(u.new_users, 0) as new_users
       from days d
       left join payments p using (date)
@@ -133,6 +153,7 @@ export class AdminAnalyticsService {
       date: row.date,
       grossLkr: num(row.gross),
       payments: num(row.payments),
+      unsettledGrossLkr: num(row.unsettled_gross),
       newUsers: num(row.new_users),
     }));
   }

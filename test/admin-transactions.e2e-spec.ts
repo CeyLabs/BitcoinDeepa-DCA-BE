@@ -119,5 +119,8 @@ describe('Admin transactions list (e2e)', () => {
     await list('?page=0').expect(400);
     await list('?status=DONE').expect(400);
     await list('?from=03-01-2026').expect(400);
+    // shaped right but impossible: 400, not a 500 from Postgres
+    await list('?from=2026-02-31').expect(400);
+    await list('?to=2026-13-01').expect(400);
   });
 });

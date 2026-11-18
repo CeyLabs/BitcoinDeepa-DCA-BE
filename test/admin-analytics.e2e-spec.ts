@@ -51,6 +51,7 @@ describe('Admin analytics (e2e)', () => {
       gross: number,
       sats: number | null,
       created_at: Date,
+      settled = status === 'SUCCESS',
     ) => ({
       payhere_pay_id: id,
       payhere_sub_id: sub,
@@ -60,15 +61,16 @@ describe('Admin analytics (e2e)', () => {
       bitcoindeepa_fee_amount: gross * 0.01,
       satoshis_purchased: sats,
       created_at,
+      settled,
     });
-    await ctx
-      .knex('transaction')
-      .insert([
-        tx('T1', 'S1', 'SUCCESS', 1000, 5000, ago(1 * MIN)),
-        tx('T3', 'S1', 'FAILED', 1000, null, ago(2 * MIN)),
-        tx('T4', 'S1', 'CHARGEBACK', 1000, 5000, ago(3 * MIN)),
-        tx('T2', 'S2', 'SUCCESS', 3000, 15000, ago(40 * DAY)),
-      ]);
+    await ctx.knex('transaction').insert([
+      tx('T1', 'S1', 'SUCCESS', 1000, 5000, ago(1 * MIN)),
+      tx('T3', 'S1', 'FAILED', 1000, null, ago(2 * MIN)),
+      tx('T4', 'S1', 'CHARGEBACK', 1000, 5000, ago(3 * MIN)),
+      tx('T2', 'S2', 'SUCCESS', 3000, 15000, ago(40 * DAY)),
+      // paid but the sats never went out (e.g. PayHere didn't confirm it)
+      tx('T5', 'S1', 'SUCCESS', 2000, 10000, ago(4 * MIN), false),
+    ]);
   });
 
   it('needs an admin session', async () => {
@@ -88,6 +90,7 @@ describe('Admin analytics (e2e)', () => {
         satoshis: 20000,
         grossLkrLast30Days: 1000,
       },
+      unsettled: { count: 1, grossLkr: 2000, satoshis: 10000 },
     });
   });
 
@@ -102,6 +105,7 @@ describe('Admin analytics (e2e)', () => {
       (body as Record<string, number>[]).reduce((sum, d) => sum + d[key], 0);
     expect(total('grossLkr')).toBe(1000);
     expect(total('payments')).toBe(1);
+    expect(total('unsettledGrossLkr')).toBe(2000);
     expect(total('newUsers')).toBe(2);
 
     await get('/admin/analytics/daily?days=10').expect(400);
