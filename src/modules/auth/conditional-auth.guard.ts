@@ -3,11 +3,12 @@ import {
   ExecutionContext,
   CanActivate,
   UnauthorizedException,
+  Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { JwtPayload } from './auth.service';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { errorMessage } from '../../common/error-message';
 
 interface RequestWithUser extends Request {
   user: JwtPayload;
@@ -15,12 +16,11 @@ interface RequestWithUser extends Request {
 
 @Injectable()
 export class ConditionalAuthGuard implements CanActivate {
-  constructor(
-    private readonly jwtService: JwtService,
-    private readonly dbLogger: DatabaseLoggerService,
-  ) {}
+  private readonly logger = new Logger(ConditionalAuthGuard.name);
 
-  async canActivate(context: ExecutionContext): Promise<boolean> {
+  constructor(private readonly jwtService: JwtService) {}
+
+  canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<RequestWithUser>();
 
     // Only allow auth bypass in development environment
@@ -29,7 +29,7 @@ export class ConditionalAuthGuard implements CanActivate {
 
     // Force authentication in production regardless of ENABLE_AUTH setting
     if (isProduction) {
-      await this.validateRequest(request);
+      this.validateRequest(request);
       return true;
     }
 
@@ -41,33 +41,30 @@ export class ConditionalAuthGuard implements CanActivate {
         id: mockUserId,
         username: 'dev-username',
       };
-      await this.dbLogger.info(
+      this.logger.log(
         `Development mode: Authentication bypassed for mock user ${mockUserId}`,
       );
       return true;
     }
 
-    await this.validateRequest(request);
+    this.validateRequest(request);
     return true;
   }
 
-  private async validateRequest(request: RequestWithUser): Promise<void> {
+  private validateRequest(request: RequestWithUser): void {
     const token = this.extractTokenFromHeader(request);
     if (!token) {
-      await this.dbLogger.warn(
-        'Unauthorized access attempt: No Bearer token provided',
-      );
+      this.logger.warn('Unauthorized access attempt: No Bearer token provided');
       throw new UnauthorizedException();
     }
     try {
       const payload = this.jwtService.verify<JwtPayload>(token);
       request.user = payload;
-      await this.dbLogger.info(
-        `Successful JWT validation for user: ${payload.id}`,
-      );
+      // debug = console only; logging every request to the DB is noise
+      this.logger.debug(`Successful JWT validation for user: ${payload.id}`);
     } catch (error) {
-      await this.dbLogger.warn(
-        `JWT verification failed in guard: ${error.message}`,
+      this.logger.warn(
+        `JWT verification failed in guard: ${errorMessage(error)}`,
       );
       throw new UnauthorizedException();
     }

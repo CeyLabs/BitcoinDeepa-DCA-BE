@@ -1,315 +1,202 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
-import Redis from 'ioredis';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
+import Redis, { RedisOptions } from 'ioredis';
+import { errorMessage } from '../../common/error-message';
 
 export interface CacheOptions {
+  /** TTL in seconds */
   ttl?: number;
-  compress?: boolean;
 }
 
+/**
+ * JSON cache backed by Redis (ioredis). Cache calls never throw: if Redis is
+ * not configured or unreachable they behave as cache misses.
+ *
+ * There is deliberately no in-memory fallback: a per-process cache silently
+ * diverges between instances, and local dev already gets Redis from
+ * docker-compose. No Redis = no caching, which is always correct.
+ */
 @Injectable()
-export class RedisService {
+export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
-  private redis: Redis;
+  private readonly defaultTtlSeconds = parseInt(
+    process.env.REDIS_TTL_DEFAULT || '300',
+    10,
+  );
+  private redis: Redis | null = null;
 
-  constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {
-    this.logger.log('Redis service initialized with cache manager');
-
-    // Try to get Redis client for advanced operations (optional)
-    setTimeout(() => {
-      try {
-        const store = (this.cacheManager as any).store;
-        // Try different ways to access Redis client
-        if (store?.client) {
-          this.redis = store.client;
-          this.setupEventHandlers();
-        } else if (store?.redis) {
-          this.redis = store.redis;
-          this.setupEventHandlers();
-        } else if (store?.connection) {
-          this.redis = store.connection;
-          this.setupEventHandlers();
-        }
-      } catch (error) {
-        // Redis direct client not available, using cache manager only
-      }
-    }, 1000);
-  }
-
-  private setupEventHandlers(): void {
-    if (!this.redis) return;
-
-    this.redis.on('connect', () => {
-      this.logger.log('Redis connected successfully');
-    });
-
-    this.redis.on('error', (error) => {
-      this.logger.error('Redis connection error:', error);
-    });
-
-    this.redis.on('ready', () => {
-      this.logger.log('Redis is ready to accept commands');
-    });
-
-    this.redis.on('reconnecting', () => {
-      this.logger.warn('Redis reconnecting...');
-    });
-  }
-
-  /**
-   * Check if caching is available (cache manager or direct Redis)
-   */
-  private isCacheAvailable(): boolean {
-    return !!this.cacheManager;
-  }
-
-  /**
-   * Check if direct Redis operations are available
-   */
-  private isRedisAvailable(): boolean {
-    return !!this.redis;
-  }
-
-  /**
-   * Get a value from cache
-   */
-  async get<T>(key: string): Promise<T | null> {
-    if (!this.isCacheAvailable()) {
-      this.logger.debug(`Cache not available for key: ${key}`);
-      return null;
-    }
-
-    try {
-      const value = await this.cacheManager.get<T>(key);
-      if (value) {
-        this.logger.debug(`Cache HIT for key: ${key}`);
-      } else {
-        this.logger.debug(`Cache MISS for key: ${key}`);
-      }
-      return value || null;
-    } catch (error) {
-      this.logger.error(`Error getting cache key ${key}:`, error);
-      return null;
-    }
-  }
-
-  /**
-   * Set a value in cache
-   */
-  async set<T>(key: string, value: T, options?: CacheOptions): Promise<void> {
-    if (!this.isCacheAvailable()) {
-      this.logger.debug(`Cache not available for key: ${key}`);
+  async onModuleInit(): Promise<void> {
+    const options = this.buildOptions();
+    if (!options) {
+      this.logger.warn('REDIS_URL / REDIS_HOST not set - caching disabled');
       return;
     }
 
+    this.redis = new Redis(options);
+    this.redis.on('error', (error) =>
+      this.logger.error(`Redis error: ${errorMessage(error)}`),
+    );
+    this.redis.on('reconnecting', () => this.logger.warn('Redis reconnecting'));
+
     try {
-      const ttl = options?.ttl ? options.ttl * 1000 : undefined; // Convert to milliseconds
-      await this.cacheManager.set(key, value, ttl);
-      this.logger.debug(
-        `Cache SET for key: ${key}, TTL: ${options?.ttl || 'default'}`,
+      await this.redis.connect();
+      this.logger.log('Redis connected');
+    } catch (error) {
+      // ioredis keeps retrying in the background; cache calls are misses until then
+      this.logger.error(
+        `Initial Redis connection failed: ${errorMessage(error)}`,
       );
-    } catch (error) {
-      this.logger.error(`Error setting cache key ${key}:`, error);
     }
   }
 
-  /**
-   * Delete a key from cache
-   */
-  async del(key: string): Promise<void> {
-    if (!this.isCacheAvailable()) {
-      this.logger.debug(`Cache not available for key: ${key}`);
-      return;
-    }
-
-    try {
-      await this.cacheManager.del(key);
-      this.logger.debug(`Cache DEL for key: ${key}`);
-    } catch (error) {
-      this.logger.error(`Error deleting cache key ${key}:`, error);
+  async onModuleDestroy(): Promise<void> {
+    if (this.redis) {
+      await this.redis.quit().catch(() => this.redis?.disconnect());
     }
   }
 
-  /**
-   * Get multiple keys at once
-   */
-  async mget<T>(keys: string[]): Promise<(T | null)[]> {
-    try {
-      const values = await Promise.all(keys.map((key) => this.get<T>(key)));
-      this.logger.debug(`Cache MGET for keys: ${keys.join(', ')}`);
-      return values;
-    } catch (error) {
-      this.logger.error(`Error getting multiple cache keys:`, error);
-      return keys.map(() => null);
+  private buildOptions(): RedisOptions | null {
+    const base: RedisOptions = {
+      maxRetriesPerRequest: 3,
+      enableReadyCheck: true,
+      connectTimeout: 30000,
+      commandTimeout: 10000,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      keepAlive: 30000,
+    };
+
+    if (process.env.REDIS_URL) {
+      const url = new URL(process.env.REDIS_URL);
+      return {
+        ...base,
+        host: url.hostname,
+        port: parseInt(url.port, 10) || 6379,
+        db: parseInt(url.pathname.slice(1), 10) || 0,
+        username: url.username || undefined,
+        password: url.password ? decodeURIComponent(url.password) : undefined,
+        tls: url.protocol === 'rediss:' ? {} : undefined,
+      };
     }
+
+    if (process.env.REDIS_HOST) {
+      return {
+        ...base,
+        host: process.env.REDIS_HOST,
+        port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        db: parseInt(process.env.REDIS_DATABASE || '0', 10),
+        username: process.env.REDIS_USERNAME || undefined,
+        password: process.env.REDIS_PASSWORD || undefined,
+      };
+    }
+
+    return null;
   }
 
-  /**
-   * Set multiple key-value pairs
-   */
-  async mset<T>(
-    pairs: Array<{ key: string; value: T; ttl?: number }>,
-  ): Promise<void> {
+  async ping(): Promise<boolean> {
+    if (!this.redis) return true; // caching disabled is not a failure
     try {
-      await Promise.all(
-        pairs.map((pair) => this.set(pair.key, pair.value, { ttl: pair.ttl })),
-      );
-      this.logger.debug(
-        `Cache MSET for keys: ${pairs.map((p) => p.key).join(', ')}`,
-      );
-    } catch (error) {
-      this.logger.error(`Error setting multiple cache keys:`, error);
-    }
-  }
-
-  /**
-   * Check if a key exists
-   */
-  async exists(key: string): Promise<boolean> {
-    if (!this.isRedisAvailable()) return false;
-
-    try {
-      const result = await this.redis.exists(key);
-      return result === 1;
-    } catch (error) {
-      this.logger.error(`Error checking cache key existence ${key}:`, error);
+      return (await this.redis.ping()) === 'PONG';
+    } catch {
       return false;
     }
   }
 
-  /**
-   * Set expiration for a key
-   */
-  async expire(key: string, seconds: number): Promise<void> {
-    if (!this.isRedisAvailable()) return;
-
+  async get<T>(key: string): Promise<T | null> {
+    if (!this.redis) return null;
     try {
-      await this.redis.expire(key, seconds);
-      this.logger.debug(`Cache EXPIRE for key: ${key}, seconds: ${seconds}`);
+      const raw = await this.redis.get(key);
+      return raw === null ? null : (JSON.parse(raw) as T);
     } catch (error) {
-      this.logger.error(
-        `Error setting expiration for cache key ${key}:`,
-        error,
-      );
+      this.logger.warn(`Cache GET failed for ${key}: ${String(error)}`);
+      return null;
+    }
+  }
+
+  async set<T>(key: string, value: T, options?: CacheOptions): Promise<void> {
+    if (!this.redis) return;
+    const ttl = options?.ttl ?? this.defaultTtlSeconds;
+    try {
+      await this.redis.set(key, JSON.stringify(value), 'EX', ttl);
+    } catch (error) {
+      this.logger.warn(`Cache SET failed for ${key}: ${String(error)}`);
     }
   }
 
   /**
-   * Delete keys by pattern
+   * Atomically claim `key` for `ttlSeconds` (SET NX). true = claimed now,
+   * false = already claimed. With Redis unavailable it answers true, so a
+   * cache outage never blocks the caller (claims are a best-effort dedupe).
    */
+  async setIfAbsent(key: string, ttlSeconds: number): Promise<boolean> {
+    if (!this.redis) return true;
+    try {
+      return (await this.redis.set(key, '1', 'EX', ttlSeconds, 'NX')) === 'OK';
+    } catch (error) {
+      this.logger.warn(`Cache SET NX failed for ${key}: ${String(error)}`);
+      return true;
+    }
+  }
+
+  /**
+   * Return the cached value, or run `loader`, cache its result and return it.
+   * null/undefined results are not cached.
+   */
+  async getOrSet<T>(
+    key: string,
+    ttlSeconds: number,
+    loader: () => Promise<T | null | undefined>,
+  ): Promise<T | null> {
+    const cached = await this.get<T>(key);
+    if (cached !== null) {
+      return cached;
+    }
+    const value = await loader();
+    if (value === null || value === undefined) {
+      return null;
+    }
+    await this.set(key, value, { ttl: ttlSeconds });
+    return value;
+  }
+
+  async del(key: string): Promise<void> {
+    if (!this.redis) return;
+    try {
+      await this.redis.del(key);
+    } catch (error) {
+      this.logger.warn(`Cache DEL failed for ${key}: ${String(error)}`);
+    }
+  }
+
+  /** Delete keys matching a glob pattern (uses SCAN, not KEYS). */
   async delByPattern(pattern: string): Promise<number> {
-    if (!this.isRedisAvailable()) return 0;
-
+    if (!this.redis) return 0;
     try {
-      const keys = await this.redis.keys(pattern);
-      if (keys.length > 0) {
-        const deleted = await this.redis.del(...keys);
-        this.logger.debug(
-          `Cache DEL by pattern: ${pattern}, deleted ${deleted} keys`,
+      let deleted = 0;
+      let cursor = '0';
+      do {
+        const [next, keys] = await this.redis.scan(
+          cursor,
+          'MATCH',
+          pattern,
+          'COUNT',
+          200,
         );
-        return deleted;
-      }
-      return 0;
+        cursor = next;
+        if (keys.length > 0) {
+          deleted += await this.redis.del(...keys);
+        }
+      } while (cursor !== '0');
+      return deleted;
     } catch (error) {
-      this.logger.error(
-        `Error deleting cache keys by pattern ${pattern}:`,
-        error,
+      this.logger.warn(
+        `Cache DEL pattern failed for ${pattern}: ${String(error)}`,
       );
       return 0;
     }
-  }
-
-  /**
-   * Clear all cache (use with caution)
-   */
-  async clear(): Promise<void> {
-    if (!this.isRedisAvailable()) return;
-
-    try {
-      await this.redis.flushdb();
-      this.logger.warn('Cache cleared (FLUSHDB)');
-    } catch (error) {
-      this.logger.error('Error clearing cache:', error);
-    }
-  }
-
-  /**
-   * Get cache statistics
-   */
-  async getStats(): Promise<{
-    keys: number;
-    memoryUsage: string;
-    hits: number;
-    misses: number;
-  }> {
-    if (!this.isRedisAvailable()) {
-      return { keys: 0, memoryUsage: '0B', hits: 0, misses: 0 };
-    }
-
-    try {
-      const info = await this.redis.info('stats');
-      const keyspace = await this.redis.info('keyspace'); // cspell:disable-line
-      const memory = await this.redis.info('memory');
-
-      // Parse info strings
-      const statsMatch = info.match(/keyspace_hits:(\d+)/); // cspell:disable-line
-      const missesMatch = info.match(/keyspace_misses:(\d+)/); // cspell:disable-line
-      const memoryMatch = memory.match(/used_memory_human:([^\r\n]+)/);
-      const keysMatch = keyspace.match(/keys=(\d+)/); // cspell:disable-line
-
-      return {
-        keys: keysMatch ? parseInt(keysMatch[1]) : 0,
-        memoryUsage: memoryMatch ? memoryMatch[1] : '0B',
-        hits: statsMatch ? parseInt(statsMatch[1]) : 0,
-        misses: missesMatch ? parseInt(missesMatch[1]) : 0,
-      };
-    } catch (error) {
-      this.logger.error('Error getting cache stats:', error);
-      return { keys: 0, memoryUsage: '0B', hits: 0, misses: 0 };
-    }
-  }
-
-  /**
-   * Generate cache key with consistent pattern
-   */
-  generateKey(prefix: string, ...parts: (string | number)[]): string {
-    return `dca:${prefix}:${parts.join(':')}`;
-  }
-
-  /**
-   * Invalidate user-specific caches
-   */
-  async invalidateUserCache(userId: string): Promise<void> {
-    try {
-      const patterns = [
-        this.generateKey('subscription', 'user', userId),
-        this.generateKey('transactions', 'user', userId, '*'),
-        this.generateKey('transaction', 'latest', 'user', userId),
-        this.generateKey('dca', 'summary', 'user', userId),
-        this.generateKey('user', 'profile', userId),
-      ];
-
-      let totalDeleted = 0;
-      for (const pattern of patterns) {
-        const deleted = await this.delByPattern(pattern);
-        totalDeleted += deleted;
-      }
-
-      this.logger.log(
-        `Invalidated ${totalDeleted} cache entries for user ${userId}`,
-      );
-    } catch (error) {
-      this.logger.error(`Error invalidating user cache for ${userId}:`, error);
-    }
-  }
-
-  /**
-   * Warm up cache with frequently accessed data
-   */
-  async warmupCache(): Promise<void> {
-    this.logger.log('Starting cache warmup...');
-    // This will be implemented when we add specific cache warming strategies
-    this.logger.log('Cache warmup completed');
   }
 }

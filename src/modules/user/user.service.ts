@@ -1,6 +1,29 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
-import { KycStatus, KycStatusType } from './enums/kyc-status.enum';
+import {
+  DiditStatusMapping,
+  KycStatus,
+  KycStatusType,
+} from './enums/kyc-status.enum';
+
+const REJECTION_REASONS: Record<string, string> = {
+  Expired: 'Verification session expired',
+  Abandoned: 'Verification was abandoned by user',
+  'Kyc Expired': 'Previous KYC verification has expired',
+  'In Review': 'Verification is under manual review',
+  Resubmitted: 'Reviewer asked to redo some verification steps',
+};
+
+// Once a session has one of these results, a late "Not Started"/"In Progress"
+// update for the same session must not overwrite it.
+const FINAL_KYC_STATUSES: string[] = [
+  KycStatus.APPROVED,
+  KycStatus.DECLINED,
+  KycStatus.IN_REVIEW,
+  KycStatus.EXPIRED,
+  KycStatus.ABANDONED,
+  KycStatus.KYC_EXPIRED,
+];
 
 export interface User {
   id: string;
@@ -41,8 +64,17 @@ export interface KycStatusUpdate {
   kyc_rejection_reason?: string | null;
 }
 
+export interface KycStatusInfo {
+  status: KycStatusType;
+  verified_at?: Date;
+  rejection_reason?: string;
+  session_id?: string;
+}
+
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
+
   constructor(private readonly knexService: KnexService) {}
 
   async upsertTelegramUser(profile: TelegramProfile): Promise<void> {
@@ -57,7 +89,10 @@ export class UserService {
       .merge({
         first_name: profile.first_name,
         last_name: profile.last_name ?? null,
-      });
+      })
+      // Once the user completes their profile (legal name used for PayHere
+      // billing), stop overwriting it with their Telegram display name.
+      .whereNull('user.email');
   }
 
   async updateProfileDetails(
@@ -69,6 +104,14 @@ export class UserService {
 
   async getUserById(id: string): Promise<User | undefined> {
     return this.knexService.knex<User>('user').where('id', id).first();
+  }
+
+  async getUserOrThrow(id: string): Promise<User> {
+    const user = await this.getUserById(id);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return user;
   }
 
   async userExists(id: string): Promise<boolean> {
@@ -93,6 +136,55 @@ export class UserService {
     });
   }
 
+  /**
+   * Save a Didit verification result (from the webhook, or read back from
+   * Didit when the webhook was missed). Returns the stored status, or null
+   * when the update was ignored.
+   */
+  async applyDiditResult(
+    userId: string,
+    currentStatus: string | undefined,
+    didit: { status: string; failure_reason?: string | null },
+  ): Promise<KycStatus | null> {
+    const dbStatus = DiditStatusMapping[didit.status];
+    if (!dbStatus) {
+      // e.g. "Awaiting User" (KYB only) - nothing to do for a KYC user
+      this.logger.warn(`Ignoring Didit status: ${didit.status}`);
+      return null;
+    }
+
+    const isProgressUpdate =
+      didit.status === 'Not Started' || didit.status === 'In Progress';
+    if (
+      isProgressUpdate &&
+      currentStatus &&
+      FINAL_KYC_STATUSES.includes(currentStatus)
+    ) {
+      this.logger.warn(
+        `Ignoring late "${didit.status}" update for user ${userId} (already ${currentStatus})`,
+      );
+      return null;
+    }
+
+    const approved = didit.status === 'Approved';
+    const rejectionReason = approved
+      ? null
+      : didit.status === 'Declined'
+        ? didit.failure_reason || 'Verification declined'
+        : (REJECTION_REASONS[didit.status] ?? null);
+
+    await this.updateKycStatus(userId, {
+      kyc_status: dbStatus,
+      kyc_verified_at: approved ? new Date() : null,
+      kyc_rejection_reason: rejectionReason,
+    });
+
+    this.logger.log(
+      `Updated KYC status for user ${userId} to ${dbStatus} (Didit: ${didit.status}${rejectionReason ? `, reason: ${rejectionReason}` : ''})`,
+    );
+    return dbStatus;
+  }
+
   async updateKycStatus(
     userId: string,
     kycUpdate: KycStatusUpdate,
@@ -107,22 +199,11 @@ export class UserService {
       .first();
   }
 
-  async isKycVerified(userId: string): Promise<boolean> {
-    const user = await this.getUserById(userId);
-    return user?.kyc_status === KycStatus.APPROVED;
+  async getKycStatus(userId: string): Promise<KycStatusInfo> {
+    return this.toKycStatus(await this.getUserOrThrow(userId));
   }
 
-  async getKycStatus(userId: string): Promise<{
-    status: KycStatusType;
-    verified_at?: Date;
-    rejection_reason?: string;
-    session_id?: string;
-  } | null> {
-    const user = await this.getUserById(userId);
-    if (!user) {
-      return null;
-    }
-
+  toKycStatus(user: User): KycStatusInfo {
     return {
       status: user.kyc_status || KycStatus.NOT_STARTED,
       verified_at: user.kyc_verified_at,

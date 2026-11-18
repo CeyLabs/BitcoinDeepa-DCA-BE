@@ -7,6 +7,7 @@ import { KnexModule } from '../knex/knex.module';
 import { RedisModule } from '../redis/redis.module';
 import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module';
 import { BitcoinDeepaModule } from '../bitcoindeepa/bitcoindeepa.module';
+import { PayHereModule } from '../payhere/payhere.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { BitcoinDeepaModule } from '../bitcoindeepa/bitcoindeepa.module';
     RedisModule,
     TelegramLoggerModule,
     BitcoinDeepaModule,
+    PayHereModule,
   ],
   controllers: [TransactionController],
   providers: [TransactionService],

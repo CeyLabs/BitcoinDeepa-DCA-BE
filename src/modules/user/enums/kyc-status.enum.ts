@@ -19,18 +19,9 @@ export const DiditStatusMapping: Record<string, KycStatus> = {
   'In Review': KycStatus.IN_REVIEW,
   Expired: KycStatus.EXPIRED,
   Abandoned: KycStatus.ABANDONED,
-};
-
-// Reverse mapping from our database values to Didit's API values
-export const DatabaseToDiditMapping: Record<KycStatus, string> = {
-  [KycStatus.NOT_STARTED]: 'Not Started',
-  [KycStatus.IN_PROGRESS]: 'In Progress',
-  [KycStatus.APPROVED]: 'Approved',
-  [KycStatus.DECLINED]: 'Declined',
-  [KycStatus.KYC_EXPIRED]: 'Kyc Expired',
-  [KycStatus.IN_REVIEW]: 'In Review',
-  [KycStatus.EXPIRED]: 'Expired',
-  [KycStatus.ABANDONED]: 'Abandoned',
+  // Reviewer asked the user to redo some steps on the same session
+  Resubmitted: KycStatus.IN_PROGRESS,
+  // 'Awaiting User' is KYB-only and intentionally not mapped
 };
 
 export type KycStatusType = `${KycStatus}`;
@@ -42,4 +33,6 @@ export type DiditStatusType =
   | 'Kyc Expired'
   | 'In Review'
   | 'Expired'
-  | 'Abandoned';
+  | 'Abandoned'
+  | 'Resubmitted'
+  | 'Awaiting User';

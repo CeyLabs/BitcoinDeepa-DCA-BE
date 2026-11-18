@@ -1,42 +1,32 @@
 import {
+  BadRequestException,
   Injectable,
-  InternalServerErrorException,
+  NotFoundException,
   Logger,
-  UnauthorizedException,
 } from '@nestjs/common';
-import { createHash } from 'crypto';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { createHash, timingSafeEqual } from 'crypto';
+import type { Knex } from 'knex';
+import Big from 'big.js';
 import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
-import {
-  BitcoinDeepaService,
-  UserBalanceResponse,
-} from '../bitcoindeepa/bitcoindeepa.service';
-import Big from 'big.js';
+import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
+import { PayHereService } from '../payhere/payhere.service';
+import { PayHereNotificationDto } from './dto/payhere-notification.dto';
+import { errorMessage } from '../../common/error-message';
 
-export interface PayHereNotificationParams {
-  merchant_id: string;
-  order_id: string;
-  payment_id: string;
-  subscription_id: string;
-  payhere_amount: string;
-  payhere_currency: string;
-  status_code: string;
-  md5sig: string;
-  custom_1?: string; // user_id
-  custom_2?: string; // package_id (if we add it)
-}
+export type PayHereNotificationParams = PayHereNotificationDto;
 
-type Status = 'SUCCESS' | 'PENDING' | 'CANCELLED' | 'FAILED' | 'CHARGEBACK';
-
-export enum PaymentProcessor {
-  PAYHERE = 'PAYHERE',
-  CEYPAY = 'CEYPAY',
-}
+export type Status =
+  | 'SUCCESS'
+  | 'PENDING'
+  | 'CANCELLED'
+  | 'FAILED'
+  | 'CHARGEBACK';
 
 export interface Transaction {
   payhere_pay_id: string;
@@ -59,241 +49,355 @@ export interface Transaction {
   updated_at?: Date;
 }
 
-function md5String(input: string): string {
-  return createHash('md5').update(input).digest('hex');
+type BitcoinData = Pick<
+  Transaction,
+  | 'btc_price_at_purchase'
+  | 'satoshis_purchased'
+  | 'price_currency'
+  | 'coingecko_timestamp'
+  | 'gross_amount'
+  | 'payment_processor_fee_basis_points'
+  | 'payment_processor_fee_amount'
+  | 'bitcoindeepa_fee_basis_points'
+  | 'bitcoindeepa_fee_amount'
+  | 'net_amount'
+>;
+
+export interface DcaSummary {
+  dca: {
+    balance: number;
+    /** Amount that went into BTC (after fees) */
+    spent: number;
+    /** Payment processor + BitcoinDeepa fees on those purchases */
+    fees: number;
+    avg_btc_price: number;
+  };
+  total_balance: number;
+  total_lkr: string;
+  currency: string;
+  '24_hr_change': number;
+  current_btc_price?: {
+    usd: number;
+    lkr: number;
+  };
+}
+
+export interface PaginatedTransactions {
+  transactions: Transaction[];
+  total_count: number;
+  total_pages: number;
+  current_page: number;
+  has_more: boolean;
+}
+
+const SATOSHIS_PER_BTC = 100_000_000;
+
+// Unpriced payments older than this are alerted, not auto-priced and paid.
+const BACKFILL_MAX_AGE_HOURS = 24;
+
+const PACKAGE_COLUMNS = [
+  'p.amount as package_amount',
+  'p.currency as package_currency',
+  'p.name as package_name',
+  'p.frequency as package_frequency',
+];
+
+function md5Upper(input: string): string {
+  return createHash('md5').update(input).digest('hex').toUpperCase();
 }
 
 @Injectable()
 export class TransactionService {
+  private readonly logger = new Logger(TransactionService.name);
+
   constructor(
     private readonly knexService: KnexService,
     private readonly bitcoinPriceService: BitcoinPriceService,
-    private readonly dbLogger: DatabaseLoggerService,
     private readonly redisService: RedisService,
     private readonly telegramLoggerService: TelegramLoggerService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
+    private readonly payHereService: PayHereService,
   ) {}
 
-  private readonly logger = new Logger(TransactionService.name);
-
-  async resetRetryCounts(): Promise<{ reset_count: number }> {
+  /**
+   * Re-enable settlement for ONE payment, after a human has checked it.
+   * Deliberately not a bulk reset: rows stopped with an unknown outcome (e.g.
+   * a timeout) may already have been paid, so each needs checking on
+   * BitcoinDeepa before it is retried.
+   *
+   * Payments attempted before the memo became `DCA purchase (Ref: <id>)` were
+   * sent as `<package> DCA plan (Ref: <id>)`. The bot dedupes on the memo, so
+   * it won't recognise a retry of one of those: check those by hand first.
+   */
+  async resetRetryCount(
+    payhere_pay_id: string,
+  ): Promise<{ payhere_pay_id: string }> {
     const updated = await this.knexService
       .knex('transaction')
-      .where('settled', false)
-      .update({ retry_count: 0 });
+      .where({ payhere_pay_id, settled: false })
+      .update({ retry_count: 0, last_retry_at: null });
+    if (!updated) {
+      throw new NotFoundException(
+        `No unsettled transaction with payment_id ${payhere_pay_id}`,
+      );
+    }
 
-    await this.dbLogger.info(
-      `Reset retry_count to 0 for ${updated} unsettled transaction(s)`,
-    );
-
-    return { reset_count: updated };
+    this.logger.warn(`Settlement retries reset for ${payhere_pay_id}`);
+    return { payhere_pay_id };
   }
 
+  /**
+   * PayHere md5sig = MD5(merchant_id + order_id + amount + currency +
+   * status_code + MD5(merchant_secret)). Note it does NOT cover payment_id,
+   * subscription_id or custom_* - those are cross-checked against the DB in
+   * handlePayHereNotification (order_id + user binding), which stops a
+   * captured notification being reused for another user or subscription.
+   *
+   * A replay with an invented payment_id still passes this check, and
+   * getting a genuine signed notification is easy: notify_url is an unsigned
+   * checkout parameter, so a payer can point it at their own server. Such
+   * payments are recorded but never paid out - settlement only pays a
+   * payment_id that PayHere's API lists as RECEIVED.
+   */
+  isValidPayHereSignature(data: PayHereNotificationParams): boolean {
+    const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
+    if (!merchantSecret || !data.md5sig) {
+      return false;
+    }
+
+    const expected = md5Upper(
+      `${data.merchant_id}${data.order_id}${data.payhere_amount}${data.payhere_currency}${data.status_code}${md5Upper(merchantSecret)}`,
+    );
+    const received = String(data.md5sig).toUpperCase();
+
+    return (
+      expected.length === received.length &&
+      timingSafeEqual(Buffer.from(expected), Buffer.from(received))
+    );
+  }
+
+  /**
+   * Who a notification's payment belongs to, from our own records (never
+   * custom_1). For logging; resolveSubscription is what actually decides.
+   */
+  async getNotificationOwner(
+    order_id: string,
+    subscription_id: string,
+  ): Promise<string | null> {
+    const sub = await this.knexService
+      .knex<Subscription>('subscription')
+      .select('user_id')
+      .where('payhere_sub_id', subscription_id)
+      .first();
+    if (sub) return sub.user_id;
+    const order = await this.knexService
+      .knex<{ order_id: string; user_id: string }>('payhere_order')
+      .select('user_id')
+      .where('order_id', order_id)
+      .first();
+    return order?.user_id ?? null;
+  }
+
+  /**
+   * Record a PayHere notification. The caller must have checked
+   * isValidPayHereSignature first (the controller does, before anything is
+   * logged).
+   */
   async handlePayHereNotification(
     data: PayHereNotificationParams,
   ): Promise<void> {
     const {
-      merchant_id,
       order_id,
       payhere_amount,
       payhere_currency,
       status_code,
-      md5sig,
       payment_id,
       subscription_id,
-      custom_1: user_id,
-      custom_2: package_id,
+      message_type,
+      item_rec_status,
     } = data;
 
-    const merchant_secret = String(process.env.PAYHERE_MERCHANT_SECRET);
-    const local_md5sig = md5String(
-      merchant_id +
-        order_id +
-        payhere_amount +
-        payhere_currency +
-        status_code +
-        md5String(merchant_secret).toUpperCase(),
-    ).toUpperCase();
-
-    // If the calculated signature does not match the one provided by PayHere
-    // the notification may have been tampered with. In that case we reject it.
-    if (local_md5sig !== md5sig) {
-      await this.dbLogger.error(
-        `MD5 signature verification failed for payment_id ${payment_id}, order_id ${order_id}: expected ${local_md5sig}, received ${md5sig}`,
+    if (!payment_id || !subscription_id || Number(subscription_id) < 0) {
+      this.logger.error(
+        `Invalid payment/subscription id: payment_id=${payment_id}, subscription_id=${subscription_id}`,
       );
-      throw new UnauthorizedException('Md5 verification failed');
+      throw new BadRequestException('Invalid payment or subscription id');
     }
 
-    await this.dbLogger.info(
-      `MD5 signature verified for payment_id ${payment_id}, order_id ${order_id}`,
-    );
-
     const status = this.getPayHereStatusMapped(status_code);
-    await this.dbLogger.info(
+    this.logger.log(
       `Processing PayHere notification: payment_id=${payment_id}, subscription_id=${subscription_id}, status=${status}, amount=${payhere_amount} ${payhere_currency}`,
     );
 
-    if (!subscription_id || Number(subscription_id) < 0) {
-      await this.dbLogger.error(
-        `Invalid subscription id: ${subscription_id} for payment_id ${payment_id}`,
-      );
-      throw new InternalServerErrorException('Invalid subscription id');
-    }
-
-    // Pre-fetch Bitcoin data outside transaction to avoid long-running transactions
-    let bitcoinDataForUpdate: any = null;
-    let bitcoinDataForNew: any = null;
-
-    // Check if we need Bitcoin data for existing transaction update
-    const existingTransaction = await this.knexService
+    // Pre-fetch Bitcoin data outside the DB transaction to keep it short
+    const existing = await this.knexService
       .knex<Transaction>('transaction')
       .where('payhere_pay_id', payment_id)
       .first();
 
+    let bitcoinData: BitcoinData | null = null;
     if (
-      existingTransaction &&
       status === 'SUCCESS' &&
-      !existingTransaction.satoshis_purchased
+      (!existing ||
+        (existing.status !== 'CHARGEBACK' && !existing.satoshis_purchased))
     ) {
-      await this.dbLogger.info(
-        `Pre-fetching Bitcoin data for existing transaction ${payment_id}`,
-      );
-      bitcoinDataForUpdate = await this.fetchBitcoinDataForTransaction(
+      bitcoinData = await this.fetchBitcoinDataForTransaction(
         parseFloat(payhere_amount),
         payhere_currency,
-        PaymentProcessor.PAYHERE,
       );
     }
 
-    // Pre-fetch Bitcoin data for new successful transactions
-    if (!existingTransaction && status === 'SUCCESS') {
-      await this.dbLogger.info(
-        `Pre-fetching Bitcoin data for new transaction ${payment_id}`,
-      );
-      bitcoinDataForNew = await this.fetchBitcoinDataForTransaction(
-        parseFloat(payhere_amount),
-        payhere_currency,
-        PaymentProcessor.PAYHERE,
-      );
-    }
+    // PayHere stopped (retries exhausted / cancelled) or completed the plan
+    const subscriptionEnded =
+      item_rec_status === '-1' ||
+      item_rec_status === '1' ||
+      message_type === 'RECURRING_STOPPED' ||
+      message_type === 'RECURRING_COMPLETE';
 
-    // Use atomic transaction for all database operations only
+    const alerts: string[] = [];
+    // Set when this notification is what made the payment SUCCESS (a resent
+    // SUCCESS must not re-activate a plan the user has since cancelled).
+    let becameSuccess = false;
+    let duplicate: { payhere_sub_id: string; activeSubId: string } | null =
+      null;
+    let createdSubscription: { user_id: string; package_id: string } | null =
+      null;
+    let subscriptionUserId = '';
+
     const trx = await this.knexService.knex.transaction();
-
     try {
-      await this.dbLogger.info(
-        `Starting atomic processing for payment_id ${payment_id}`,
-      );
+      const { subscription, created } = await this.resolveSubscription(trx, {
+        subscription_id,
+        order_id,
+        status,
+      });
+      subscriptionUserId = subscription.user_id;
+      if (created) {
+        createdSubscription = {
+          user_id: subscription.user_id,
+          package_id: subscription.package_id,
+        };
+      }
 
-      // Re-check if transaction exists within transaction (for consistency)
-      const currentTransaction = await trx('transaction')
+      if (subscriptionEnded && subscription.is_active) {
+        await trx('subscription')
+          .update({ is_active: false, updated_at: trx.fn.now() })
+          .where('payhere_sub_id', subscription_id);
+        alerts.push(
+          `PayHere ended subscription ${subscription_id} (user ${subscription.user_id}): message_type=${message_type ?? '-'}, item_rec_status=${item_rec_status ?? '-'}. Marked inactive.`,
+        );
+      }
+
+      const current: Transaction | undefined = await trx('transaction')
         .where('payhere_pay_id', payment_id)
+        .forUpdate()
         .first();
 
-      if (currentTransaction) {
-        await this.dbLogger.info(
-          `Updating existing transaction ${payment_id}: ${currentTransaction.status} → ${status}`,
-        );
-
-        const updateData: Partial<Transaction> = { status };
-
-        // Add pre-fetched Bitcoin data if available
-        if (bitcoinDataForUpdate) {
-          Object.assign(updateData, bitcoinDataForUpdate);
-          await this.dbLogger.info(
-            `Bitcoin data added to transaction ${payment_id}: ${bitcoinDataForUpdate.satoshis_purchased} sats at ${bitcoinDataForUpdate.btc_price_at_purchase} ${bitcoinDataForUpdate.price_currency}`,
+      if (current) {
+        if (current.payhere_sub_id !== subscription_id) {
+          throw new BadRequestException(
+            'payment_id belongs to a different subscription',
           );
         }
 
-        await trx('transaction')
-          .update(updateData)
-          .where('payhere_pay_id', payment_id);
+        if (!this.isAllowedTransition(current.status, status)) {
+          this.logger.warn(
+            `Ignoring status change ${current.status} → ${status} for payment_id ${payment_id} (out-of-order or duplicate notification)`,
+          );
+        } else {
+          const update: Partial<Transaction> = { status };
+          if (bitcoinData && !current.satoshis_purchased) {
+            Object.assign(update, bitcoinData);
+          }
+          await trx('transaction')
+            .update(update)
+            .where('payhere_pay_id', payment_id);
+          becameSuccess = status === 'SUCCESS' && current.status !== 'SUCCESS';
 
-        await this.dbLogger.info(
-          `Transaction ${payment_id} updated successfully`,
-        );
+          if (status === 'CHARGEBACK' && current.status !== 'CHARGEBACK') {
+            alerts.push(
+              current.settled
+                ? `CHARGEBACK on settled payment ${payment_id} (sub ${subscription_id}, user ${subscription.user_id}). ${current.satoshis_purchased} sats were already sent - manual reversal needed.`
+                : `CHARGEBACK on unsettled payment ${payment_id} (sub ${subscription_id}, user ${subscription.user_id}). It will not be settled.`,
+            );
+          }
+
+          this.logger.log(
+            `Transaction ${payment_id} updated: ${current.status} → ${status}`,
+          );
+        }
       } else {
-        // Ensure subscription exists before creating transaction
-        await this.ensureSubscriptionExistsAtomic(
-          trx,
-          subscription_id,
-          user_id,
-          package_id,
-        );
-
-        // Create new transaction with pre-fetched Bitcoin data
-        await this.dbLogger.info(
-          `Creating new transaction for payment_id ${payment_id}, subscription_id ${subscription_id}, status ${status}`,
-        );
-
-        const transactionData: Transaction = {
+        const row: Transaction = {
           payhere_pay_id: payment_id,
           payhere_sub_id: subscription_id,
           status,
           retry_count: 0,
+          gross_amount: parseFloat(payhere_amount),
+          ...(bitcoinData ?? {}),
         };
+        await trx('transaction').insert(row);
+        becameSuccess = status === 'SUCCESS';
 
-        // Add pre-fetched Bitcoin data if available
-        if (bitcoinDataForNew) {
-          Object.assign(transactionData, bitcoinDataForNew);
-          await this.dbLogger.info(
-            `Bitcoin data added to new transaction ${payment_id}: ${bitcoinDataForNew.satoshis_purchased} sats at ${bitcoinDataForNew.btc_price_at_purchase} ${bitcoinDataForNew.price_currency}`,
-          );
-        }
-
-        await this.createTransactionAtomic(trx, transactionData);
-        await this.dbLogger.info(
-          `New transaction ${payment_id} created successfully`,
+        this.logger.log(
+          `New transaction ${payment_id} created (status ${status})`,
         );
       }
 
-      // All successful transactions with Bitcoin data will be picked up by Settlement Service
-      // No fund transfer is attempted here to keep webhook processing fast and reliable
-
-      // Commit all database operations
-      await trx.commit();
-      await this.dbLogger.info(
-        `Atomic processing completed successfully for payment_id ${payment_id}`,
-      );
-
-      // Invalidate user caches after successful commit (non-critical operation)
-      if (user_id) {
-        try {
-          await this.invalidateUserTransactionCaches(user_id);
-        } catch (cacheError: unknown) {
-          // Log cache error but don't fail the operation since DB operation succeeded
-          await this.dbLogger.warn(
-            `Failed to invalidate cache after successful transaction processing ${payment_id}: ${cacheError instanceof Error ? cacheError.message : String(cacheError)}`,
-          );
+      if (becameSuccess && !subscriptionEnded) {
+        const duplicateOf = await this.activateIfFirstSuccess(
+          trx,
+          subscription,
+          payment_id,
+        );
+        if (duplicateOf) {
+          duplicate = {
+            payhere_sub_id: subscription_id,
+            activeSubId: duplicateOf,
+          };
         }
       }
+
+      await trx.commit();
     } catch (error: unknown) {
-      // Rollback all changes on any error
-      await trx.rollback();
-      await this.dbLogger.error(
-        `Atomic processing failed for payment_id ${payment_id}: ${error instanceof Error ? error.message : String(error)}`,
+      if (!trx.isCompleted()) {
+        await trx.rollback();
+      }
+      // A correctly signed notification we refuse is a real PayHere event we
+      // didn't record (e.g. unknown order_id) - a human needs to look at it.
+      if (error instanceof BadRequestException) {
+        await this.telegramLoggerService.logAlert(
+          'PayHere webhook',
+          `Rejected signed notification payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id}: ${errorMessage(error)}`,
+        );
+      }
+      this.logger.error(
+        `PayHere notification processing failed for payment_id ${payment_id}: ${errorMessage(error)}`,
       );
       throw error;
     }
-  }
 
-  async createTransaction(transaction: Transaction): Promise<Transaction> {
-    try {
-      const result = await this.knexService
-        .knex('transaction')
-        .insert(transaction)
-        .returning('*');
-
-      await this.dbLogger.info(
-        `Transaction inserted into database: ${transaction.payhere_pay_id}`,
+    // Side effects only after the DB commit succeeded
+    if (createdSubscription) {
+      await this.notifySubscriptionCreated(
+        subscription_id,
+        createdSubscription.user_id,
+        createdSubscription.package_id,
       );
-      return result[0] as Transaction;
-    } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Failed to insert transaction ${transaction.payhere_pay_id}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      throw error;
     }
+    if (duplicate) {
+      alerts.push(
+        await this.cancelDuplicateSubscription(
+          duplicate.payhere_sub_id,
+          duplicate.activeSubId,
+          subscriptionUserId,
+        ),
+      );
+    }
+    for (const alert of alerts) {
+      this.logger.error(alert);
+      await this.telegramLoggerService.logAlert('PayHere webhook', alert);
+    }
+    await this.invalidateUserCaches(subscriptionUserId);
   }
 
   getPayHereStatusMapped(status_code: string): Status {
@@ -308,36 +412,251 @@ export class TransactionService {
     return statusMap[status_code] ?? 'FAILED';
   }
 
+  /**
+   * SUCCESS can only move to CHARGEBACK, CHARGEBACK is final, and nothing
+   * moves back to PENDING. Same-status repeats are allowed (idempotent).
+   */
+  private isAllowedTransition(from: Status, to: Status): boolean {
+    if (from === to) return true;
+    if (from === 'CHARGEBACK') return false;
+    if (from === 'SUCCESS') return to === 'CHARGEBACK';
+    return to !== 'PENDING';
+  }
+
+  /**
+   * Find the subscription for this notification, or create it on first sight.
+   *
+   * Only signed fields decide who owns a subscription: order_id is covered by
+   * the md5sig, and the user/package come from the payhere_order row we stored
+   * when generating the checkout link. custom_1/custom_2 are NOT used - the
+   * checkout hash doesn't cover them, so a payer can edit them (e.g. to give
+   * an un-KYC'd account a subscription).
+   */
+  private async resolveSubscription(
+    trx: Knex.Transaction,
+    params: {
+      subscription_id: string;
+      order_id: string;
+      status: Status;
+    },
+  ): Promise<{ subscription: Subscription; created: boolean }> {
+    const { subscription_id, order_id, status } = params;
+
+    const existing: Subscription | undefined = await trx('subscription')
+      .where('payhere_sub_id', subscription_id)
+      .forUpdate()
+      .first();
+
+    if (existing) {
+      if (existing.payhere_order_id && existing.payhere_order_id !== order_id) {
+        throw new BadRequestException(
+          'order_id does not match the subscription',
+        );
+      }
+      if (!existing.payhere_order_id) {
+        // Subscriptions from before order binding have no order_id yet. The
+        // first notification binds one - but subscription_id isn't signed, so
+        // an attacker could replay their own signed notification (for an
+        // order they made) against a victim's subscription and lock it to the
+        // wrong order. Every order since binding has a payhere_order row, so
+        // it must belong to this subscription's user. Old orders have no row
+        // and only arrive as genuine renewals.
+        const order = await trx<{ user_id: string }>('payhere_order')
+          .select('user_id')
+          .where('order_id', order_id)
+          .first();
+        if (order && order.user_id !== existing.user_id) {
+          throw new BadRequestException(
+            'order_id belongs to another user than the subscription',
+          );
+        }
+        await this.assertOrderIdUnused(trx, order_id, subscription_id);
+        await trx('subscription')
+          .update({ payhere_order_id: order_id })
+          .where('payhere_sub_id', subscription_id);
+        existing.payhere_order_id = order_id;
+      }
+      return { subscription: existing, created: false };
+    }
+
+    const order = await trx<{ user_id: string; package_id: string }>(
+      'payhere_order',
+    )
+      .select('user_id', 'package_id')
+      .where('order_id', order_id)
+      .first();
+    if (!order) {
+      throw new BadRequestException(
+        `Unknown order_id ${order_id} - no checkout link was generated for it`,
+      );
+    }
+    const { user_id, package_id } = order;
+    await this.assertOrderIdUnused(trx, order_id, subscription_id);
+
+    const subscription: Subscription = {
+      payhere_sub_id: subscription_id,
+      payhere_order_id: order_id,
+      user_id,
+      package_id,
+      // Always created inactive. activateIfFirstSuccess (run for SUCCESS)
+      // activates it, unless the user already has another active plan - e.g.
+      // they opened two checkout links and paid both.
+      is_active: false,
+    } as Subscription;
+    await trx('subscription').insert(subscription);
+
+    this.logger.log(
+      `Created subscription ${subscription_id} for user ${user_id}, package ${package_id} (first status: ${status})`,
+    );
+    return { subscription, created: true };
+  }
+
+  private async assertOrderIdUnused(
+    trx: Knex.Transaction,
+    order_id: string,
+    subscription_id: string,
+  ): Promise<void> {
+    const other: Subscription | undefined = await trx('subscription')
+      .where('payhere_order_id', order_id)
+      .whereNot('payhere_sub_id', subscription_id)
+      .forUpdate()
+      .first();
+    if (!other) return;
+
+    // A declined first charge leaves an inactive, never-paid subscription
+    // holding the order_id. If the payer retries on the same checkout page
+    // and PayHere issues a new subscription_id, the retry must still be
+    // accepted - so release the order_id from the failed attempt.
+    const otherWasPaid: unknown = await trx('transaction')
+      .where('payhere_sub_id', other.payhere_sub_id)
+      .whereIn('status', ['SUCCESS', 'CHARGEBACK'])
+      .first();
+    if (other.is_active || otherWasPaid) {
+      throw new BadRequestException(
+        'order_id is already bound to another subscription',
+      );
+    }
+    await trx('subscription')
+      .update({ payhere_order_id: null, updated_at: trx.fn.now() })
+      .where('payhere_sub_id', other.payhere_sub_id);
+    this.logger.warn(
+      `order_id ${order_id} moved from never-paid subscription ${other.payhere_sub_id} to ${subscription_id} (checkout retry)`,
+    );
+  }
+
+  /**
+   * Subscriptions start inactive. Activate one on its first SUCCESS - but
+   * never re-activate a cancelled one (those already had a SUCCESS) and never
+   * create a second active plan. Returns the user's other active
+   * subscription id when this one is a duplicate (left inactive).
+   */
+  private async activateIfFirstSuccess(
+    trx: Knex.Transaction,
+    subscription: Subscription,
+    payment_id: string,
+  ): Promise<string | null> {
+    if (subscription.is_active) return null;
+
+    const priorSuccess = await trx('transaction')
+      .where('payhere_sub_id', subscription.payhere_sub_id)
+      .whereIn('status', ['SUCCESS', 'CHARGEBACK'])
+      .whereNot('payhere_pay_id', payment_id)
+      .first();
+    if (priorSuccess) return null;
+
+    // Lock the user so two first payments arriving at the same moment (two
+    // checkouts) run this check one after the other; otherwise neither sees
+    // the other's uncommitted activation and both go active.
+    // NO KEY UPDATE, not FOR UPDATE: the subscription insert already holds an
+    // FK share lock on this user row, and FOR UPDATE would conflict with the
+    // other webhook's share lock - two concurrent first payments deadlock.
+    await trx('user')
+      .where('id', subscription.user_id)
+      .forNoKeyUpdate()
+      .first();
+
+    const otherActive: Subscription | undefined = await trx('subscription')
+      .where('user_id', subscription.user_id)
+      .where('is_active', true)
+      .whereNot('payhere_sub_id', subscription.payhere_sub_id)
+      .first();
+    if (otherActive) {
+      this.logger.warn(
+        `Subscription ${subscription.payhere_sub_id} got its first SUCCESS (${payment_id}) but user ${subscription.user_id} already has active subscription ${otherActive.payhere_sub_id} - leaving it inactive`,
+      );
+      return otherActive.payhere_sub_id;
+    }
+
+    await trx('subscription')
+      .update({ is_active: true, updated_at: trx.fn.now() })
+      .where('payhere_sub_id', subscription.payhere_sub_id);
+    this.logger.log(
+      `Subscription ${subscription.payhere_sub_id} activated by first successful payment ${payment_id}`,
+    );
+    return null;
+  }
+
+  /**
+   * A user paid a second checkout while another plan was active. Its first
+   * charge is still settled (they paid for those sats), but PayHere would
+   * keep billing a plan the user can't see or cancel - so cancel it there.
+   * Returns the alert text for the team.
+   */
+  private async cancelDuplicateSubscription(
+    payhere_sub_id: string,
+    activeSubId: string,
+    user_id: string,
+  ): Promise<string> {
+    const base = `Duplicate subscription ${payhere_sub_id}: user ${user_id} already has active plan ${activeSubId}, so it was left inactive (its first payment is still settled).`;
+    try {
+      const result =
+        await this.payHereService.cancelSubscription(payhere_sub_id);
+      return result.status === 1
+        ? `${base} Cancelled at PayHere.`
+        : `${base} PayHere refused to cancel it (${result.msg}) - cancel it manually.`;
+    } catch (error: unknown) {
+      return `${base} Cancelling at PayHere failed (${errorMessage(error)}) - cancel it manually.`;
+    }
+  }
+
+  private async notifySubscriptionCreated(
+    subscription_id: string,
+    user_id: string,
+    package_id: string,
+  ): Promise<void> {
+    try {
+      const pkg = await this.knexService
+        .knex('package')
+        .where('id', package_id)
+        .first();
+      if (pkg) {
+        await this.telegramLoggerService.logSubscriptionCreated(
+          subscription_id,
+          user_id,
+          pkg,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Failed to log subscription creation to Telegram: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   private async fetchBitcoinDataForTransaction(
     amount: number,
     currency: string,
-    paymentProcessor: PaymentProcessor,
-  ): Promise<{
-    btc_price_at_purchase: number;
-    satoshis_purchased: number;
-    price_currency: string;
-    coingecko_timestamp: Date;
-    gross_amount: number;
-    payment_processor_fee_basis_points: number;
-    payment_processor_fee_amount: number;
-    bitcoindeepa_fee_basis_points: number;
-    bitcoindeepa_fee_amount: number;
-    net_amount: number;
-  } | null> {
+  ): Promise<BitcoinData | null> {
     try {
-      // Check if Bitcoin tracking is enabled
       if (process.env.ENABLE_BITCOIN_TRACKING === 'false') {
-        await this.dbLogger.info(
+        this.logger.log(
           'Bitcoin tracking is disabled - skipping Bitcoin data fetch',
         );
         return null;
       }
 
-      // Get fee configurations from environment based on payment processor
       const paymentProcessorFeeBps = parseInt(
-        paymentProcessor === 'PAYHERE'
-          ? process.env.PAYHERE_FEE_BASIS_POINTS || '0'
-          : process.env.CEYPAY_FEE_BASIS_POINTS || '0',
+        process.env.PAYHERE_FEE_BASIS_POINTS || '0',
         10,
       );
       const bitcoindeepaFeeBps = parseInt(
@@ -345,238 +664,223 @@ export class TransactionService {
         10,
       );
 
-      // Store gross amount (original package amount)
-      const grossAmount = amount;
-
-      // Calculate payment processor fee (basis points / 10000)
-      // Example: 100 basis points = 1% = 100/10000 = 0.01
-      const paymentProcessorFeeAmount = new Big(grossAmount)
+      const gross = new Big(amount);
+      const paymentProcessorFee = gross
         .times(paymentProcessorFeeBps)
-        .div(10000)
-        .toNumber();
+        .div(10000);
+      const bitcoindeepaFee = gross.times(bitcoindeepaFeeBps).div(10000);
+      const totalFees = paymentProcessorFee.plus(bitcoindeepaFee);
+      const netAmount = gross.minus(totalFees).toNumber();
 
-      // Calculate BitcoinDeepa platform fee
-      const bitcoindeepaFeeAmount = new Big(grossAmount)
-        .times(bitcoindeepaFeeBps)
-        .div(10000)
-        .toNumber();
-
-      // Calculate total fees
-      const totalFees = new Big(paymentProcessorFeeAmount)
-        .plus(bitcoindeepaFeeAmount)
-        .toNumber();
-
-      // Calculate net amount after all fees
-      const netAmount = new Big(grossAmount).minus(totalFees).toNumber();
-
-      await this.dbLogger.info(
-        `Calculating Bitcoin for ${grossAmount} ${currency}: payment_processor_fee=${paymentProcessorFeeAmount} ${currency} (${paymentProcessorFeeBps} bps), bitcoindeepa_fee=${bitcoindeepaFeeAmount} ${currency} (${bitcoindeepaFeeBps} bps), total_fees=${totalFees} ${currency}, net=${netAmount} ${currency}`,
+      const calc = await this.bitcoinPriceService.calculateSatoshis(
+        netAmount,
+        currency,
       );
-
-      // Use net amount for satoshi calculation
-      const bitcoinCalculation =
-        await this.bitcoinPriceService.calculateSatoshis(netAmount, currency);
-
-      if (!bitcoinCalculation) {
-        await this.dbLogger.warn(
-          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - CoinMarketCap API may be unavailable`,
+      if (!calc) {
+        this.logger.warn(
+          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - will be backfilled later`,
         );
         return null;
       }
 
-      await this.dbLogger.info(
-        `Bitcoin DCA calculation: ${netAmount} ${currency} (after ${totalFees} ${currency} total fees) = ${bitcoinCalculation.satoshis} satoshis at ${bitcoinCalculation.btc_price} ${currency}/BTC`,
+      this.logger.log(
+        `Bitcoin DCA calculation: ${amount} ${currency} gross, ${totalFees.toString()} fees, ${netAmount} net = ${calc.satoshis} sats at ${calc.btc_price} ${currency}/BTC`,
       );
 
       return {
-        btc_price_at_purchase: bitcoinCalculation.btc_price,
-        satoshis_purchased: bitcoinCalculation.satoshis,
-        price_currency: bitcoinCalculation.currency,
+        btc_price_at_purchase: calc.btc_price,
+        satoshis_purchased: calc.satoshis,
+        price_currency: calc.currency,
         coingecko_timestamp: new Date(),
-        gross_amount: grossAmount,
+        gross_amount: amount,
         payment_processor_fee_basis_points: paymentProcessorFeeBps,
-        payment_processor_fee_amount: paymentProcessorFeeAmount,
+        payment_processor_fee_amount: paymentProcessorFee.toNumber(),
         bitcoindeepa_fee_basis_points: bitcoindeepaFeeBps,
-        bitcoindeepa_fee_amount: bitcoindeepaFeeAmount,
+        bitcoindeepa_fee_amount: bitcoindeepaFee.toNumber(),
         net_amount: netAmount,
       };
     } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${errorMessage(error)}`,
       );
       return null;
     }
   }
 
-  async getTransactionsByUserId(user_id: string): Promise<Transaction[]> {
-    // Find all user's subscriptions
-    const subscriptions: Subscription[] = await this.knexService
-      .knex<Subscription>('subscription')
-      .where('user_id', user_id);
+  /**
+   * SUCCESS payments saved without price data (price API was down at webhook
+   * time) are never settled. Fill them in with the current price.
+   *
+   * Only recent payments: the backfilled amount is settled automatically, and
+   * pricing an old payment at today's rate (e.g. rows from before tracking
+   * was enabled) is a payout decision for a human - see
+   * alertStaleUnpricedPayments.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async backfillMissingBitcoinData(): Promise<void> {
+    if (process.env.ENABLE_BITCOIN_TRACKING === 'false') return;
 
-    if (subscriptions.length === 0) {
-      await this.dbLogger.info(
-        `No subscriptions found for user ${user_id} - returning empty transaction list`,
-      );
-      return [];
+    try {
+      const rows = await this.transactionsWithPackage()
+        .select(
+          't.payhere_pay_id',
+          't.gross_amount',
+          'p.amount as package_amount',
+          'p.currency as package_currency',
+          's.user_id',
+        )
+        .where('t.status', 'SUCCESS')
+        .whereNull('t.satoshis_purchased')
+        .where(
+          't.created_at',
+          '>=',
+          this.knexService.knex.raw(
+            `now() - interval '${BACKFILL_MAX_AGE_HOURS} hours'`,
+          ),
+        )
+        .limit(50);
+
+      for (const row of rows) {
+        const amount = Number(row.gross_amount ?? row.package_amount);
+        const data = await this.fetchBitcoinDataForTransaction(
+          amount,
+          row.package_currency,
+        );
+        if (!data) {
+          return; // price source still down - try again next run
+        }
+
+        const updated = await this.knexService
+          .knex('transaction')
+          .update(data)
+          .where('payhere_pay_id', row.payhere_pay_id)
+          .where('status', 'SUCCESS')
+          .whereNull('satoshis_purchased');
+
+        if (updated) {
+          this.logger.warn(
+            `Backfilled Bitcoin data for ${row.payhere_pay_id}: ${data.satoshis_purchased} sats at ${data.btc_price_at_purchase} (price taken at backfill time)`,
+          );
+          await this.invalidateUserCaches(row.user_id);
+        }
+      }
+    } catch (error: unknown) {
+      this.logger.error(`Bitcoin data backfill failed: ${errorMessage(error)}`);
     }
+  }
 
-    const subscriptionIds = subscriptions.map((sub) => sub.payhere_sub_id);
+  /** Unpriced SUCCESS payments too old to backfill need a manual decision. */
+  @Cron(CronExpression.EVERY_6_HOURS)
+  async alertStaleUnpricedPayments(): Promise<void> {
+    try {
+      const rows = await this.knexService
+        .knex<{ payhere_pay_id: string }>('transaction')
+        .select('payhere_pay_id')
+        .where('status', 'SUCCESS')
+        .whereNull('satoshis_purchased')
+        .where(
+          'created_at',
+          '<',
+          this.knexService.knex.raw(
+            `now() - interval '${BACKFILL_MAX_AGE_HOURS} hours'`,
+          ),
+        )
+        .orderBy('created_at')
+        .limit(20);
+      if (rows.length === 0) return;
 
-    // Fetch transactions for ALL subscriptions
-    const transactions = await this.knexService
-      .knex<Transaction>('transaction')
-      .whereIn('payhere_sub_id', subscriptionIds)
-      .orderBy('created_at', 'desc');
-
-    await this.dbLogger.info(
-      `Retrieved ${transactions.length} transactions for user ${user_id} across ${subscriptions.length} subscriptions`,
-    );
-    return transactions;
+      const ids = rows.map((r) => r.payhere_pay_id).join(', ');
+      await this.telegramLoggerService.logAlert(
+        'Backfill',
+        `SUCCESS payments older than ${BACKFILL_MAX_AGE_HOURS}h have no BTC price and will NOT be settled automatically${rows.length === 20 ? ' (first 20)' : ''}: ${ids}. Price and settle them manually.`,
+      );
+    } catch (error: unknown) {
+      this.logger.error(
+        `Stale unpriced payment check failed: ${errorMessage(error)}`,
+      );
+    }
   }
 
   async getTransactionsByUserIdPaginated(
     user_id: string,
-    page: number = 1,
-    limit: number = 10,
-  ): Promise<{
-    transactions: Transaction[];
-    total_count: number;
-    total_pages: number;
-    current_page: number;
-    has_more: boolean;
-  }> {
-    try {
-      const cacheKey = CacheKeys.transaction.list(user_id, page, limit);
-
-      // Try to get from cache first
-      const cached = await this.redisService.get<{
-        transactions: Transaction[];
-        total_count: number;
-        total_pages: number;
-        current_page: number;
-        has_more: boolean;
-      }>(cacheKey);
-
-      if (cached) {
-        return cached;
-      }
-
-      await this.dbLogger.info(
-        `Cache MISS for user transactions: ${user_id} (page: ${page}, limit: ${limit}), fetching from database`,
-      );
-
-      // Find all user's subscriptions
-      const subscriptions: Subscription[] = await this.knexService
-        .knex<Subscription>('subscription')
-        .where('user_id', user_id);
-
-      if (subscriptions.length === 0) {
-        await this.dbLogger.info(
-          `No subscriptions found for user ${user_id} - returning empty paginated result`,
-        );
-        const emptyResult = {
-          transactions: [],
-          total_count: 0,
-          total_pages: 0,
-          current_page: page,
-          has_more: false,
-        };
-
-        // Cache empty result for 2 minutes
-        await this.redisService.set(cacheKey, emptyResult, { ttl: 120 });
-        return emptyResult;
-      }
-
-      const subscriptionIds = subscriptions.map((sub) => sub.payhere_sub_id);
-
-      // Get total count for pagination
-      const [countResult] = await this.knexService
-        .knex<Transaction>('transaction')
-        .whereIn('payhere_sub_id', subscriptionIds)
-        .count('* as count');
-
-      const totalCount = Number((countResult as any).count);
-      const totalPages = Math.ceil(totalCount / limit);
-      const offset = (page - 1) * limit;
-
-      // Fetch paginated transactions, joined with package info so callers get
-      // the LKR amount and plan name without a second round trip.
-      const transactions = await this.knexService
-        .knex('transaction as t')
-        .select(
-          't.*',
-          'p.amount as package_amount',
-          'p.currency as package_currency',
-          'p.name as package_name',
-          'p.frequency as package_frequency',
-        )
-        .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
-        .join('package as p', 's.package_id', 'p.id')
-        .whereIn('t.payhere_sub_id', subscriptionIds)
-        .orderBy('t.created_at', 'desc')
-        .limit(limit)
-        .offset(offset);
-
-      const hasMore = page < totalPages;
-
-      const result = {
-        transactions,
-        total_count: totalCount,
-        total_pages: totalPages,
-        current_page: page,
-        has_more: hasMore,
-      };
-
-      // Cache the result for 2 minutes (120 seconds)
-      await this.redisService.set(cacheKey, result, { ttl: 120 });
-
-      await this.dbLogger.info(
-        `Retrieved ${transactions.length} transactions for user ${user_id} (page ${page}/${totalPages}, total: ${totalCount})`,
-      );
-
-      return result;
-    } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Error fetching paginated transactions for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      throw error;
-    }
+    page: number,
+    limit: number,
+  ): Promise<PaginatedTransactions> {
+    const result = await this.redisService.getOrSet(
+      CacheKeys.transaction.list(user_id, page, limit),
+      120,
+      () => this.loadTransactionsPage(user_id, page, limit),
+    );
+    return result!;
   }
 
-  async getLatestTransactionForUser(user_id: string): Promise<any | null> {
-    try {
-      const cacheKey = CacheKeys.transaction.latest(user_id);
+  private async loadTransactionsPage(
+    user_id: string,
+    page: number,
+    limit: number,
+  ): Promise<PaginatedTransactions> {
+    const subscriptionIds = await this.getSubscriptionIds(user_id);
+    if (subscriptionIds.length === 0) {
+      return {
+        transactions: [],
+        total_count: 0,
+        total_pages: 0,
+        current_page: page,
+        has_more: false,
+      };
+    }
 
-      // Try to get from cache first
-      const cached = await this.redisService.get<any>(cacheKey);
-      if (cached) {
-        return cached;
-      }
+    const [countResult] = await this.knexService
+      .knex('transaction')
+      .whereIn('payhere_sub_id', subscriptionIds)
+      .count<{ count: string }[]>('* as count');
 
-      await this.dbLogger.info(
-        `Cache MISS for latest transaction: ${user_id}, fetching from database`,
-      );
+    const totalCount = Number(countResult.count);
+    const totalPages = Math.ceil(totalCount / limit);
 
-      // Find user's active subscription
-      const activeSubscription: Subscription | undefined =
-        await this.knexService
-          .knex<Subscription>('subscription')
-          .where('user_id', user_id)
-          .where('is_active', true)
-          .orderBy('created_at', 'desc')
-          .first();
+    // Joined with package info so callers get the LKR amount and plan name
+    const transactions = await this.transactionsWithPackage()
+      .select('t.*', ...PACKAGE_COLUMNS)
+      .whereIn('t.payhere_sub_id', subscriptionIds)
+      .orderBy('t.created_at', 'desc')
+      .limit(limit)
+      .offset((page - 1) * limit);
 
-      if (!activeSubscription) {
-        await this.dbLogger.info(
-          `No active subscription found for user ${user_id} - returning null`,
-        );
-        return null;
-      }
+    return {
+      transactions,
+      total_count: totalCount,
+      total_pages: totalPages,
+      current_page: page,
+      has_more: page < totalPages,
+    };
+  }
 
-      // Get the latest transaction with package information
-      const result = await this.knexService
-        .knex('transaction as t')
+  async getLatestTransactionForUser(
+    user_id: string,
+  ): Promise<Record<string, unknown> | null> {
+    return this.redisService.getOrSet(
+      CacheKeys.transaction.latest(user_id),
+      60,
+      () => this.loadLatestTransaction(user_id),
+    );
+  }
+
+  private async loadLatestTransaction(
+    user_id: string,
+  ): Promise<Record<string, unknown> | null> {
+    const activeSubscription: Subscription | undefined = await this.knexService
+      .knex<Subscription>('subscription')
+      .where('user_id', user_id)
+      .where('is_active', true)
+      .orderBy('created_at', 'desc')
+      .first();
+
+    if (!activeSubscription) {
+      return null;
+    }
+
+    const result: Record<string, unknown> | undefined =
+      await this.transactionsWithPackage()
         .select(
           't.payhere_pay_id',
           't.payhere_sub_id',
@@ -587,397 +891,139 @@ export class TransactionService {
           't.coingecko_timestamp',
           't.created_at',
           't.updated_at',
-          'p.amount as package_amount',
-          'p.currency as package_currency',
-          'p.name as package_name',
-          'p.frequency as package_frequency',
+          ...PACKAGE_COLUMNS,
         )
-        .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
-        .join('package as p', 's.package_id', 'p.id')
         .where('t.payhere_sub_id', activeSubscription.payhere_sub_id)
         .orderBy('t.created_at', 'desc')
         .first();
 
-      if (result) {
-        // Cache the result for 1 minute (60 seconds)
-        await this.redisService.set(cacheKey, result, { ttl: 60 });
-        await this.dbLogger.info(
-          `Latest transaction found for user ${user_id}: ${result.payhere_pay_id} with status ${result.status}, package: ${result.package_name} (${result.package_amount} ${result.package_currency})`,
-        );
-      } else {
-        await this.dbLogger.info(
-          `No transactions found for user ${user_id}'s active subscription ${activeSubscription.payhere_sub_id}`,
-        );
-      }
-
-      return result || null;
-    } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Error fetching latest transaction for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
-    }
+    return result ?? null;
   }
 
-  async getDCASummaryForUser(user_id: string): Promise<{
-    dca: {
-      balance: number;
-      spent: number;
-      avg_btc_price: number;
-    };
-    total_balance: number;
-    total_lkr: string | undefined;
-    currency: string;
-    '24_hr_change': number;
-    current_btc_price?: {
-      usd: number;
-      lkr: number;
-    };
-  } | null> {
-    try {
-      const cacheKey = CacheKeys.transaction.dcaSummary(user_id);
-
-      // Try to get from cache first
-      const cached = await this.redisService.get<{
-        dca: {
-          balance: number;
-          spent: number;
-          avg_btc_price: number;
-        };
-        total_balance: number;
-        total_lkr: string | undefined;
-        currency: string;
-        '24_hr_change': number;
-        current_btc_price?: {
-          usd: number;
-          lkr: number;
-        };
-      }>(cacheKey);
-
-      if (cached) {
-        return cached;
-      }
-
-      await this.dbLogger.info(
-        `Cache MISS for DCA summary: ${user_id}, calculating from database`,
-      );
-
-      // Find all user's subscriptions
-      const subscriptions: Subscription[] = await this.knexService
-        .knex<Subscription>('subscription')
-        .where('user_id', user_id);
-
-      if (subscriptions.length === 0) {
-        await this.dbLogger.info(
-          `No subscriptions found for user ${user_id} - returning empty DCA summary`,
-        );
-
-        // Fetch total balance from BitcoinDeepa API even without subscriptions
-        let totalBalanceFromAPI = 0;
-        let balanceResponse = {} as UserBalanceResponse;
-        try {
-          if (this.bitcoinDeepaService.isConfigured()) {
-            balanceResponse = await this.bitcoinDeepaService.getUserBalance(
-              parseInt(user_id, 10),
-            );
-            if (balanceResponse.success && balanceResponse.balance) {
-              totalBalanceFromAPI = balanceResponse.balance;
-            }
-          }
-        } catch (error: unknown) {
-          await this.dbLogger.warn(
-            `Failed to fetch balance from BitcoinDeepa API for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-
-        // Fetch 24hr change from CoinMarketCap even without subscriptions
-        let bitcoin24HrChange = 0;
-        try {
-          const change = await this.bitcoinPriceService.getBitcoin24HrChange();
-          if (typeof change === 'number') {
-            bitcoin24HrChange = change;
-          }
-        } catch (error: unknown) {
-          await this.dbLogger.warn(
-            `Failed to fetch 24hr change from CoinMarketCap for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-
-        const currentPrice = await this.getCurrentBtcPriceSafe(user_id);
-
-        const emptyResult = {
-          dca: {
-            balance: 0,
-            spent: 0,
-            avg_btc_price: 0,
-          },
-          total_balance: totalBalanceFromAPI,
-          total_lkr: balanceResponse.balance_lkr || '0.00',
-          currency: 'LKR',
-          '24_hr_change': bitcoin24HrChange,
-          current_btc_price: currentPrice
-            ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
-            : undefined,
-        };
-
-        // Cache empty result for 5 minutes
-        await this.redisService.set(cacheKey, emptyResult, { ttl: 300 });
-        return emptyResult;
-      }
-
-      const subscriptionIds = subscriptions.map((sub) => sub.payhere_sub_id);
-      await this.dbLogger.info(
-        `Found ${subscriptions.length} subscriptions for user ${user_id}: ${subscriptionIds.join(', ')}`,
-      );
-
-      // Get all successful transactions with Bitcoin data across ALL user subscriptions
-      const transactions = await this.knexService
-        .knex<Transaction>('transaction')
-        .whereIn('payhere_sub_id', subscriptionIds)
-        .whereNotNull('satoshis_purchased')
-        .where('status', 'SUCCESS');
-
-      await this.dbLogger.info(
-        `Found ${transactions.length} successful transactions with Bitcoin data for user ${user_id}`,
-      );
-
-      if (transactions.length === 0) {
-        await this.dbLogger.info(
-          `No successful transactions with Bitcoin data for user ${user_id} - returning empty summary`,
-        );
-        const currentPrice = await this.getCurrentBtcPriceSafe(user_id);
-        const emptyResult = {
-          dca: {
-            balance: 0,
-            spent: 0,
-            avg_btc_price: 0,
-          },
-          total_balance: 0,
-          total_lkr: '0.00',
-          currency: 'LKR',
-          '24_hr_change': 0,
-          current_btc_price: currentPrice
-            ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
-            : undefined,
-        };
-
-        // Cache empty result for 5 minutes
-        await this.redisService.set(cacheKey, emptyResult, { ttl: 300 });
-        return emptyResult;
-      }
-
-      // Use Big.js for precise satoshi calculations
-      const totalSatoshis = transactions.reduce((sum, tx) => {
-        const satoshis = tx.satoshis_purchased
-          ? new Big(tx.satoshis_purchased)
-          : new Big(0);
-        return sum.plus(satoshis);
-      }, new Big(0));
-
-      // Calculate total spent using Big.js for precision
-      const totalSpent = transactions.reduce((sum, tx) => {
-        if (tx.btc_price_at_purchase && tx.satoshis_purchased) {
-          // Convert satoshis to BTC (divide by 100,000,000) and multiply by price
-          const satoshisBig = new Big(tx.satoshis_purchased);
-          const btcAmount = satoshisBig.div(100_000_000);
-          const spentAmount = btcAmount.times(tx.btc_price_at_purchase);
-          return sum.plus(spentAmount);
-        }
-        return sum;
-      }, new Big(0));
-
-      // Calculate average BTC price using Big.js
-      const averageBTCPrice =
-        totalSpent.gt(0) && totalSatoshis.gt(0)
-          ? totalSpent.div(totalSatoshis.div(100_000_000))
-          : new Big(0);
-
-      // Fetch total balance from BitcoinDeepa API
-      let totalBalanceFromAPI = 0;
-      let balanceResponse = {} as UserBalanceResponse;
-      try {
-        if (this.bitcoinDeepaService.isConfigured()) {
-          balanceResponse = await this.bitcoinDeepaService.getUserBalance(
-            parseInt(user_id, 10),
-          );
-          if (balanceResponse.success && balanceResponse.balance) {
-            totalBalanceFromAPI = balanceResponse.balance;
-          }
-        }
-      } catch (error: unknown) {
-        await this.dbLogger.warn(
-          `Failed to fetch balance from BitcoinDeepa API for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-
-      // Fetch 24hr change from CoinMarketCap
-      let bitcoin24HrChange = 0;
-      try {
-        const change = await this.bitcoinPriceService.getBitcoin24HrChange();
-        if (typeof change === 'number') {
-          bitcoin24HrChange = change;
-        }
-      } catch (error: unknown) {
-        await this.dbLogger.warn(
-          `Failed to fetch 24hr change from CoinMarketCap for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-
-      const currentPrice = await this.getCurrentBtcPriceSafe(user_id);
-
-      // Convert Big.js values to numbers for the response
-      const summary = {
-        dca: {
-          balance: Number(totalSatoshis.toString()),
-          spent: Number(totalSpent.toString()),
-          avg_btc_price: Number(averageBTCPrice.toString()),
-        },
-        total_balance: totalBalanceFromAPI,
-        total_lkr: balanceResponse.balance_lkr,
-        currency: 'LKR',
-        '24_hr_change': bitcoin24HrChange,
-        current_btc_price: currentPrice
-          ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
-          : undefined,
-      };
-
-      // Cache the result for 5 minutes (300 seconds)
-      await this.redisService.set(cacheKey, summary, { ttl: 300 });
-
-      await this.dbLogger.info(
-        `DCA summary calculated for user ${user_id}: ${totalSatoshis.toString()} total sats, ${totalSpent.toFixed(2)} ${summary.currency} spent, avg price ${averageBTCPrice.toFixed(2)}`,
-      );
-      return summary;
-    } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Error calculating DCA summary for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
-    }
-  }
-
-  private async getCurrentBtcPriceSafe(user_id: string): Promise<{
-    usd: number;
-    lkr: number;
-  } | null> {
-    try {
-      return await this.bitcoinPriceService.getCurrentPrice();
-    } catch (error: unknown) {
-      await this.dbLogger.warn(
-        `Failed to fetch current BTC price for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
-    }
-  }
-
-  /**
-   * Atomic version of ensureSubscriptionExists for use within transactions
-   */
-  private async ensureSubscriptionExistsAtomic(
-    trx: any,
-    payhere_sub_id: string,
-    user_id?: string,
-    package_id?: string,
-  ): Promise<void> {
-    // Check if subscription already exists within the transaction
-    const existingSubscription = await trx('subscription')
-      .where('payhere_sub_id', payhere_sub_id)
-      .first();
-
-    if (existingSubscription) {
-      await this.dbLogger.info(
-        `Subscription ${payhere_sub_id} already exists (atomic)`,
-      );
-      return;
-    }
-
-    // Create new subscription if we have the required data
-    if (user_id && package_id) {
-      await this.dbLogger.info(
-        `Creating new subscription atomically: ${payhere_sub_id} for user ${user_id}, package ${package_id}`,
-      );
-
-      await trx('subscription').insert({
-        payhere_sub_id,
-        user_id,
-        package_id,
-        is_active: true,
-      });
-
-      await this.dbLogger.info(
-        `New subscription ${payhere_sub_id} created successfully (atomic)`,
-      );
-
-      // Fetch package details for Telegram logging
-      try {
-        const _package = await trx('package').where('id', package_id).first();
-
-        if (_package) {
-          // Create user object for telegram logging
-          await this.telegramLoggerService.logSubscriptionCreated(
-            payhere_sub_id,
-            user_id,
-            _package,
-          );
-        } else {
-          await this.dbLogger.warn(
-            `Package ${package_id} not found for Telegram logging`,
-          );
-        }
-      } catch (telegramError: unknown) {
-        // Don't fail subscription creation if Telegram logging fails
-        await this.dbLogger.error(
-          `Failed to log subscription creation to Telegram: ${telegramError instanceof Error ? telegramError.message : String(telegramError)}`,
-        );
-      }
-    } else {
-      await this.dbLogger.warn(
-        `Cannot create subscription ${payhere_sub_id}: missing user_id (${user_id}) or package_id (${package_id}) (atomic)`,
-      );
-      throw new InternalServerErrorException(
-        'Insufficient data to create subscription',
-      );
-    }
-  }
-
-  /**
-   * Atomic version of createTransaction for use within transactions
-   */
-  async createTransactionAtomic(
-    trx: any,
-    transaction: Transaction,
-  ): Promise<Transaction> {
-    const result = await trx('transaction').insert(transaction).returning('*');
-
-    await this.dbLogger.info(
-      `Transaction inserted atomically: ${transaction.payhere_pay_id}`,
+  async getDCASummaryForUser(user_id: string): Promise<DcaSummary> {
+    const summary = await this.redisService.getOrSet(
+      CacheKeys.transaction.dcaSummary(user_id),
+      300,
+      () => this.computeDcaSummary(user_id),
     );
-    return result[0] as Transaction;
+    return summary!;
   }
 
-  /**
-   * Invalidate all transaction-related caches for a user
-   */
-  async invalidateUserTransactionCaches(user_id: string): Promise<void> {
+  private async computeDcaSummary(user_id: string): Promise<DcaSummary> {
+    const subscriptionIds = await this.getSubscriptionIds(user_id);
+    const transactions: Transaction[] =
+      subscriptionIds.length === 0
+        ? []
+        : await this.knexService
+            .knex<Transaction>('transaction')
+            .whereIn('payhere_sub_id', subscriptionIds)
+            .whereNotNull('satoshis_purchased')
+            .where('status', 'SUCCESS');
+
+    let totalSatoshis = new Big(0);
+    // "Invested" excludes fees so Current Value vs Invested shows market
+    // movement only; fees are reported separately.
+    let totalSpent = new Big(0); // net amount that bought BTC
+    let totalFees = new Big(0);
+    let totalBtcCost = new Big(0); // market value at purchase (for avg price)
+
+    for (const tx of transactions) {
+      if (!tx.satoshis_purchased) continue;
+      const sats = new Big(tx.satoshis_purchased);
+      totalSatoshis = totalSatoshis.plus(sats);
+
+      const btcCost = tx.btc_price_at_purchase
+        ? sats.div(SATOSHIS_PER_BTC).times(tx.btc_price_at_purchase)
+        : new Big(0);
+      totalBtcCost = totalBtcCost.plus(btcCost);
+      // Rows from before the fee columns lack net_amount - use the BTC cost
+      totalSpent = totalSpent.plus(
+        tx.net_amount != null ? new Big(tx.net_amount) : btcCost,
+      );
+      totalFees = totalFees
+        .plus(tx.payment_processor_fee_amount ?? 0)
+        .plus(tx.bitcoindeepa_fee_amount ?? 0);
+    }
+
+    const averageBTCPrice =
+      totalSatoshis.gt(0) && totalBtcCost.gt(0)
+        ? totalBtcCost.div(totalSatoshis.div(SATOSHIS_PER_BTC))
+        : new Big(0);
+
+    const market = await this.fetchBalanceAndMarket(user_id);
+
+    return {
+      dca: {
+        balance: totalSatoshis.toNumber(),
+        spent: totalSpent.toNumber(),
+        fees: totalFees.toNumber(),
+        avg_btc_price: averageBTCPrice.toNumber(),
+      },
+      currency: 'LKR',
+      ...market,
+    };
+  }
+
+  /** transaction t → subscription s → package p */
+  private transactionsWithPackage() {
+    return this.knexService
+      .knex('transaction as t')
+      .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
+      .join('package as p', 's.package_id', 'p.id');
+  }
+
+  private async getSubscriptionIds(user_id: string): Promise<string[]> {
+    const rows = await this.knexService
+      .knex<Subscription>('subscription')
+      .select('payhere_sub_id')
+      .where('user_id', user_id);
+    return rows.map((row) => row.payhere_sub_id);
+  }
+
+  /** Wallet balance (BitcoinDeepa) + market data (CMC). Never throws. */
+  private async fetchBalanceAndMarket(
+    user_id: string,
+  ): Promise<Omit<DcaSummary, 'dca' | 'currency'>> {
+    let total_balance = 0;
+    let total_lkr = '0.00';
+    if (this.bitcoinDeepaService.isConfigured()) {
+      const balance = await this.bitcoinDeepaService.getUserBalance(
+        parseInt(user_id, 10),
+      );
+      if (balance.success) {
+        total_balance = balance.balance ?? 0;
+        total_lkr = balance.balance_lkr ?? '0.00';
+      }
+    }
+
+    let change24h = 0;
+    let currentPrice: { usd: number; lkr: number } | null = null;
     try {
-      // Invalidate latest transaction cache
-      await this.redisService.del(CacheKeys.transaction.latest(user_id));
-
-      // Invalidate DCA summary cache
-      await this.redisService.del(CacheKeys.transaction.dcaSummary(user_id));
-
-      // Invalidate paginated transaction lists (all pages)
-      await this.redisService.delByPattern(
-        CacheKeys.patterns.userTransactions(user_id),
-      );
-
-      await this.dbLogger.info(
-        `Invalidated all transaction caches for user: ${user_id}`,
-      );
+      change24h = (await this.bitcoinPriceService.getBitcoin24HrChange()) ?? 0;
+      currentPrice = await this.bitcoinPriceService.getCurrentPrice();
     } catch (error: unknown) {
-      await this.dbLogger.error(
-        `Error invalidating transaction caches for user ${user_id}: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.warn(
+        `Failed to fetch market data for user ${user_id}: ${errorMessage(error)}`,
       );
     }
+
+    return {
+      total_balance,
+      total_lkr,
+      '24_hr_change': change24h,
+      current_btc_price: currentPrice
+        ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
+        : undefined,
+    };
+  }
+
+  /** Clear every per-user cache that a payment can change. Never throws. */
+  async invalidateUserCaches(user_id: string): Promise<void> {
+    await this.redisService.del(CacheKeys.transaction.latest(user_id));
+    await this.redisService.del(CacheKeys.transaction.dcaSummary(user_id));
+    await this.redisService.del(CacheKeys.user.subscription(user_id));
+    await this.redisService.delByPattern(
+      CacheKeys.patterns.userTransactionLists(user_id),
+    );
   }
 }

@@ -1,11 +1,13 @@
-import { Controller, Post, Body, UnauthorizedException } from '@nestjs/common';
-import { AuthService, JwtPayload, TelegramOidcAuthDto } from './auth.service';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
+import {
+  Controller,
+  Post,
+  Body,
+  UnauthorizedException,
+  Logger,
+} from '@nestjs/common';
+import { AuthService, JwtPayload } from './auth.service';
+import { TelegramAuthDto, TelegramOidcAuthDto } from './dto/telegram-auth.dto';
 import { UserService } from '../user/user.service';
-
-interface TelegramAuthDto {
-  initData: string;
-}
 
 interface AuthResponse {
   token: string;
@@ -25,9 +27,10 @@ interface TelegramUser {
 
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private readonly authService: AuthService,
-    private readonly dbLogger: DatabaseLoggerService,
     private readonly userService: UserService,
   ) {}
 
@@ -40,19 +43,14 @@ export class AuthController {
     // Get bot token from environment variable
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     if (!botToken) {
-      await this.dbLogger.error(
-        'Bot token not configured - authentication failed',
-      );
+      this.logger.error('Bot token not configured - authentication failed');
       throw new UnauthorizedException('Bot token not configured');
     }
 
     // Verify the init data
-    const isValid = await this.authService.verifyTelegramInitData(
-      initData,
-      botToken,
-    );
+    const isValid = this.authService.verifyTelegramInitData(initData, botToken);
     if (!isValid) {
-      await this.dbLogger.warn(
+      this.logger.warn(
         'Invalid Telegram init data provided during authentication',
       );
       throw new UnauthorizedException('Invalid Telegram init data');
@@ -61,7 +59,7 @@ export class AuthController {
     // Parse the init data to extract user information
     const parsedData = this.authService.parseTelegramInitData(initData);
     if (!parsedData || !parsedData.user) {
-      await this.dbLogger.warn('Invalid user data in Telegram init data');
+      this.logger.warn('Invalid user data in Telegram init data');
       throw new UnauthorizedException('Invalid user data in init data');
     }
 
@@ -70,9 +68,7 @@ export class AuthController {
     try {
       userData = JSON.parse(parsedData.user) as TelegramUser;
     } catch {
-      await this.dbLogger.warn(
-        'Invalid user data format in Telegram authentication',
-      );
+      this.logger.warn('Invalid user data format in Telegram authentication');
       throw new UnauthorizedException('Invalid user data format');
     }
 
@@ -93,9 +89,9 @@ export class AuthController {
     };
 
     // Generate JWT token
-    const token = await this.authService.generateJwt(payload);
+    const token = this.authService.generateJwt(payload);
 
-    await this.dbLogger.info(
+    this.logger.log(
       `Successful Telegram authentication for user: ${userData.id} (${userData.username || 'no username'})`,
     );
 
@@ -115,7 +111,7 @@ export class AuthController {
   ): Promise<AuthResponse> {
     const clientId = process.env.TELEGRAM_OIDC_CLIENT_ID;
     if (!clientId) {
-      await this.dbLogger.error(
+      this.logger.error(
         'Telegram OIDC client ID not configured - authentication failed',
       );
       throw new UnauthorizedException('Telegram login not configured');
@@ -144,9 +140,9 @@ export class AuthController {
       username: claims.preferred_username,
     };
 
-    const token = await this.authService.generateJwt(payload);
+    const token = this.authService.generateJwt(payload);
 
-    await this.dbLogger.info(
+    this.logger.log(
       `Successful Telegram OIDC authentication for user: ${claims.id} (${claims.preferred_username || 'no username'})`,
     );
 

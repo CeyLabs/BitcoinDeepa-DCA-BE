@@ -1,46 +1,67 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
 import { PayHereService } from '../payhere/payhere.service';
 import { Subscription, SubscriptionDetails } from '../../models/subscription';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import * as dayjs from 'dayjs';
+import { errorMessage } from '../../common/error-message';
 
 @Injectable()
 export class SubscriptionService {
+  private readonly logger = new Logger(SubscriptionService.name);
+
   constructor(
     private readonly knexService: KnexService,
-    private readonly dbLogger: DatabaseLoggerService,
     private readonly payHereService: PayHereService,
     private readonly redisService: RedisService,
   ) {}
 
+  /**
+   * The user's active subscription if there is one, else their newest. An
+   * active plan must win over a newer inactive row (a declined checkout
+   * attempt), or the one-plan check and /cancel would miss the live plan.
+   */
   async getCurrentSubscriptionForUser(
     user_id: string,
   ): Promise<Subscription | undefined> {
     return this.knexService
       .knex<Subscription>('subscription')
       .where({ user_id })
+      .orderBy('is_active', 'desc')
       .orderBy('created_at', 'desc')
       .first();
+  }
+
+  /**
+   * Record who a checkout is for before sending the user to PayHere. The
+   * webhook resolves the subscription's owner from this row (by the signed
+   * order_id), never from the payer-editable custom_1/custom_2.
+   */
+  async createPayHereOrder(
+    order_id: string,
+    user_id: string,
+    package_id: string,
+  ): Promise<void> {
+    await this.knexService
+      .knex('payhere_order')
+      .insert({ order_id, user_id, package_id });
   }
 
   async getCurrentSubscriptionDetailsForUser(
     user_id: string,
   ): Promise<SubscriptionDetails | undefined> {
-    const cacheKey = CacheKeys.user.subscription(user_id);
-
-    // Try to get from cache first
-    const cached = await this.redisService.get<SubscriptionDetails>(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
-    await this.dbLogger.info(
-      `Cache MISS for user subscription: ${user_id}, fetching from database`,
+    const details = await this.redisService.getOrSet(
+      CacheKeys.user.subscription(user_id),
+      300,
+      () => this.loadSubscriptionDetails(user_id),
     );
+    return details ?? undefined;
+  }
 
+  private async loadSubscriptionDetails(
+    user_id: string,
+  ): Promise<SubscriptionDetails | undefined> {
     const result = await this.knexService
       .knex('subscription as s')
       .select(
@@ -48,6 +69,7 @@ export class SubscriptionService {
         's.user_id',
         's.package_id',
         's.is_active',
+        's.payment_processor',
         's.created_at',
         's.updated_at',
         'p.name as package_name',
@@ -100,9 +122,6 @@ export class SubscriptionService {
       frequency: result.frequency,
     };
 
-    // Cache the result for 5 minutes (300 seconds)
-    await this.redisService.set(cacheKey, subscriptionDetails, { ttl: 300 });
-
     return subscriptionDetails;
   }
 
@@ -110,7 +129,7 @@ export class SubscriptionService {
     const trx = await this.knexService.knex.transaction();
 
     try {
-      await this.dbLogger.info(
+      this.logger.log(
         `Starting atomic cancellation for subscription: ${payhere_sub_id}`,
       );
 
@@ -124,7 +143,7 @@ export class SubscriptionService {
       }
 
       // Call PayHere API to cancel subscription
-      await this.dbLogger.info(
+      this.logger.log(
         `Attempting PayHere API cancellation for subscription: ${payhere_sub_id}`,
       );
       const result =
@@ -153,19 +172,19 @@ export class SubscriptionService {
         await this.invalidateUserSubscriptionCache(subscription.user_id);
       } catch (cacheError) {
         // Log cache error but don't fail the operation since DB operation succeeded
-        await this.dbLogger.warn(
-          `Failed to invalidate cache after successful cancellation of ${payhere_sub_id}: ${cacheError.message}`,
+        this.logger.warn(
+          `Failed to invalidate cache after successful cancellation of ${payhere_sub_id}: ${errorMessage(cacheError)}`,
         );
       }
 
-      await this.dbLogger.info(
+      this.logger.log(
         `Subscription ${payhere_sub_id} successfully cancelled atomically`,
       );
     } catch (error) {
       // Rollback transaction on any error
       await trx.rollback();
-      await this.dbLogger.error(
-        `Atomic cancellation failed for subscription ${payhere_sub_id}: ${error.message}`,
+      this.logger.error(
+        `Atomic cancellation failed for subscription ${payhere_sub_id}: ${errorMessage(error)}`,
       );
 
       if (error instanceof BadRequestException) {
@@ -182,8 +201,6 @@ export class SubscriptionService {
   async invalidateUserSubscriptionCache(user_id: string): Promise<void> {
     const cacheKey = CacheKeys.user.subscription(user_id);
     await this.redisService.del(cacheKey);
-    await this.dbLogger.info(
-      `Invalidated subscription cache for user: ${user_id}`,
-    );
+    this.logger.log(`Invalidated subscription cache for user: ${user_id}`);
   }
 }

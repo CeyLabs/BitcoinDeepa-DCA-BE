@@ -9,7 +9,7 @@ interface CoinMarketCapPriceResponse {
   }>;
   status: {
     timestamp: string;
-    error_code: string;
+    error_code: number | string;
     error_message: string;
   };
 }
@@ -42,7 +42,8 @@ export class CoinMarketCapService {
           timeout: 10000,
         });
 
-      if (response.data.status.error_code !== '0') {
+      // CMC documents error_code as a number; accept a numeric string too
+      if (Number(response.data.status?.error_code) !== 0) {
         this.logger.warn(
           `CoinMarketCap API error: ${response.data.status.error_message}`,
         );

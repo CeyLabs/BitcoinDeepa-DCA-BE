@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { JwtPayload } from 'jsonwebtoken';
+import type { JwtPayload } from '../auth/auth.service';
 import { Package } from '../package/package.service';
+import { escapeHtml } from '../../common/escape-html';
 
-interface TgMessage {
+export interface TgMessage {
   id: number | null;
   text: string;
 }
@@ -68,6 +69,16 @@ export class TelegramLoggerService {
     await this.sendMessage(message, true);
   }
 
+  /**
+   * Something that needs a human to look at it (fraud signal, manual fix).
+   * `text` is plain text: it is escaped, since an error message containing
+   * `<` or `&` would make Telegram reject the whole (HTML) alert.
+   */
+  async logAlert(source: string, text: string): Promise<void> {
+    const message = `⚠️ <b>ALERT (${escapeHtml(source)})</b>\n${escapeHtml(text)}`;
+    await this.sendMessage(message);
+  }
+
   async logGenericAction(
     action: string,
     user: JwtPayload,
@@ -77,6 +88,21 @@ export class TelegramLoggerService {
       `Username: <b>${this.formatUsername(user)}</b>\n` +
       `User ID: <b>#UID${user.id}</b>`;
     return await this.sendMessage(message);
+  }
+
+  /**
+   * Post "Action: <action>" to the log group, run `fn`, and react to the
+   * message once `fn` succeeds. `fn` gets the message so it can append to it.
+   */
+  async trackAction<T>(
+    action: string,
+    user: JwtPayload,
+    fn: (message: TgMessage | null) => Promise<T>,
+  ): Promise<T> {
+    const message = await this.logGenericAction(action, user);
+    const result = await fn(message);
+    await this.setMessageReaction(message);
+    return result;
   }
 
   async appendToMessage(
