@@ -98,6 +98,63 @@ describe('Bank account verification (e2e)', () => {
       ]);
     });
 
+    it('scores the account name against the verified ID name, not the Telegram name', async () => {
+      // the member renamed their Telegram profile to match someone else's account
+      await ctx
+        .knex('user')
+        .where({ id: USER })
+        .update({ kyc_full_name: 'Nimal Silva' });
+      const id = await submitBankAccount(ctx, USER);
+      expect(Number((await account(id)).name_match_score)).toBeLessThan(0.5);
+      const res = await asAdmin(ctx, cookies)
+        .get('/admin/bank-reviews')
+        .expect(200);
+      expect(res.body.items[0]).toMatchObject({
+        memberName: 'Test User',
+        verifiedName: 'Nimal Silva',
+      });
+    });
+
+    it('fetches a missing verified name from Didit and keeps it', async () => {
+      await ctx
+        .knex('user')
+        .where({ id: USER })
+        .update({ kyc_full_name: null, kyc_session_id: 'sess-1' });
+      ctx.didit.getSession.mockResolvedValueOnce({
+        status: 'Approved',
+        url: null,
+        verifiedName: 'Test User',
+      });
+      const id = await submitBankAccount(ctx, USER);
+      expect(ctx.didit.getSession).toHaveBeenCalledWith('sess-1');
+      expect(Number((await account(id)).name_match_score)).toBe(1);
+      const user = await ctx.knex('user').where({ id: USER }).first();
+      expect(user.kyc_full_name).toBe('Test User');
+    });
+
+    it('refuses a submission when the verified name is unknown', async () => {
+      await ctx
+        .knex('user')
+        .where({ id: USER })
+        .update({ kyc_full_name: null, kyc_session_id: 'sess-1' });
+      const user = asUser(ctx, USER);
+      const upload = await user
+        .post('/bank-accounts/statement-upload', {
+          contentType: 'application/pdf',
+          size: 120_000,
+        })
+        .expect(201);
+      await user
+        .post('/bank-accounts', {
+          ...ACCOUNT,
+          statementKey: upload.body.key as string,
+        })
+        .expect(503);
+      expect(await ctx.knex('user_bank_account').count()).toEqual([
+        { count: '0' },
+      ]);
+    });
+
     it('requires KYC', async () => {
       await asUser(ctx, OTHER_USER)
         .post('/bank-accounts/statement-upload', {
@@ -191,6 +248,19 @@ describe('Bank account verification (e2e)', () => {
       expect((await account(id)).status).toBe('PENDING_REVIEW');
     });
 
+    it("refuses to approve when the member's KYC is no longer approved", async () => {
+      const id = await submitBankAccount(ctx, USER);
+      await ctx
+        .knex('user')
+        .where({ id: USER })
+        .update({ kyc_status: 'DECLINED' });
+      await asAdmin(ctx, cookies)
+        .post(`/admin/bank-reviews/${id}/approve`)
+        .expect(409);
+      expect((await account(id)).status).toBe('PENDING_REVIEW');
+      expect(ctx.ceyPay.upsertUser).not.toHaveBeenCalled();
+    });
+
     it('needs an admin session', async () => {
       const id = await submitBankAccount(ctx, USER);
       await request(ctx.app.getHttpServer())
@@ -213,6 +283,8 @@ describe('Bank account verification (e2e)', () => {
         id,
         userId: USER,
         memberName: 'Test User',
+        verifiedName: 'Test User',
+        kycStatus: 'APPROVED',
         accountName: 'T. User',
         accountNumber: '1234567890',
         nameMatchScore: 1,

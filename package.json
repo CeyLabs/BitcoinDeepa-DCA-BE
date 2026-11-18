@@ -20,6 +20,7 @@
     "migrate:rollback": "npx knex migrate:rollback",
     "seed": "npx knex seed:run",
     "backfill:payhere-orders": "ts-node src/scripts/backfill-payhere-order-id.ts",
+    "backfill:kyc-names": "ts-node src/scripts/backfill-kyc-names.ts",
     "db:reset": "npm run migrate:rollback && npm run migrate && npm run seed",
     "admin:create": "ts-node src/scripts/create-admin.ts",
     "test": "NODE_OPTIONS='--experimental-vm-modules --disable-warning=ExperimentalWarning' jest",

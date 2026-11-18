@@ -14,6 +14,8 @@ import { Request } from 'express';
 import { UserService } from '../user/user.service';
 import { RedisService } from '../redis/redis.service';
 import { WebhookDto } from './dto/webhook.dto';
+import { DiditService } from './didit.service';
+import { verifiedNameFrom } from './verified-name.util';
 import * as crypto from 'crypto';
 
 const MAX_WEBHOOK_AGE_SECONDS = 300;
@@ -38,6 +40,7 @@ export class DiditController {
     private readonly userService: UserService,
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
+    private readonly diditService: DiditService,
   ) {
     this.webhookSecret =
       this.configService.get<string>('DIDIT_WEBHOOK_SECRET') || '';
@@ -91,11 +94,10 @@ export class DiditController {
         throw new HttpException('User not found', HttpStatus.NOT_FOUND);
       }
 
-      await this.userService.applyDiditResult(
-        user.id,
-        user.kyc_status,
-        webhookData,
-      );
+      await this.userService.applyDiditResult(user.id, user.kyc_status, {
+        ...webhookData,
+        verifiedName: await this.verifiedName(webhookData),
+      });
       return { success: true };
     } catch (error) {
       // Not applied: release the claim so Didit's retry is processed
@@ -109,6 +111,21 @@ export class DiditController {
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
+  }
+
+  /**
+   * The name on the ID, for approvals: from the webhook's decision, else
+   * from Didit's API. Missing is not fatal: bank account submission fetches
+   * it again before it is needed.
+   */
+  private async verifiedName(webhook: WebhookDto): Promise<string | null> {
+    if (webhook.status !== 'Approved') return null;
+    const fromWebhook = verifiedNameFrom(webhook.decision);
+    if (fromWebhook) return fromWebhook;
+    const session = await this.diditService
+      .getSession(webhook.session_id)
+      .catch(() => null);
+    return session?.verifiedName ?? null;
   }
 
   /**

@@ -38,6 +38,8 @@ export interface User {
   kyc_session_id?: string;
   kyc_verified_at?: Date;
   kyc_rejection_reason?: string;
+  /** Name Didit verified from the ID (first/last_name are the Telegram name) */
+  kyc_full_name?: string | null;
 }
 
 export interface TelegramProfile {
@@ -62,6 +64,7 @@ export interface KycStatusUpdate {
   kyc_status: KycStatusType;
   kyc_verified_at?: Date | null;
   kyc_rejection_reason?: string | null;
+  kyc_full_name?: string | null;
 }
 
 export interface KycStatusInfo {
@@ -144,7 +147,12 @@ export class UserService {
   async applyDiditResult(
     userId: string,
     currentStatus: string | undefined,
-    didit: { status: string; failure_reason?: string | null },
+    didit: {
+      status: string;
+      failure_reason?: string | null;
+      /** Name read from the ID; kept on approval, cleared otherwise */
+      verifiedName?: string | null;
+    },
   ): Promise<KycStatus | null> {
     const dbStatus = DiditStatusMapping[didit.status];
     if (!dbStatus) {
@@ -177,7 +185,13 @@ export class UserService {
       kyc_status: dbStatus,
       kyc_verified_at: approved ? new Date() : null,
       kyc_rejection_reason: rejectionReason,
+      kyc_full_name: approved ? (didit.verifiedName ?? null) : null,
     });
+    if (approved && !didit.verifiedName) {
+      this.logger.warn(
+        `KYC approved for user ${userId} without a verified name; it is fetched from Didit when needed`,
+      );
+    }
 
     this.logger.log(
       `Updated KYC status for user ${userId} to ${dbStatus} (Didit: ${didit.status}${rejectionReason ? `, reason: ${rejectionReason}` : ''})`,

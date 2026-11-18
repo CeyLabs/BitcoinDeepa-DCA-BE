@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { KnexModule } from '../knex/knex.module';
 import { AuthModule } from '../auth/auth.module';
 import { UserModule } from '../user/user.module';
+import { DiditModule } from '../didit/didit.module';
 import { CeyPayModule } from '../ceypay/ceypay.module';
 import { StorageModule } from '../storage/storage.module';
 import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module';
@@ -18,6 +19,7 @@ import { BankVerifiedGuard } from './guards/bank-verified.guard';
     KnexModule,
     AuthModule,
     UserModule,
+    DiditModule,
     CeyPayModule,
     StorageModule,
     TelegramLoggerModule,

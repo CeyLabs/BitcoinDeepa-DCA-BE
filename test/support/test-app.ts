@@ -228,6 +228,7 @@ export async function resetData(ctx: TestContext): Promise<void> {
       last_name: 'User',
       ...profile,
       kyc_status: 'APPROVED',
+      kyc_full_name: 'Test User',
     },
     {
       id: OTHER_USER,

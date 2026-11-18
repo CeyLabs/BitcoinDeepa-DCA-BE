@@ -9,11 +9,13 @@ import type { ListBankReviewsQueryDto } from './dto/bank-reviews.dto';
 export interface AdminBankReview {
   id: string;
   userId: string;
-  /** Name on the member's profile (Telegram / KYC) */
+  /** Telegram profile name: chosen by the member, not proof of identity */
   memberName: string;
+  /** Name Didit read from the member's ID: what the statement must match */
+  verifiedName: string | null;
   kycStatus: KycStatus;
   accountName: string;
-  /** 0..1 match of accountName against memberName; a hint only */
+  /** 0..1 match of accountName against verifiedName; a hint only */
   nameMatchScore: number | null;
   bankCode: number;
   bankName: string;
@@ -30,6 +32,7 @@ type Row = {
   user_id: string;
   first_name: string | null;
   last_name: string | null;
+  kyc_full_name: string | null;
   kyc_status: KycStatus;
   account_name: string;
   name_match_score: string | null;
@@ -67,6 +70,7 @@ export class AdminBankReviewsService {
               .orWhereRaw("concat_ws(' ', u.first_name, u.last_name) ilike ?", [
                 like,
               ])
+              .orWhereILike('u.kyc_full_name', like)
               .orWhereILike('b.account_name', like)
               .orWhereILike('b.account_number', like);
           });
@@ -94,6 +98,7 @@ export class AdminBankReviewsService {
           'b.user_id',
           'u.first_name',
           'u.last_name',
+          'u.kyc_full_name',
           'u.kyc_status',
           'b.account_name',
           'b.name_match_score',
@@ -115,6 +120,7 @@ export class AdminBankReviewsService {
       id: row.id,
       userId: row.user_id,
       memberName: [row.first_name, row.last_name].filter(Boolean).join(' '),
+      verifiedName: row.kyc_full_name,
       kycStatus: row.kyc_status,
       accountName: row.account_name,
       nameMatchScore:

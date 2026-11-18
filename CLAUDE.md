@@ -79,8 +79,8 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 
 11. **Bank Account Module** (`src/modules/bank-account/`) - users' payout bank accounts and their admin verification
    - User uploads a statement to R2 via a temporary presigned PUT (`POST /bank-accounts/statement-upload`), then submits the account (`POST /bank-accounts`). The backend `HEAD`s the object (exists, under the user's prefix, PDF/JPEG/PNG, <= 8 MB)
-   - Every account starts `PENDING_REVIEW` (one in review/verified per user). `name_match_score` (ported CeyFi `name-match.util.ts`, account name vs profile name) is only a reviewer hint
-   - Admin approve registers it with CeyPay (aggregator user + bank account) inside the row lock, then sets `VERIFIED`; CeyPay failure leaves it pending (502). Reject needs a reason; the same account can be resubmitted. The user gets a Telegram DM either way
+   - Every account starts `PENDING_REVIEW` (one in review/verified per user). `name_match_score` (ported CeyFi `name-match.util.ts`, account name vs **`user.kyc_full_name`**, the name Didit read from the ID) is only a reviewer hint. Never compare against `first_name`/`last_name`: those are the Telegram profile name, which the member controls. If `kyc_full_name` is missing it is fetched from Didit; without it submission is refused (503)
+   - Admin approve re-checks KYC is still `APPROVED` (409 otherwise), registers it with CeyPay (aggregator user + bank account) inside the row lock, then sets `VERIFIED`; CeyPay failure leaves it pending (502). Reject needs a reason; the same account can be resubmitted. The user gets a Telegram DM either way
    - `BankVerifiedGuard` (exported) gates anything that pays out to the account. Removing an account is blocked while a sell order on it is in flight
 
 12. **Sell Module** (`src/modules/sell/`) - users sell sats for LKR paid to their verified bank account by CeyPay
@@ -148,6 +148,10 @@ bun run prettier       # Format code
 
 # Database operations
 bun run migrate:rollback  # Rollback all migrations
+
+# One-off backfills (dry run by default, --execute writes)
+bun run backfill:payhere-orders  # bind old subscriptions to their PayHere order_id
+bun run backfill:kyc-names       # store the verified ID name for already-approved members
 ```
 
 ## Environment Variables
@@ -312,6 +316,7 @@ try {
 - Webhook signatures (`X-Signature` + `X-Timestamp`) are always verified when `DIDIT_WEBHOOK_SECRET` is set (missing/stale = 401); in production the secret is required
 - Handle various verification statuses: pending, verified, rejected, expired
 - Store Didit session IDs for tracking verification progress
+- On approval, store the name on the ID in `user.kyc_full_name` (webhook `decision.id_verifications[0]`, else `GET /v3/session/{id}/decision/`); it is cleared when KYC is no longer approved. Members approved before this: `bun run backfill:kyc-names` (dry run; `--execute` writes)
 - Use ID verification + liveness detection as minimum requirements
 
 ### Error Handling

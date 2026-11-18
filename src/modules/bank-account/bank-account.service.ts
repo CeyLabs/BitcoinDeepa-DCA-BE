@@ -15,7 +15,9 @@ import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { CeyPayBank, CeyPayService } from '../ceypay/ceypay.service';
 import { R2StorageService } from '../storage/r2-storage.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
-import { UserService } from '../user/user.service';
+import { type User, UserService } from '../user/user.service';
+import { KycStatus } from '../user/enums/kyc-status.enum';
+import { DiditService } from '../didit/didit.service';
 import { errorMessage } from '../../common/error-message';
 import { escapeHtml } from '../../common/escape-html';
 // Only the status list: an account can't be removed under a sale in flight
@@ -102,7 +104,34 @@ export class BankAccountService {
     private readonly storage: R2StorageService,
     private readonly userService: UserService,
     private readonly telegramLogger: TelegramLoggerService,
+    private readonly diditService: DiditService,
   ) {}
+
+  /**
+   * The name Didit read from the member's ID. Stored when KYC is approved;
+   * fetched from Didit (and stored) if it is missing. first_name / last_name
+   * are the Telegram profile name, which the member can change, so they are
+   * never used to judge whose account this is.
+   */
+  async verifiedNameFor(user: User): Promise<string | null> {
+    if (user.kyc_full_name) return user.kyc_full_name;
+    if (!user.kyc_session_id) return null;
+    const session = await this.diditService
+      .getSession(user.kyc_session_id)
+      .catch((error) => {
+        this.logger.warn(
+          `Could not fetch the verified name for user ${user.id}: ${errorMessage(error)}`,
+        );
+        return null;
+      });
+    const name = session?.status === 'Approved' ? session.verifiedName : null;
+    if (name) {
+      await this.knex('user')
+        .where('id', user.id)
+        .update({ kyc_full_name: name });
+    }
+    return name;
+  }
 
   private get knex(): Knex {
     return this.knexService.knex;
@@ -180,7 +209,12 @@ export class BankAccountService {
     if (!bank) throw new BadRequestException('Unknown bank');
 
     const user = await this.userService.getUserOrThrow(userId);
-    const kycName = [user.first_name, user.last_name].filter(Boolean).join(' ');
+    const kycName = await this.verifiedNameFor(user);
+    if (!kycName) {
+      throw new ServiceUnavailableException(
+        "We couldn't confirm the name on your verified ID yet. Please try again in a few minutes.",
+      );
+    }
     const { score } = matchAccountName(dto.accountName, kycName);
 
     const row = await this.knex.transaction(async (trx) => {
@@ -323,7 +357,16 @@ export class BankAccountService {
       const user = await trx('user')
         .where('id', account.user_id)
         .forUpdate()
-        .first<{ id: string; ceypay_user_id: string | null }>();
+        .first<{
+          id: string;
+          ceypay_user_id: string | null;
+          kyc_status: KycStatus;
+        }>();
+      if (user.kyc_status !== KycStatus.APPROVED) {
+        throw new ConflictException(
+          `The member's KYC is no longer approved (${user.kyc_status})`,
+        );
+      }
 
       try {
         let ceypayUserId = user.ceypay_user_id;
