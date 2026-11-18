@@ -96,6 +96,17 @@ bun run db:reset        # Full database reset (rollback + migrate + seed)
 cp .env.template .env  # Configure environment variables
 ```
 
+### Tests
+```bash
+bun run test            # unit tests (src/**/*.spec.ts), no dependencies
+TEST_DATABASE_URL=postgresql://bd_test:bd_test@localhost:5433/bitcoindeepa_dca \
+TEST_REDIS_URL=redis://localhost:6380 \
+bun run test:e2e        # e2e against a disposable Postgres/Redis (see test/README.md)
+```
+- Jest + `@nestjs/testing` + supertest. E2E boots the real `AppModule` via `configureApp()` (`src/app.setup.ts`, shared with `main.ts`) and stubs external services in `test/support/test-app.ts`.
+- E2E tests truncate tables and refuse to run against the `.env` database. Put new unit tests next to the code (`*.spec.ts`), new flows in `test/*.e2e-spec.ts`.
+- CI: `.github/workflows/test.yml` runs tsc, unit and e2e (Postgres + Redis services) on every PR.
+
 ### Development Commands
 ```bash
 # Start development server

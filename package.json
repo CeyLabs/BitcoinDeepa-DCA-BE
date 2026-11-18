@@ -21,11 +21,10 @@
     "seed": "npx knex seed:run",
     "backfill:payhere-orders": "ts-node src/scripts/backfill-payhere-order-id.ts",
     "db:reset": "npm run migrate:rollback && npm run migrate && npm run seed",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:e2e": "jest --config ./test/jest-e2e.json payhere-webhook.e2e-spec.ts",
-    "test:integration": "jest --config ./test/jest-e2e.json payhere-webhook-integration.e2e-spec.ts",
-    "test:cov": "jest --coverage",
+    "test": "NODE_OPTIONS='--experimental-vm-modules --disable-warning=ExperimentalWarning' jest",
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules --disable-warning=ExperimentalWarning' jest --watch",
+    "test:e2e": "NODE_OPTIONS='--experimental-vm-modules --disable-warning=ExperimentalWarning' jest --config ./test/jest-e2e.json",
+    "test:cov": "NODE_OPTIONS='--experimental-vm-modules --disable-warning=ExperimentalWarning' jest --coverage",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "prettier": "prettier --write ."
   },
@@ -87,6 +86,9 @@
       "**/*.(t|j)s"
     ],
     "coverageDirectory": "../coverage",
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "setupFiles": [
+      "<rootDir>/../test/support/silence-logger.ts"
+    ]
   }
 }
