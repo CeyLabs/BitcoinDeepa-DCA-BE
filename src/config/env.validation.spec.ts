@@ -61,6 +61,23 @@ describe('validateEnv', () => {
     ).toThrow(/BETTER_AUTH_URL/);
   });
 
+  it('allows a SameSite=None admin cookie outside production only', () => {
+    expect(() =>
+      validateEnv({ ...base, ADMIN_COOKIE_SAME_SITE: 'none' }),
+    ).not.toThrow();
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        ADMIN_COOKIE_SAME_SITE: 'none',
+      }),
+    ).toThrow(/ADMIN_COOKIE_SAME_SITE/);
+    expect(() =>
+      validateEnv({ ...base, ADMIN_COOKIE_SAME_SITE: 'strict' }),
+    ).toThrow(/ADMIN_COOKIE_SAME_SITE/);
+  });
+
   it('converts numeric strings and rejects out-of-range values', () => {
     expect(validateEnv({ ...base, PORT: '3000' }).PORT).toBe(3000);
     expect(() =>

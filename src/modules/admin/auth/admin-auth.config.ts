@@ -27,6 +27,27 @@ export interface AdminAuthOptions {
   secret: string | undefined;
   baseURL: string;
   production: boolean;
+  /** ADMIN_COOKIE_SAME_SITE: 'none' only for a non-production dashboard on another site */
+  sameSite?: string;
+}
+
+/**
+ * The session cookie's SameSite/Secure. Lax by default: the dashboard and the
+ * API share one registrable domain (admin.<domain> / api.<domain>), so the
+ * cookie is first-party, survives Safari's third-party cookie blocking and
+ * isn't sent on cross-site POSTs. A dev/staging dashboard on another site (a
+ * vercel.app URL against a railway.app API) can opt into None (needs HTTPS);
+ * env validation refuses that in production, and browsers that block
+ * third-party cookies (Safari) still won't send it.
+ */
+export function adminCookieAttributes(
+  production: boolean,
+  sameSite: string | undefined,
+): { sameSite: 'lax' | 'none'; secure: boolean } {
+  if (!production && sameSite === 'none') {
+    return { sameSite: 'none', secure: true };
+  }
+  return { sameSite: 'lax', secure: production };
 }
 
 export async function createAdminAuth({
@@ -34,6 +55,7 @@ export async function createAdminAuth({
   secret,
   baseURL,
   production,
+  sameSite,
 }: AdminAuthOptions) {
   const { betterAuth } = await importEsm<{ betterAuth: typeof BetterAuth }>(
     'better-auth',
@@ -131,13 +153,7 @@ export async function createAdminAuth({
     rateLimit: { enabled: production, window: 60, max: 30 },
     advanced: {
       cookiePrefix: 'bd-admin',
-      // The dashboard and the API share one registrable domain in production
-      // (admin.<domain> / api.<domain>), so the cookie is first-party: Lax is
-      // sent on the dashboard's requests, survives Safari's third-party
-      // cookie blocking, and isn't sent on cross-site POSTs.
-      defaultCookieAttributes: production
-        ? { sameSite: 'lax', secure: true }
-        : { sameSite: 'lax', secure: false },
+      defaultCookieAttributes: adminCookieAttributes(production, sameSite),
     },
   });
 }

@@ -74,7 +74,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Create admins with `bun run admin:create --email <email> --name "<name>"` (prod build: `node dist/src/scripts/create-admin.js ...`; password prompted or `ADMIN_PASSWORD`)
    - Protect admin endpoints with `@UseGuards(AdminSessionGuard)` and read the session with `@CurrentAdmin()`
    - better-auth is ESM-only: it's loaded with a real dynamic `import()` (same trick as jose), so never import it statically outside `import type`
-   - CORS: origins in `ADMIN_APP_URL` get an exact-match credentialed response; other origins keep `CORS_ORIGIN`, without credentials. Production cookies are `SameSite=Lax; Secure` (dashboard and API share a registrable domain). Admin requests other than GET/HEAD/OPTIONS must carry an `Origin` from `ADMIN_APP_URL` (CSRF)
+   - CORS: origins in `ADMIN_APP_URL` get an exact-match credentialed response; other origins keep `CORS_ORIGIN`, without credentials. Cookies are `SameSite=Lax` (`Secure` in production), so **sign-in only works when the dashboard and the API share a registrable domain** (`admin.<domain>` / `api.<domain>`). A dashboard on another site (a `vercel.app` preview against a `railway.app` API; `*.up.railway.app` and `*.vercel.app` are public suffixes, so even two Railway subdomains are different sites) signs in and then gets 401s. For dev/staging only, `ADMIN_COOKIE_SAME_SITE=none` makes it `SameSite=None; Secure` (HTTPS required; refused in production; Safari still blocks it). Admin requests other than GET/HEAD/OPTIONS must carry an `Origin` from `ADMIN_APP_URL` (CSRF)
 
 ### Database Schema
 
@@ -147,6 +147,7 @@ BETTER_AUTH_SECRET=...  # Admin dashboard auth, >= 32 chars (required in product
 BASE_URL=https://api.example.com  # Public URL of this API (required in production)
 BETTER_AUTH_URL=  # Optional, defaults to BASE_URL
 ADMIN_APP_URL=https://admin.example.com  # Admin dashboard origin(s), comma-separated (required in production)
+ADMIN_COOKIE_SAME_SITE=  # Optional, dev/staging only: 'none' for a dashboard on another site (default lax)
 ENABLE_AUTH=true  # Set to 'false' for development (bypasses auth)
 
 # PayHere Integration

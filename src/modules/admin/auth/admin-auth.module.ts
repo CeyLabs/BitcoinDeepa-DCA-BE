@@ -45,6 +45,7 @@ export function createAdminAuthPool(): Pool {
             configService.get<string>('BASE_URL') ||
             `http://localhost:${configService.get<string>('PORT') ?? 3000}`,
           production: configService.get<string>('NODE_ENV') === 'production',
+          sameSite: configService.get<string>('ADMIN_COOKIE_SAME_SITE'),
         }),
     },
     {

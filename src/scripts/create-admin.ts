@@ -72,6 +72,7 @@ async function main(): Promise<void> {
         process.env.BASE_URL ||
         `http://localhost:${process.env.PORT ?? 3000}`,
       production: process.env.NODE_ENV === 'production',
+      sameSite: process.env.ADMIN_COOKIE_SAME_SITE,
     });
     // Server-side call without a session: the admin plugin allows this, and
     // it bypasses disableSignUp.
