@@ -3,6 +3,7 @@ import { AppModule } from './app.module';
 import { configureApp } from './app.setup';
 import { DatabaseSystemLogger } from './modules/knex/database-system-logger.service';
 import { randomUUID, webcrypto } from 'crypto';
+import { runMigrationsOnStartup } from './utils/run-migrations';
 
 // Polyfill global.crypto if not available (older Node runtimes). Falls back
 // to Node's real WebCrypto implementation rather than an empty object —
@@ -17,6 +18,9 @@ if (typeof global.crypto.randomUUID === 'undefined') {
 }
 
 async function bootstrap() {
+  // Apply pending migrations before any module touches the DB
+  await runMigrationsOnStartup();
+
   // Create the app with custom logger
   // rawBody is needed to verify HMAC signatures on incoming webhooks (Didit)
   const app = await NestFactory.create(AppModule, {
@@ -39,4 +43,8 @@ async function bootstrap() {
   databaseLogger.log(`📊 Health check available at: /health`);
 }
 
-void bootstrap();
+bootstrap().catch((error) => {
+  console.error('Error during application bootstrap:', error);
+  // Exit non-zero so Railway's ON_FAILURE restart policy kicks in
+  process.exit(1);
+});

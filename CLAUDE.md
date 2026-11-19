@@ -375,6 +375,8 @@ try {
 2. Implement `up()` and `down()` methods
 3. Run migration: `bun run migrate`
 4. Create corresponding seed file if needed
+- Production applies pending migrations on startup (`src/utils/run-migrations.ts`, before Nest boots); elsewhere only with `RUN_MIGRATIONS_ON_STARTUP=true` (`false` turns it off in production). Keep each migration compatible with the previous release: it keeps serving while the new one migrates, and a rollback starts an older build against the newer schema.
+- Long or non-transactional (`transaction: false`) migrations: run them by hand with the CLI. Killed mid-run, they leave knex's lock set and the app won't start until `npx knex migrate:unlock`.
 
 ### PayHere Webhook Testing
 1. Use ngrok or similar tool to expose local endpoint
