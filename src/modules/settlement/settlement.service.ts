@@ -409,7 +409,7 @@ export class SettlementService {
         .logAlert(
           'Settlement',
           `The BitcoinDeepa bot rejected our signed request: ${result.message}. ` +
-            `Check BITCOINDEEPA_WALLET_ID, BITCOINDEEPA_SEND_PRIVATE_KEY_PEM (its public key must be configured on the bot), the server clock and the bot's IP allowlist. (Reported at most hourly.)`,
+            `Check BITCOINDEEPA_WALLET_ID, BITCOINDEEPA_PRIVATE_KEY_PEM (its public key must be configured on the bot), the server clock and the bot's IP allowlist. (Reported at most hourly.)`,
         )
         .catch(() => undefined);
     }

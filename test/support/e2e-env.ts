@@ -116,7 +116,7 @@ Object.assign(process.env, {
 });
 
 // P2P is on when its key is set (the bot client is mocked; signing is unit-tested)
-process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM = generateKeyPairSync('ed25519')
+process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = generateKeyPairSync('ed25519')
   .privateKey.export({ type: 'pkcs8', format: 'pem' })
   .toString();
 

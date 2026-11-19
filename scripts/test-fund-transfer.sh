@@ -9,8 +9,8 @@
 # the default memo carries a timestamp. Pass your own to test a retry.
 #
 # Needs BITCOINDEEPA_API_URL, BITCOINDEEPA_WALLET_ID and the private key, either
-# BITCOINDEEPA_SEND_PRIVATE_KEY_FILE (path to the PEM) or
-# BITCOINDEEPA_SEND_PRIVATE_KEY_PEM (PEM text, multi-line or with literal \n).
+# BITCOINDEEPA_PRIVATE_KEY_FILE (path to the PEM) or
+# BITCOINDEEPA_PRIVATE_KEY_PEM (PEM text, multi-line or with literal \n).
 # They are read from ENV_FILE (default .env), e.g. ENV_FILE=.env.dev for staging.
 # DRY_RUN=1 prints the signed request without sending it.
 # Requires OpenSSL 3+ (pkeyutl -rawin for Ed25519). macOS ships LibreSSL, which
@@ -80,11 +80,11 @@ fi
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-KEY_FILE="${BITCOINDEEPA_SEND_PRIVATE_KEY_FILE:-}"
+KEY_FILE="${BITCOINDEEPA_PRIVATE_KEY_FILE:-}"
 if [ -z "$KEY_FILE" ]; then
-    : "${BITCOINDEEPA_SEND_PRIVATE_KEY_PEM:?Set BITCOINDEEPA_SEND_PRIVATE_KEY_FILE or BITCOINDEEPA_SEND_PRIVATE_KEY_PEM}"
+    : "${BITCOINDEEPA_PRIVATE_KEY_PEM:?Set BITCOINDEEPA_PRIVATE_KEY_FILE or BITCOINDEEPA_PRIVATE_KEY_PEM}"
     KEY_FILE="$TMP_DIR/key.pem"
-    printf '%b\n' "${BITCOINDEEPA_SEND_PRIVATE_KEY_PEM}" > "$KEY_FILE"
+    printf '%b\n' "${BITCOINDEEPA_PRIVATE_KEY_PEM}" > "$KEY_FILE"
     chmod 600 "$KEY_FILE"
 fi
 

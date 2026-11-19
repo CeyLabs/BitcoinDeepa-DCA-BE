@@ -327,7 +327,7 @@ export class P2pService {
       await this.telegramLogger
         .logAlert(
           'P2P',
-          `P2P sends are failing: ${reason}. Check BITCOINDEEPA_P2P_PRIVATE_KEY_PEM (its public key must be the bot's api.p2p.service_public_key), the server clock and the bot's IP allowlist. (Reported at most hourly.)`,
+          `P2P sends are failing: ${reason}. Check BITCOINDEEPA_PRIVATE_KEY_PEM (its public key must be the bot's api.p2p.service_public_key), the server clock and the bot's IP allowlist. (Reported at most hourly.)`,
         )
         .catch(() => undefined);
     }

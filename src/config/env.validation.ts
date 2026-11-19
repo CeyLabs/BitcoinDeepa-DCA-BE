@@ -200,24 +200,18 @@ class EnvironmentVariables {
   @IsNotEmpty()
   BITCOINDEEPA_WALLET_ID?: string;
 
-  @ValidateIf(presentOrProduction('BITCOINDEEPA_SEND_PRIVATE_KEY_PEM'))
+  // One Ed25519 key signs both the send API and P2P
+  @ValidateIf(presentOrProduction('BITCOINDEEPA_PRIVATE_KEY_PEM'))
   @Validate(IsEd25519PrivateKeyPem)
-  BITCOINDEEPA_SEND_PRIVATE_KEY_PEM?: string;
+  BITCOINDEEPA_PRIVATE_KEY_PEM?: string;
 
   // P2P sends (users' own wallets, relayed to the bot's /api/v1/p2p). On by
-  // default; P2P_ENABLED=false switches it off (/p2p/* answers 503).
+  // default; P2P_ENABLED=false switches it off (/p2p/* answers 503). Signed
+  // with the same BITCOINDEEPA_PRIVATE_KEY_PEM (also the bot's
+  // api.p2p.service_public_key).
   @IsOptional()
   @IsIn(['true', 'false'])
   P2P_ENABLED?: string;
-
-  // A separate Ed25519 key for P2P (not the send key); its public key is the
-  // bot's api.p2p.service_public_key. Optional: without it P2P is off (503),
-  // never a failed boot. Checked whenever set.
-  @ValidateIf(
-    (env: EnvironmentVariables) => !!env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM,
-  )
-  @Validate(IsEd25519PrivateKeyPem)
-  BITCOINDEEPA_P2P_PRIVATE_KEY_PEM?: string;
 
   // Shared secret the bot sends as X-Callback-Secret on its deposit callback.
   // Optional until the bot supports it; when set, the callback requires it.
