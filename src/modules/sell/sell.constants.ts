@@ -65,6 +65,15 @@ export const COUNTED_SELL_STATUSES = [
   SellStatus.NEEDS_REVIEW,
 ];
 
+/**
+ * Orders left out of the member's history (/transaction/list): nothing was
+ * sold. A quote not confirmed yet, and one that expired or was declined.
+ */
+export const NOT_IN_HISTORY_SELL_STATUSES = [
+  SellStatus.QUOTED,
+  SellStatus.EXPIRED,
+];
+
 export const DEFAULT_SELL_MAX_SATS = 5_000_000;
 export const DEFAULT_SELL_DAILY_MAX_SATS = 20_000_000;
 
