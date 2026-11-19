@@ -190,11 +190,14 @@ describe('User sessions (e2e)', () => {
     };
 
     const mockTelegram = (claims: Partial<TelegramOidcClaims> = {}) => {
-      const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(
-        new Response(JSON.stringify({ id_token: 'tg.id.token' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }),
+      // A new Response per call: a body can only be read once
+      const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id_token: 'tg.id.token' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
       );
       const verify = jest
         .spyOn(ctx.app.get(AuthService), 'verifyTelegramOidcIdToken')
@@ -362,7 +365,8 @@ describe('User sessions (e2e)', () => {
         .get('/auth/telegram/callback')
         .query({ code: 'c', state: second.url.searchParams.get('state') })
         .set('Cookie', [second.attempt!, oldSid])
-        .expect(302);
+        .expect(302)
+        .expect('Location', `${APP}/wallet`);
       await http().get('/auth/me').set('Cookie', oldSid).expect(401);
     });
 
