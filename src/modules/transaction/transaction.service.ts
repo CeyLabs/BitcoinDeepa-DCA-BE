@@ -19,6 +19,11 @@ import { PayHereService } from '../payhere/payhere.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 import { errorMessage } from '../../common/error-message';
 import { computeBuyFees } from '../../common/buy-fees';
+import {
+  BUY_ORDER_EXPIRY_GRACE_MINUTES,
+  buyLimits,
+  paidOneTimeLkr,
+} from '../../common/buy-limits';
 
 export type PayHereNotificationParams = PayHereNotificationDto;
 
@@ -39,6 +44,8 @@ export interface Transaction {
   user_id?: string | null;
   /** One-time buys: the checkout order this payment paid */
   payhere_order_id?: string | null;
+  /** Set = settlement skips it until a human releases it */
+  hold_reason?: string | null;
   status: Status;
   btc_price_at_purchase?: number;
   satoshis_purchased?: number;
@@ -133,6 +140,19 @@ interface PayHereOrderRow {
   kind: PurchaseKind;
   amount: string | null;
   currency: string | null;
+  expires_at: Date | null;
+}
+
+/**
+ * A subscription notification for a one-time order: the payer added
+ * recurrence fields (not covered by the checkout hash), so PayHere created a
+ * subscription. Rejected like any bad order; it is also cancelled at PayHere
+ * so it doesn't keep charging the payer for nothing.
+ */
+class OneTimeOrderAsSubscriptionException extends BadRequestException {
+  constructor() {
+    super('order_id is a one-time checkout, not a subscription');
+  }
 }
 
 @Injectable()
@@ -164,14 +184,17 @@ export class TransactionService {
     const updated = await this.knexService
       .knex('transaction')
       .where({ payhere_pay_id, settled: false })
-      .update({ retry_count: 0, last_retry_at: null });
+      // Also releases a held one-time buy (hold_reason)
+      .update({ retry_count: 0, last_retry_at: null, hold_reason: null });
     if (!updated) {
       throw new NotFoundException(
         `No unsettled transaction with payment_id ${payhere_pay_id}`,
       );
     }
 
-    this.logger.warn(`Settlement retries reset for ${payhere_pay_id}`);
+    this.logger.warn(
+      `Settlement retries reset (and any hold released) for ${payhere_pay_id}`,
+    );
     return { payhere_pay_id };
   }
 
@@ -292,9 +315,10 @@ export class TransactionService {
     try {
       let link: PaymentLink;
       let subscription: Subscription | null = null;
+      let order: PayHereOrderRow | null = null;
 
       if (oneTime) {
-        const order = await this.resolveOneTimeOrder(trx, data);
+        order = await this.resolveOneTimeOrder(trx, data);
         userId = order.user_id;
         link = {
           kind: 'ONE_TIME',
@@ -356,18 +380,15 @@ export class TransactionService {
           };
         }
       }
-      if (becameSuccess && oneTime) {
-        // PayHere doesn't stop an order_id being paid twice (e.g. the
-        // checkout form resubmitted). Both are real payments and are
-        // settled, but it bypasses the per-checkout limit check - flag it.
-        const otherPaid = await trx<Transaction>('transaction')
-          .where('payhere_order_id', order_id)
-          .whereNot('payhere_pay_id', payment_id)
-          .whereIn('status', ['SUCCESS', 'CHARGEBACK'])
-          .first();
-        if (otherPaid) {
+      if (becameSuccess && order) {
+        const holdReason = await this.oneTimeHoldReason(trx, order, payment_id);
+        if (holdReason) {
+          await trx('transaction')
+            .update({ hold_reason: holdReason })
+            .where('payhere_pay_id', payment_id);
           alerts.push(
-            `Order ${order_id} (user ${userId}) was paid again: payment ${payment_id} after ${otherPaid.payhere_pay_id}. Both will be settled once PayHere confirms them.`,
+            `One-time buy ${payment_id} (order ${order_id}, user ${userId}, ${payhere_amount} ${payhere_currency}) is HELD, not settled: ${holdReason}. ` +
+              `Check it, then release it with POST /transaction/reset-retry-count/${payment_id}, or refund it in PayHere.`,
           );
         }
       }
@@ -380,9 +401,13 @@ export class TransactionService {
       // A correctly signed notification we refuse is a real PayHere event we
       // didn't record (e.g. unknown order_id) - a human needs to look at it.
       if (error instanceof BadRequestException) {
+        let extra = '';
+        if (error instanceof OneTimeOrderAsSubscriptionException) {
+          extra = ` ${await this.cancelTamperedSubscription(subscription_id)}`;
+        }
         await this.telegramLoggerService.logAlert(
           'PayHere webhook',
-          `Rejected signed notification payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id ?? '-'}: ${errorMessage(error)}`,
+          `Rejected signed notification payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id ?? '-'}: ${errorMessage(error)}.${extra}`,
         );
       }
       this.logger.error(
@@ -413,6 +438,71 @@ export class TransactionService {
       await this.telegramLoggerService.logAlert('PayHere webhook', alert);
     }
     await this.invalidateUserCaches(userId);
+  }
+
+  /**
+   * Why a one-time payment that just became SUCCESS must not be settled
+   * automatically, or null. The link endpoint enforces the limits, but a
+   * PayHere checkout can't expire and can be paid more than once, so they're
+   * checked again here. Held payments are recorded (the member did pay) and
+   * wait for a human.
+   */
+  private async oneTimeHoldReason(
+    trx: Knex.Transaction,
+    order: PayHereOrderRow,
+    payment_id: string,
+  ): Promise<string | null> {
+    const reasons: string[] = [];
+
+    const otherPaid = await trx<Transaction>('transaction')
+      .where('payhere_order_id', order.order_id)
+      .whereNot('payhere_pay_id', payment_id)
+      .whereIn('status', ['SUCCESS', 'CHARGEBACK'])
+      .first();
+    if (otherPaid) {
+      reasons.push(
+        `order was already paid by ${otherPaid.payhere_pay_id} (paid twice)`,
+      );
+    }
+
+    if (order.expires_at) {
+      const late =
+        Date.now() -
+        new Date(order.expires_at).getTime() -
+        BUY_ORDER_EXPIRY_GRACE_MINUTES * 60_000;
+      if (late > 0) {
+        reasons.push(
+          `paid after the checkout expired at ${new Date(order.expires_at).toISOString()}`,
+        );
+      }
+    }
+
+    // Includes this payment (already written in this transaction)
+    const paid = await paidOneTimeLkr(trx, order.user_id);
+    const max = buyLimits.dailyMaxLkr();
+    if (paid > max) {
+      reasons.push(
+        `member's one-time buys in 24h are ${paid} LKR, over the ${max} LKR limit`,
+      );
+    }
+
+    return reasons.length ? reasons.join('; ') : null;
+  }
+
+  /** Cancel a subscription created from a one-time order. Returns alert text. */
+  private async cancelTamperedSubscription(
+    subscription_id: string | undefined,
+  ): Promise<string> {
+    if (!subscription_id) return '';
+    try {
+      const result =
+        await this.payHereService.cancelSubscription(subscription_id);
+      return result.status === 1
+        ? `The payer turned a one-time checkout into subscription ${subscription_id}; it was cancelled at PayHere. Refund this charge in PayHere.`
+        : `The payer turned a one-time checkout into subscription ${subscription_id}; PayHere refused to cancel it (${result.msg}) - cancel it and refund manually.`;
+    } catch (error: unknown) {
+      return `The payer turned a one-time checkout into subscription ${subscription_id}; cancelling it at PayHere failed (${errorMessage(error)}) - cancel it and refund manually.`;
+    }
   }
 
   /**
@@ -629,9 +719,7 @@ export class TransactionService {
           .where('order_id', order_id)
           .first();
         if (order?.kind === 'ONE_TIME') {
-          throw new BadRequestException(
-            'order_id is a one-time checkout, not a subscription',
-          );
+          throw new OneTimeOrderAsSubscriptionException();
         }
         if (order && order.user_id !== existing.user_id) {
           throw new BadRequestException(
@@ -658,9 +746,7 @@ export class TransactionService {
     // A one-time checkout with recurrence fields added by the payer would
     // otherwise become a subscription with no package
     if (order.kind !== 'RECURRING' || !order.package_id) {
-      throw new BadRequestException(
-        'order_id is a one-time checkout, not a subscription',
-      );
+      throw new OneTimeOrderAsSubscriptionException();
     }
     const { user_id, package_id } = order;
     await this.assertOrderIdUnused(trx, order_id, subscription_id);
@@ -870,6 +956,8 @@ export class TransactionService {
    * During a deploy, an instance still running the previous build can insert
    * plan charges without it; copy it from their subscription so they're
    * settled and shown. A no-op once every instance runs this build.
+   *
+   * TODO: remove after the one-time-buy release has rolled out everywhere.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async fillMissingTransactionOwners(): Promise<void> {

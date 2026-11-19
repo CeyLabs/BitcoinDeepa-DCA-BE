@@ -16,6 +16,8 @@ export interface AdminTransaction {
   status: TransactionStatus;
   kind: TransactionKind;
   settled: boolean;
+  /** Set = held for a manual check before settlement */
+  holdReason: string | null;
   grossLkr: number | null;
   netLkr: number | null;
   satoshis: number | null;
@@ -29,6 +31,7 @@ type Row = {
   status: TransactionStatus;
   kind: TransactionKind;
   settled: boolean;
+  hold_reason: string | null;
   gross_amount: string | null;
   net_amount: string | null;
   satoshis_purchased: string | null;
@@ -95,6 +98,7 @@ export class AdminTransactionsService {
           't.status',
           't.kind',
           't.settled',
+          't.hold_reason',
           't.gross_amount',
           't.net_amount',
           't.satoshis_purchased',
@@ -117,6 +121,7 @@ export class AdminTransactionsService {
       status: row.status,
       kind: row.kind,
       settled: row.settled,
+      holdReason: row.hold_reason,
       grossLkr: toNumber(row.gross_amount),
       netLkr: toNumber(row.net_amount),
       satoshis: toNumber(row.satoshis_purchased),

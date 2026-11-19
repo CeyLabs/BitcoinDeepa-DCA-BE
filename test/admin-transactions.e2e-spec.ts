@@ -114,6 +114,7 @@ describe('Admin transactions list (e2e)', () => {
       kind: 'ONE_TIME',
       amount: 2500,
       currency: 'LKR',
+      expires_at: new Date(Date.now() + 30 * 60_000),
     });
     await ctx.knex('transaction').insert({
       payhere_pay_id: 'B1',

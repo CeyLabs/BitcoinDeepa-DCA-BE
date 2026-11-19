@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   NotFoundException,
@@ -13,14 +15,13 @@ import { PayHereService } from '../payhere/payhere.service';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
 import type { Status } from '../transaction/transaction.service';
 import { computeBuyFees } from '../../common/buy-fees';
+import {
+  buyLimits,
+  paidOneTimeLkr,
+  reservedOneTimeLkr,
+} from '../../common/buy-limits';
 
 const CURRENCY = 'LKR';
-export const DEFAULT_BUY_MIN_LKR = 100;
-export const DEFAULT_BUY_MAX_LKR = 100_000;
-export const DEFAULT_BUY_DAILY_MAX_LKR = 250_000;
-// One-time payments that count towards the daily limit. CANCELLED/FAILED
-// moved no money.
-const COUNTED_BUY_STATUSES: Status[] = ['PENDING', 'SUCCESS', 'CHARGEBACK'];
 
 export type BuyOrderStatus = 'AWAITING_PAYMENT' | Status;
 
@@ -34,6 +35,10 @@ export interface BuyOrderView {
   payhere_pay_id: string | null;
   satoshis: number | null;
   settled: boolean;
+  /** Paid, but held for a manual check before the sats are sent */
+  held: boolean;
+  /** Until then the checkout can be paid */
+  expires_at: Date;
 }
 
 @Injectable()
@@ -49,21 +54,6 @@ export class BuyService {
 
   private get knex(): Knex {
     return this.knexService.knex;
-  }
-
-  static minLkr(): number {
-    return parseInt(process.env.BUY_MIN_LKR || String(DEFAULT_BUY_MIN_LKR), 10);
-  }
-
-  static maxLkr(): number {
-    return parseInt(process.env.BUY_MAX_LKR || String(DEFAULT_BUY_MAX_LKR), 10);
-  }
-
-  static dailyMaxLkr(): number {
-    return parseInt(
-      process.env.BUY_DAILY_MAX_LKR || String(DEFAULT_BUY_DAILY_MAX_LKR),
-      10,
-    );
   }
 
   /** Live BTC/LKR, fees and limits for the buy screen. An estimate only. */
@@ -87,9 +77,9 @@ export class BuyService {
       btcLkrPrice: price.lkr,
       paymentProcessorFeeBasisPoints: fees.paymentProcessorFeeBps,
       bitcoindeepaFeeBasisPoints: fees.bitcoindeepaFeeBps,
-      minLkr: BuyService.minLkr(),
-      maxLkr: BuyService.maxLkr(),
-      dailyMaxLkr: BuyService.dailyMaxLkr(),
+      minLkr: buyLimits.minLkr(),
+      maxLkr: buyLimits.maxLkr(),
+      dailyMaxLkr: buyLimits.dailyMaxLkr(),
     };
   }
 
@@ -102,8 +92,8 @@ export class BuyService {
     userId: string,
     amountLkr: number,
   ): Promise<{ link: string; order_id: string }> {
-    const min = BuyService.minLkr();
-    const max = BuyService.maxLkr();
+    const min = buyLimits.minLkr();
+    const max = buyLimits.maxLkr();
     if (amountLkr < min || amountLkr > max) {
       throw new BadRequestException(
         `Amount must be between ${min.toLocaleString('en-US')} and ${max.toLocaleString('en-US')} LKR`,
@@ -119,8 +109,10 @@ export class BuyService {
 
     const orderId = randomUUID();
     await this.knex.transaction(async (trx) => {
-      // Two checkouts at the same moment are limit-checked one after the other
+      // Two checkouts at the same moment are limit-checked one after the
+      // other (each sees the other's reservation)
       await trx('user').where('id', userId).forNoKeyUpdate().first();
+      await this.assertLinkRate(trx, userId);
       await this.assertWithinDailyLimit(trx, userId, amountLkr);
       await trx('payhere_order').insert({
         order_id: orderId,
@@ -129,6 +121,9 @@ export class BuyService {
         kind: 'ONE_TIME',
         amount: amountLkr,
         currency: CURRENCY,
+        expires_at: trx.raw(`now() + make_interval(mins => ?)`, [
+          buyLimits.orderTtlMinutes(),
+        ]),
       });
     });
 
@@ -156,30 +151,47 @@ export class BuyService {
   }
 
   /**
-   * Refuse a checkout that would take the member past the rolling 24h limit.
-   * Counts payments PayHere told us about; unpaid links don't count (they
-   * may never be paid), so several links opened at once can each pass.
+   * At most BUY_LINKS_PER_HOUR checkouts per user per hour. Counted from
+   * payhere_order (every link stores one), so it holds across instances.
+   */
+  private async assertLinkRate(
+    db: Knex.Transaction,
+    userId: string,
+  ): Promise<void> {
+    const row = await db('payhere_order')
+      .where('user_id', userId)
+      .where('kind', 'ONE_TIME')
+      .where('created_at', '>', db.raw("now() - interval '1 hour'"))
+      .count<{ count: string }[]>('* as count')
+      .first();
+    if (Number(row?.count ?? 0) >= buyLimits.linksPerHour()) {
+      throw new HttpException(
+        'Too many checkouts started. Please try again in a while.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
+   * Refuse a checkout that would take the member past the rolling 24h limit:
+   * payments already made plus checkouts that can still be paid (reserved
+   * until they expire). The webhook checks again when a payment arrives.
    */
   private async assertWithinDailyLimit(
-    db: Knex | Knex.Transaction,
+    db: Knex.Transaction,
     userId: string,
     amountLkr: number,
   ): Promise<void> {
-    const row = await db('transaction')
-      .where('user_id', userId)
-      .where('kind', 'ONE_TIME')
-      .whereIn('status', COUNTED_BUY_STATUSES)
-      .where('created_at', '>', db.raw("now() - interval '24 hours'"))
-      .sum<{ total: string | null }>('gross_amount as total')
-      .first();
-    const used = Number(row?.total ?? 0);
-    const max = BuyService.dailyMaxLkr();
+    const used =
+      (await paidOneTimeLkr(db, userId)) +
+      (await reservedOneTimeLkr(db, userId));
+    const max = buyLimits.dailyMaxLkr();
     if (used + amountLkr > max) {
       const left = Math.max(0, max - used);
       throw new BadRequestException(
         left > 0
-          ? `You can buy up to ${left.toLocaleString('en-US')} LKR more today`
-          : `You've reached today's limit of ${max.toLocaleString('en-US')} LKR`,
+          ? `You can buy up to ${left.toLocaleString('en-US')} LKR more today (unfinished checkouts count until they expire)`
+          : `You've reached today's limit of ${max.toLocaleString('en-US')} LKR (unfinished checkouts count until they expire)`,
       );
     }
   }
@@ -193,8 +205,9 @@ export class BuyService {
       amount: string;
       currency: string;
       created_at: Date;
+      expires_at: Date;
     }>('payhere_order')
-      .select('order_id', 'amount', 'currency', 'created_at')
+      .select('order_id', 'amount', 'currency', 'created_at', 'expires_at')
       .where({ order_id: orderId, user_id: userId, kind: 'ONE_TIME' })
       .first();
     if (!order) throw new NotFoundException('Order not found');
@@ -205,9 +218,16 @@ export class BuyService {
       status: Status;
       satoshis_purchased: string | null;
       settled: boolean;
+      hold_reason: string | null;
       created_at: Date;
     }>('transaction')
-      .select('payhere_pay_id', 'status', 'satoshis_purchased', 'settled')
+      .select(
+        'payhere_pay_id',
+        'status',
+        'satoshis_purchased',
+        'settled',
+        'hold_reason',
+      )
       .where('payhere_order_id', orderId)
       .orderBy('created_at', 'desc')
       .first();
@@ -222,6 +242,9 @@ export class BuyService {
       satoshis:
         tx?.satoshis_purchased == null ? null : Number(tx.satoshis_purchased),
       settled: tx?.settled ?? false,
+      // The reason is for the team, not the member
+      held: !!tx?.hold_reason && !tx.settled,
+      expires_at: order.expires_at,
     };
   }
 }

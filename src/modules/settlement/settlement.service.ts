@@ -71,6 +71,8 @@ export class SettlementService {
           .join('user as u', 't.user_id', 'u.id')
           .where('t.status', 'SUCCESS')
           .where('t.settled', false)
+          // Held one-time buys wait for a human (reset-retry-count releases)
+          .whereNull('t.hold_reason')
           .whereNotNull('t.satoshis_purchased')
           .whereNotNull('t.btc_price_at_purchase')
           .where('t.retry_count', '<', MAX_SETTLEMENT_ATTEMPTS)

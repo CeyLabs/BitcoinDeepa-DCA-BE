@@ -183,6 +183,17 @@ class EnvironmentVariables {
   @Min(1)
   BUY_DAILY_MAX_LKR?: number;
 
+  // Minutes a checkout can be paid; later payments are held for review
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  BUY_ORDER_TTL_MINUTES?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  BUY_LINKS_PER_HOUR?: number;
+
   // Sell flow (CeyPay aggregator off-ramp). Off unless SELL_ENABLED=true:
   // the sell and bank-account endpoints answer 503 and its crons don't run.
   @IsOptional()

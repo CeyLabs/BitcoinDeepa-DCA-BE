@@ -103,28 +103,58 @@ describe('One-time buy (e2e)', () => {
         .expect(403);
     });
 
-    it('enforces the rolling 24h limit on paid one-time buys', async () => {
+    it('counts paid buys and unexpired unpaid checkouts towards the 24h limit', async () => {
+      // paid: 100,000
       const first = await newBuy(100_000);
       await notify({
         order_id: first.order_id,
         payment_id: 'B1',
         payhere_amount: first.amount,
       }).expect(200);
-      const second = await newBuy(100_000);
-      await notify({
-        order_id: second.order_id,
-        payment_id: 'B2',
-        payhere_amount: second.amount,
-      }).expect(200);
+      // unpaid but still payable: reserved
+      await newBuy(100_000);
 
       // 200,000 used of 250,000
-      await newBuy(50_000);
       const res = await http()
         .post('/buy/payhere-link')
         .set(auth())
         .send({ amount_lkr: 50_001 })
         .expect(400);
       expect(res.body.message).toContain('50,000');
+      await newBuy(50_000);
+
+      // an expired unpaid checkout no longer reserves its amount
+      await ctx
+        .knex('payhere_order')
+        .where({ user_id: USER, kind: 'ONE_TIME' })
+        .whereNotIn(
+          'order_id',
+          ctx
+            .knex('transaction')
+            .select('payhere_order_id')
+            .whereNotNull('payhere_order_id'),
+        )
+        .update({ expires_at: ctx.knex.raw("now() - interval '1 minute'") });
+      await newBuy(100_000);
+    });
+
+    it('gives each checkout an expiry', async () => {
+      const { order_id } = await newBuy(1000);
+      const order = await ctx.knex('payhere_order').where({ order_id }).first();
+      const minutes =
+        (new Date(order.expires_at).getTime() -
+          new Date(order.created_at).getTime()) /
+        60_000;
+      expect(Math.round(minutes)).toBe(30);
+    });
+
+    it('limits checkouts per hour (429)', async () => {
+      for (let i = 0; i < 10; i++) await newBuy(100);
+      await http()
+        .post('/buy/payhere-link')
+        .set(auth())
+        .send({ amount_lkr: 100 })
+        .expect(429);
     });
 
     it('is allowed while a subscription is active', async () => {
@@ -195,7 +225,7 @@ describe('One-time buy (e2e)', () => {
       expect(await tx('B1')).toBeUndefined();
     });
 
-    it('refuses to turn a one-time order into a subscription', async () => {
+    it('refuses to turn a one-time order into a subscription, and cancels it at PayHere', async () => {
       const { order_id, amount } = await newBuy(1000);
       await notify({
         order_id,
@@ -207,6 +237,7 @@ describe('One-time buy (e2e)', () => {
       expect(
         await ctx.knex('subscription').where({ payhere_sub_id: 'S9' }).first(),
       ).toBeUndefined();
+      expect(ctx.payHereCancel).toHaveBeenCalledWith('S9');
     });
 
     it('follows the forward-only status rules', async () => {
@@ -236,7 +267,7 @@ describe('One-time buy (e2e)', () => {
       expect(await tx('B1')).toMatchObject({ status: 'SUCCESS' });
     });
 
-    it('alerts when an order is paid twice', async () => {
+    it('holds a second payment of the same order instead of settling it', async () => {
       const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
       const { order_id, amount } = await newBuy(1000);
       await notify({
@@ -249,10 +280,85 @@ describe('One-time buy (e2e)', () => {
         payment_id: 'B2',
         payhere_amount: amount,
       }).expect(200);
+      expect(await tx('B1')).toMatchObject({ hold_reason: null });
+      expect((await tx('B2')).hold_reason).toContain('paid twice');
       expect(alert).toHaveBeenCalledWith(
         'PayHere webhook',
-        expect.stringContaining('was paid again'),
+        expect.stringContaining('is HELD'),
       );
+
+      await ctx.app.get(SettlementService).retryUnsettledTransactions();
+      const memos = (
+        ctx.bitcoinDeepa.transferFunds.mock.calls as unknown[][]
+      ).map((c) => c[2]);
+      expect(memos).toEqual(['One-time BTC purchase (Ref: B1)']);
+    });
+
+    it('holds a payment made after the checkout expired', async () => {
+      const { order_id, amount } = await newBuy(1000);
+      await ctx
+        .knex('payhere_order')
+        .where({ order_id })
+        .update({ expires_at: ctx.knex.raw("now() - interval '1 hour'") });
+      await notify({
+        order_id,
+        payment_id: 'B1',
+        payhere_amount: amount,
+      }).expect(200);
+      expect((await tx('B1')).hold_reason).toContain('expired');
+    });
+
+    it('holds a payment that takes the member over the 24h limit', async () => {
+      const big = await newBuy(100_000);
+      const small = await newBuy(10_000);
+      await notify({
+        order_id: big.order_id,
+        payment_id: 'B1',
+        payhere_amount: big.amount,
+      }).expect(200);
+      // e.g. other payments since: the member is now at 245,000
+      await ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'B1' })
+        .update({ gross_amount: 245_000 });
+      await notify({
+        order_id: small.order_id,
+        payment_id: 'B2',
+        payhere_amount: small.amount,
+      }).expect(200);
+      expect((await tx('B2')).hold_reason).toContain(
+        'over the 250000 LKR limit',
+      );
+    });
+
+    it('settles a held payment once a human releases it', async () => {
+      const settlement = ctx.app.get(SettlementService);
+      const { order_id, amount } = await newBuy(1000);
+      await ctx
+        .knex('payhere_order')
+        .where({ order_id })
+        .update({ expires_at: ctx.knex.raw("now() - interval '1 hour'") });
+      await notify({
+        order_id,
+        payment_id: 'B1',
+        payhere_amount: amount,
+      }).expect(200);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      const held = await http()
+        .get(`/buy/orders/${order_id}`)
+        .set(auth())
+        .expect(200);
+      expect(held.body).toMatchObject({ status: 'SUCCESS', held: true });
+
+      await http()
+        .post('/transaction/reset-retry-count/B1')
+        .set('x-admin-key', process.env.ADMIN_API_KEY!)
+        .expect(201);
+      expect(await tx('B1')).toMatchObject({ hold_reason: null });
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
+      expect(await tx('B1')).toMatchObject({ settled: true });
     });
   });
 
@@ -268,6 +374,7 @@ describe('One-time buy (e2e)', () => {
         amount_lkr: 1000,
         status: 'AWAITING_PAYMENT',
         settled: false,
+        held: false,
       });
 
       await notify({
