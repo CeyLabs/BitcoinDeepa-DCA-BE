@@ -5,6 +5,7 @@ import type { P2pBotClient } from './p2p-bot.client';
 import type { P2pCredentialService } from './p2p-credential.service';
 import type { RedisService } from '../redis/redis.service';
 import type { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import type { UserService } from '../user/user.service';
 
 const credential = { kind: 'initData' as const, value: 'init' };
 
@@ -28,11 +29,13 @@ describe('P2pService', () => {
   const credentials = { resolve: jest.fn() };
   const redis = { setIfAbsent: jest.fn(), del: jest.fn() };
   const telegramLogger = { logAlert: jest.fn().mockResolvedValue(undefined) };
+  const users = { getUserByUsername: jest.fn() };
   const service = new P2pService(
     bot as unknown as P2pBotClient,
     credentials as unknown as P2pCredentialService,
     redis as unknown as RedisService,
     telegramLogger as unknown as TelegramLoggerService,
+    users as unknown as UserService,
   );
   const send = (extra = {}) =>
     service.send('42', 'init', {
@@ -91,6 +94,44 @@ describe('P2pService', () => {
     );
   });
 
+  describe('resolveRecipient (our usernames, from the DB)', () => {
+    it('finds a member by @username without calling the bot', async () => {
+      users.getUserByUsername.mockResolvedValue({
+        id: '7',
+        first_name: 'Telegram',
+        last_name: 'Name',
+        kyc_full_name: 'Nimal Silva Fernando',
+        avatar_seed: 'abc',
+      });
+      const result = await service.resolveRecipient('42', { to: ' @Nimal ' });
+      expect(users.getUserByUsername).toHaveBeenCalledWith('nimal');
+      expect(bot.request).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        status: 200,
+        body: {
+          telegram_id: 7,
+          username: 'nimal',
+          name: 'Nimal S.',
+          avatar_seed: 'abc',
+        },
+      });
+    });
+
+    it('404 when no one has it, 400 for a bad name or yourself', async () => {
+      users.getUserByUsername.mockResolvedValue(undefined);
+      expect(
+        await errorOf(service.resolveRecipient('42', { to: 'nobody' })),
+      ).toMatchObject({ status: 404, body: { code: 'recipient_not_found' } });
+      expect(
+        await errorOf(service.resolveRecipient('42', { to: '1bad' })),
+      ).toMatchObject({ status: 400, body: { code: 'invalid_username' } });
+      users.getUserByUsername.mockResolvedValue({ id: '42' });
+      expect(
+        await errorOf(service.resolveRecipient('42', { to: 'me_me' })),
+      ).toMatchObject({ status: 400, body: { code: 'cannot_send_to_self' } });
+    });
+  });
+
   it("passes the bot's own 4xx through (user-facing message)", async () => {
     bot.request.mockResolvedValue({
       status: 404,
@@ -99,9 +140,7 @@ describe('P2pService', () => {
         message: 'No Bitcoin Deepa user found.',
       },
     });
-    expect(
-      await errorOf(service.resolveRecipient('42', 'init', { to: '@x' })),
-    ).toEqual({
+    expect(await errorOf(send())).toEqual({
       status: 404,
       body: {
         code: 'recipient_not_found',

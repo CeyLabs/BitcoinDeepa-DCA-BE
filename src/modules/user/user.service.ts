@@ -1,4 +1,10 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { usernameUnavailableReason } from './username';
 import { KnexService } from '../knex/knex.service';
 import {
   DiditStatusMapping,
@@ -42,6 +48,8 @@ export interface User {
   kyc_full_name?: string | null;
   /** Seed of the user's DiceBear avatar (the app draws it); null = drawn from the id */
   avatar_seed?: string | null;
+  /** The member's Bitcoin Deepa @username (not Telegram's); claimed once, permanent */
+  username?: string | null;
 }
 
 export interface TelegramProfile {
@@ -112,6 +120,52 @@ export class UserService {
       .knex('user')
       .where('id', id)
       .update({ avatar_seed: seed });
+  }
+
+  /** A member by their (normalized) Bitcoin Deepa username */
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    return this.knexService.knex<User>('user').where({ username }).first();
+  }
+
+  /** null if the (normalized) username can be claimed, else why not */
+  async usernameUnavailableReason(username: string): Promise<string | null> {
+    const format = usernameUnavailableReason(username, false);
+    if (format) return format;
+    return usernameUnavailableReason(
+      username,
+      !!(await this.getUserByUsername(username)),
+    );
+  }
+
+  /**
+   * Claim a username, once: it never changes after this. 409 when the user
+   * already has one, or it's reserved or taken (also when someone else
+   * claims it at the same moment: the unique index decides).
+   */
+  async claimUsername(id: string, username: string): Promise<void> {
+    const user = await this.getUserOrThrow(id);
+    if (user.username) {
+      throw new ConflictException(
+        `You already have the username @${user.username}`,
+      );
+    }
+    const reason = await this.usernameUnavailableReason(username);
+    if (reason) throw new ConflictException(reason);
+    try {
+      const updated = await this.knexService
+        .knex('user')
+        .where({ id })
+        .whereNull('username')
+        .update({ username });
+      if (updated === 0) {
+        throw new ConflictException('You already have a username');
+      }
+    } catch (error) {
+      if ((error as { code?: string })?.code === '23505') {
+        throw new ConflictException('This username is taken');
+      }
+      throw error;
+    }
   }
 
   async getUserById(id: string): Promise<User | undefined> {
