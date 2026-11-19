@@ -534,8 +534,6 @@ export class SellService {
       throw new GoneException('Quote expired, please get a new one');
     }
     if (claim.kind === 'done') return this.getOrder(userId, id);
-    // Now a sale in the member's history (setStatus ran inside the transaction)
-    await this.clearHistoryCache(userId);
 
     // No lock held while the bot works
     const order = claim.order;
@@ -1299,15 +1297,6 @@ export class SellService {
       .whereIn('status', from)
       .update({ ...changes, updated_at: db.fn.now() })
       .returning('*');
-    // Inside a transaction the caller clears it after the commit
-    if (row && !db.isTransaction) await this.clearHistoryCache(row.user_id);
     return row;
-  }
-
-  /** /transaction/list shows sales and is cached per member. Never throws. */
-  private async clearHistoryCache(userId: string): Promise<void> {
-    await this.redisService.delByPattern(
-      CacheKeys.patterns.userTransactionLists(userId),
-    );
   }
 }
