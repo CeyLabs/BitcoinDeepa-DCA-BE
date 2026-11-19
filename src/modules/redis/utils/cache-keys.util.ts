@@ -31,6 +31,8 @@ export class CacheKeys {
     ceylonCashBtcUsd: (): string => `${CacheKeys.PREFIX}:btc:usd:ceyloncash`,
     ceypayUsdtLkr: (): string => `${CacheKeys.PREFIX}:btc:usdt-lkr:ceypay`,
     cmc24hChange: (): string => `${CacheKeys.PREFIX}:btc:change-24h:cmc`,
+    // Not under btc:* - clearing the price cache must not release the claim
+    rateLogClaim: (): string => `${CacheKeys.PREFIX}:rate-log:claim`,
   };
 
   // Sell flow cache keys

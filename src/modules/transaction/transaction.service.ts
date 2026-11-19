@@ -650,7 +650,7 @@ export class TransactionService {
     ) {
       return null;
     }
-    return this.fetchBitcoinDataForTransaction(amount, currency);
+    return this.fetchBitcoinDataForTransaction(amount, currency, payment_id);
   }
 
   /**
@@ -1025,9 +1025,16 @@ export class TransactionService {
     }
   }
 
+  /**
+   * Price data for a payment. `coingecko_timestamp` is when the price was
+   * taken: now for a live price, or the exchange_rate_log row's created_at
+   * when the live price was down and the logged rate was used (then it is
+   * earlier than the payment, and the log line below names the row).
+   */
   private async fetchBitcoinDataForTransaction(
     amount: number,
     currency: string,
+    paymentId: string,
   ): Promise<BitcoinData | null> {
     try {
       if (process.env.ENABLE_BITCOIN_TRACKING === 'false') {
@@ -1046,20 +1053,26 @@ export class TransactionService {
       );
       if (!calc) {
         this.logger.warn(
-          `Failed to fetch Bitcoin price for ${netAmount} ${currency} - will be backfilled later`,
+          `Failed to fetch Bitcoin price for ${paymentId} (${netAmount} ${currency}) - will be backfilled later`,
         );
         return null;
       }
 
-      this.logger.log(
-        `Bitcoin buy calculation: ${amount} ${currency} gross, ${fees.totalFees} fees, ${netAmount} net = ${calc.satoshis} sats at ${calc.btc_price} ${currency}/BTC`,
-      );
+      const calculation = `Bitcoin buy calculation for ${paymentId}: ${amount} ${currency} gross, ${fees.totalFees} fees, ${netAmount} net = ${calc.satoshis} sats at ${calc.btc_price} ${currency}/BTC`;
+      if (calc.source === 'log') {
+        // Not the live price: keep this findable if the member disputes it
+        this.logger.warn(
+          `${calculation} (live price unavailable: exchange_rate_log #${calc.rate_log_id}, logged at ${calc.priced_at.toISOString()})`,
+        );
+      } else {
+        this.logger.log(`${calculation} (live price)`);
+      }
 
       return {
         btc_price_at_purchase: calc.btc_price,
         satoshis_purchased: calc.satoshis,
         price_currency: calc.currency,
-        coingecko_timestamp: new Date(),
+        coingecko_timestamp: calc.priced_at,
         gross_amount: amount,
         payment_processor_fee_basis_points: fees.paymentProcessorFeeBps,
         payment_processor_fee_amount: fees.paymentProcessorFee,
@@ -1069,7 +1082,7 @@ export class TransactionService {
       };
     } catch (error: unknown) {
       this.logger.error(
-        `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${errorMessage(error)}`,
+        `Error fetching Bitcoin data for ${paymentId} (${amount} ${currency}): ${errorMessage(error)}`,
       );
       return null;
     }
@@ -1146,6 +1159,7 @@ export class TransactionService {
         const data = await this.fetchBitcoinDataForTransaction(
           amount,
           row.currency,
+          row.payhere_pay_id,
         );
         if (!data) {
           return; // price source still down - try again next run
@@ -1160,7 +1174,7 @@ export class TransactionService {
 
         if (updated) {
           this.logger.warn(
-            `Backfilled Bitcoin data for ${row.payhere_pay_id}: ${data.satoshis_purchased} sats at ${data.btc_price_at_purchase} (price taken at backfill time)`,
+            `Backfilled Bitcoin data for ${row.payhere_pay_id}: ${data.satoshis_purchased} sats at ${data.btc_price_at_purchase} (priced by the backfill, not at payment time; price as of ${data.coingecko_timestamp?.toISOString()})`,
           );
           await this.invalidateUserCaches(row.user_id);
         }

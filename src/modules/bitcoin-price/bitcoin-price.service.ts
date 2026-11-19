@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import axios, { AxiosResponse } from 'axios';
 import Big from 'big.js';
+import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { CeyPayError, CeyPayService } from '../ceypay/ceypay.service';
@@ -20,6 +22,29 @@ export interface BtcLkrRate {
   btcUsd: number;
   /** CeyPay USDT/LKR (USDT taken as 1 USD) */
   usdtLkr: number;
+}
+
+/** A rate read back from exchange_rate_log. */
+export interface LoggedBtcLkrRate extends BtcLkrRate {
+  /** exchange_rate_log.id */
+  id: string;
+  /** When it was recorded (the row's created_at) */
+  loggedAt: Date;
+}
+
+/** Where a payment's price came from: the live feed or exchange_rate_log */
+export type PriceSource = 'live' | 'log';
+
+export interface SatoshiCalculation {
+  satoshis: number;
+  btc_price: number;
+  currency: string;
+  /** 'log' = the live price was down, priced from exchange_rate_log */
+  source: PriceSource;
+  /** When the price was taken: now (live) or the logged row's created_at */
+  priced_at: Date;
+  /** The exchange_rate_log row used, when source is 'log' */
+  rate_log_id?: string;
 }
 
 /** fx.ceyloncash.com/currency/BTC */
@@ -44,6 +69,36 @@ const CHANGE_24H_CACHE_TTL_SECONDS = parseInt(
   10,
 );
 const SATOSHIS_PER_BTC = 100_000_000;
+/** One instance records the rate per minute (the claim outlives a late tick) */
+const RATE_LOG_CLAIM_TTL_SECONDS = 50;
+/**
+ * Default for EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS. A row is written every
+ * minute, so this covers two missed ticks; anything longer is a real outage
+ * and the payment waits for the backfill cron.
+ */
+export const DEFAULT_FALLBACK_MAX_AGE_SECONDS = 180;
+/**
+ * The most EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS can be (validateEnv rejects
+ * more): a payment priced from the log is settled automatically, so a typo
+ * must not price it at an hours-old rate.
+ */
+export const MAX_FALLBACK_MAX_AGE_SECONDS = 900;
+
+/**
+ * How old a logged rate may be and still price a payment when the live price
+ * is unavailable (EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS, 0 = never). Unset,
+ * empty or out of range = the default.
+ */
+export const fallbackMaxAgeSeconds = (): number => {
+  const raw = process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS?.trim();
+  if (!raw) return DEFAULT_FALLBACK_MAX_AGE_SECONDS;
+  const value = Number(raw);
+  return Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_FALLBACK_MAX_AGE_SECONDS
+    ? value
+    : DEFAULT_FALLBACK_MAX_AGE_SECONDS;
+};
 
 // Integer division, rounded down (its own constructor: Big.DP/RM are global)
 const BigFloor = Big();
@@ -84,6 +139,7 @@ export class BitcoinPriceService {
     private readonly redisService: RedisService,
     private readonly ceyPay: CeyPayService,
     private readonly coinMarketCap: CoinMarketCapService,
+    private readonly knexService: KnexService,
   ) {}
 
   /** BTC/LKR with its parts; null when either rate is unavailable. Never throws. */
@@ -111,18 +167,136 @@ export class BitcoinPriceService {
     return rate ? { btc_price: rate.btcLkr, currency: 'LKR' } : null;
   }
 
+  /**
+   * Sats for a buy/DCA payment. Priced live; when the live price is
+   * unavailable, from the latest exchange_rate_log row if it is recent enough
+   * (see getRecentLoggedRate). Null when there is neither. `source` and
+   * `priced_at` say which it was, so the caller can record it.
+   */
   async calculateSatoshis(
     amount: number,
     currency: string,
-  ): Promise<{ satoshis: number; btc_price: number; currency: string } | null> {
-    const priceData = await this.getBitcoinPrice(currency);
-    if (!priceData) return null;
+  ): Promise<SatoshiCalculation | null> {
+    const live = await this.getBitcoinPrice(currency);
+    if (live) {
+      return {
+        satoshis: satoshisFor(amount, live.btc_price),
+        btc_price: live.btc_price,
+        currency: live.currency,
+        source: 'live',
+        priced_at: new Date(),
+      };
+    }
+    if (currency.toUpperCase() !== 'LKR') return null;
 
+    const logged = await this.getRecentLoggedRate();
+    if (!logged) return null;
     return {
-      satoshis: satoshisFor(amount, priceData.btc_price),
-      btc_price: priceData.btc_price,
-      currency: priceData.currency,
+      satoshis: satoshisFor(amount, logged.btcLkr),
+      btc_price: logged.btcLkr,
+      currency: 'LKR',
+      source: 'log',
+      priced_at: logged.loggedAt,
+      rate_log_id: logged.id,
     };
+  }
+
+  /**
+   * Append the current rate to exchange_rate_log as the one active row
+   * (the previous one is deactivated), once a minute across instances.
+   * Nothing is written while a rate is unavailable, so the active row's age
+   * says how long the outage has lasted. (The rate can be up to the cache
+   * TTLs older than its created_at: 30s for BTC/USD.) Like the backfill
+   * cron, it does nothing while ENABLE_BITCOIN_TRACKING is off: no payment is
+   * priced then, so there is nothing to fetch rates for.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async recordExchangeRate(): Promise<void> {
+    if (process.env.ENABLE_BITCOIN_TRACKING === 'false') return;
+    try {
+      const claimed = await this.redisService.setIfAbsent(
+        CacheKeys.bitcoin.rateLogClaim(),
+        RATE_LOG_CLAIM_TTL_SECONDS,
+      );
+      if (!claimed) return;
+      const rate = await this.getBtcLkrRate();
+      if (!rate) return;
+      await this.knexService.knex.transaction(async (trx) => {
+        // One writer at a time: two instances deactivating and inserting
+        // together would both insert an active row (unique index violation)
+        await trx.raw(
+          "SELECT pg_advisory_xact_lock(hashtext('exchange_rate_log'))",
+        );
+        await trx('exchange_rate_log')
+          .where('is_active', true)
+          .update({ is_active: false });
+        await trx('exchange_rate_log').insert({
+          btc_usd: rate.btcUsd,
+          usdt_lkr: rate.usdtLkr,
+          btc_lkr: rate.btcLkr,
+          is_active: true,
+        });
+      });
+    } catch (error) {
+      this.logger.error(`Recording the exchange rate: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * The active logged rate, if it is at most
+   * EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS old. Only for pricing a payment
+   * that has already been made while the live price is down - quotes and
+   * displayed prices stay live. Null when there is none. Never throws.
+   */
+  async getRecentLoggedRate(): Promise<LoggedBtcLkrRate | null> {
+    const maxAge = fallbackMaxAgeSeconds();
+    if (maxAge === 0) return null;
+    try {
+      const row = await this.knexService
+        .knex('exchange_rate_log')
+        .select(
+          'id',
+          'btc_usd',
+          'usdt_lkr',
+          'btc_lkr',
+          'created_at',
+          this.knexService.knex.raw(
+            'extract(epoch from now() - created_at)::int as age_seconds',
+          ),
+        )
+        .where('is_active', true)
+        .where(
+          'created_at',
+          '>=',
+          this.knexService.knex.raw('now() - make_interval(secs => ?)', [
+            maxAge,
+          ]),
+        )
+        .first<{
+          id: string;
+          btc_usd: string;
+          usdt_lkr: string;
+          btc_lkr: string;
+          created_at: Date;
+          age_seconds: number;
+        }>();
+      if (!row) return null;
+      this.logger.warn(
+        `Live BTC/LKR unavailable: using exchange_rate_log #${row.id}, logged ${row.age_seconds}s ago (${row.btc_lkr} LKR/BTC)`,
+      );
+      return {
+        id: String(row.id),
+        loggedAt: new Date(row.created_at),
+        btcLkr: Number(row.btc_lkr),
+        btcUsd: Number(row.btc_usd),
+        usdtLkr: Number(row.usdt_lkr),
+      };
+    } catch (error) {
+      this.logger.error(
+        `Reading the logged exchange rate: ${errorMessage(error)}`,
+      );
+      return null;
+    }
   }
 
   /**

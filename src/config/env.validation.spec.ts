@@ -172,6 +172,20 @@ describe('validateEnv', () => {
     ).toThrow(/PAYHERE_FEE_BASIS_POINTS/);
   });
 
+  it('caps how old a fallback exchange rate may be', () => {
+    const name = 'EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS';
+    expect(validateEnv({ ...base, [name]: '300' })[name]).toBe(300);
+    expect(() => validateEnv({ ...base, [name]: '900' })).not.toThrow();
+    expect(() => validateEnv({ ...base, [name]: '0' })).not.toThrow(); // off
+    // a typo for 300 must not price payments at an 8-hour-old rate
+    expect(() => validateEnv({ ...base, [name]: '30000' })).toThrow(
+      /EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS/,
+    );
+    expect(() => validateEnv({ ...base, [name]: '-1' })).toThrow(
+      /EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS/,
+    );
+  });
+
   it("accepts the knexfile's localhost environment", () => {
     expect(() => validateEnv({ ...base, NODE_ENV: 'localhost' })).not.toThrow();
   });
