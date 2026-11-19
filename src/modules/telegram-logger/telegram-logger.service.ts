@@ -40,6 +40,8 @@ export class TelegramLoggerService {
   private warnedNotConfigured = false;
   private queuedAlerts: string[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
+  /** A drain is sending the queue: no second one may start */
+  private draining = false;
 
   constructor() {
     this.botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -107,11 +109,16 @@ export class TelegramLoggerService {
       this.logger.error(`ALERT (${source}): ${text}`);
       return;
     }
-    const outcome = await this.callLogGroup(
-      'sendMessage',
-      { text: message, parse_mode: 'HTML' },
-      true,
-    );
+    // Earlier alerts are still waiting: go behind them, so alerts arrive in
+    // order and new ones don't use up the slots the queue is waiting for
+    const outcome =
+      this.queuedAlerts.length > 0
+        ? { ok: false, limited: true }
+        : await this.callLogGroup(
+            'sendMessage',
+            { text: message, parse_mode: 'HTML' },
+            true,
+          );
     if (outcome.ok) return;
     // Never lose an alert silently: it's always in the app log, and when only
     // rate limits stopped it, it's sent once the pause ends
@@ -133,7 +140,10 @@ export class TelegramLoggerService {
   }
 
   private scheduleAlertFlush(): void {
-    if (this.flushTimer || this.queuedAlerts.length === 0) return;
+    // A running drain schedules the next one itself when it ends
+    if (this.flushTimer || this.draining || this.queuedAlerts.length === 0) {
+      return;
+    }
     // After the 429 pause, or after the per-minute window frees a slot
     const delay = Math.max(this.blockedUntil - Date.now(), 0) + 1_000;
     this.flushTimer = setTimeout(() => {
@@ -145,15 +155,23 @@ export class TelegramLoggerService {
 
   /** Send queued alerts in order; stop (and reschedule) at the first limit. */
   async flushAlerts(): Promise<void> {
-    while (this.queuedAlerts.length > 0) {
-      const outcome = await this.callLogGroup(
-        'sendMessage',
-        { text: this.queuedAlerts[0], parse_mode: 'HTML' },
-        true,
-      );
-      if (!outcome.ok && outcome.limited) break;
-      // Sent, or failed for another reason (already in the app log): next
-      this.queuedAlerts.shift();
+    // Two drains at once would both send the queue's head
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      while (this.queuedAlerts.length > 0) {
+        const outcome = await this.callLogGroup(
+          'sendMessage',
+          { text: this.queuedAlerts[0], parse_mode: 'HTML' },
+          true,
+        );
+        // Limited: the head stays queued and is retried by the next drain
+        if (!outcome.ok && outcome.limited) break;
+        // Sent, or failed for another reason (already in the app log): next
+        this.queuedAlerts.shift();
+      }
+    } finally {
+      this.draining = false;
     }
     this.scheduleAlertFlush();
   }

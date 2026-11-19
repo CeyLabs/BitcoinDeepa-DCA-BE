@@ -171,6 +171,50 @@ describe('TelegramLoggerService log group limits', () => {
     );
   });
 
+  it('a new alert waits behind queued ones, so they arrive in order', async () => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    const service = new TelegramLoggerService();
+    fetchMock.mockImplementationOnce(() => tooMany(10));
+    await service.logAlert('S', 'first');
+    // The pause has ended but the queued alert hasn't been sent yet
+    await jest.advanceTimersByTimeAsync(10_500);
+    await service.logAlert('S', 'second');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    const texts = fetchMock.mock.calls.slice(1).map(
+      (c) =>
+        (
+          JSON.parse((c as [string, { body: string }])[1].body) as {
+            text: string;
+          }
+        ).text,
+    );
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toContain('first');
+    expect(texts[1]).toContain('second');
+  });
+
+  it('never runs two drains at once (each queued alert is sent once)', async () => {
+    const service = new TelegramLoggerService();
+    let release!: () => void;
+    fetchMock.mockImplementationOnce(() => tooMany(1)); // queues it
+    await service.logAlert('S', 'only-once');
+    // The drain's request hangs until released
+    fetchMock.mockImplementationOnce(
+      () => new Promise((resolve) => (release = () => resolve(ok()))),
+    );
+    (service as unknown as { blockedUntil: number }).blockedUntil = 0;
+    const first = service.flushAlerts();
+    await service.flushAlerts(); // a second drain while the first is sending
+    release();
+    await first;
+    const sent = fetchMock.mock.calls.filter(([, init]) =>
+      (init as { body: string }).body.includes('only-once'),
+    );
+    expect(sent).toHaveLength(2); // the 429'd try + one drain send
+  });
+
   it('a 429 without retry_after uses the Retry-After header, else 30s', async () => {
     jest.useFakeTimers({ now: 1_000_000 });
     const service = new TelegramLoggerService();

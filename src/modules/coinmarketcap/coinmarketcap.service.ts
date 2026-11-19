@@ -59,10 +59,23 @@ export class CoinMarketCapService {
           timeout: 10000,
         });
 
-      // CMC documents error_code as a number; accept a numeric string too
-      if (Number(response.data.status?.error_code) !== 0) {
+      // CMC documents error_code as a number; accept a numeric string too.
+      // A body without a usable code is malformed, not an API error.
+      const code = response.data.status?.error_code as unknown;
+      const errorCode =
+        typeof code === 'number' ||
+        (typeof code === 'string' && code.trim() !== '')
+          ? Number(code)
+          : NaN;
+      if (!Number.isFinite(errorCode)) {
         this.logger.warn(
-          `CoinMarketCap API error: ${response.data.status.error_message}`,
+          'CoinMarketCap returned a response without a status code',
+        );
+        return { failure: 'TRANSIENT' };
+      }
+      if (errorCode !== 0) {
+        this.logger.warn(
+          `CoinMarketCap API error: ${response.data.status?.error_message}`,
         );
         return { failure: 'PERSISTENT' };
       }

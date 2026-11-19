@@ -98,10 +98,26 @@ describe('CoinMarketCapService.fetchBitcoinData', () => {
       },
     );
 
-    it('an API error code in the body is PERSISTENT', async () => {
-      get.mockResolvedValue(ok({ price: 1 }, 1002));
+    it.each([1002, '1002'])(
+      'an API error code in the body (%p) is PERSISTENT',
+      async (code) => {
+        get.mockResolvedValue(ok({ price: 1 }, code));
+        await expect(service.fetchBitcoinDataResult()).resolves.toEqual({
+          failure: 'PERSISTENT',
+        });
+      },
+    );
+
+    it.each([
+      ['an empty status', { status: {} }],
+      ['no status', {}],
+      ['a non-numeric code', { status: { error_code: 'oops' } }],
+      ['an empty code', { status: { error_code: '' } }],
+    ])('a body with %s is TRANSIENT', async (_, body) => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      get.mockResolvedValue({ data: { data: [{ id: 1, price: 1 }], ...body } });
       await expect(service.fetchBitcoinDataResult()).resolves.toEqual({
-        failure: 'PERSISTENT',
+        failure: 'TRANSIENT',
       });
     });
 
