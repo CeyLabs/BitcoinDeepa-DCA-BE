@@ -112,6 +112,29 @@ export class P2pService {
     return result;
   }
 
+  /**
+   * The user pays a collect request (a sale's debit) from the app. Needs a
+   * spend-fresh credential, like /send; repeats return the same transfer.
+   */
+  async approveCollect(
+    userId: string,
+    initData: string | undefined,
+    collectId: string,
+  ): Promise<P2pResult> {
+    const { credential } = await this.credentials.resolve(
+      userId,
+      initData,
+      'spend',
+    );
+    return this.call(
+      'POST',
+      `/collect/${encodeURIComponent(collectId)}/approve`,
+      credential,
+      'spend',
+      {},
+    );
+  }
+
   async transfer(
     userId: string,
     initData: string | undefined,

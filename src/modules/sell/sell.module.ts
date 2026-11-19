@@ -7,6 +7,7 @@ import { BitcoinPriceModule } from '../bitcoin-price/bitcoin-price.module';
 import { CeyPayModule } from '../ceypay/ceypay.module';
 import { BankAccountModule } from '../bank-account/bank-account.module';
 import { TelegramLoggerModule } from '../telegram-logger/telegram-logger.module';
+import { P2pModule } from '../p2p/p2p.module';
 import { SellService } from './sell.service';
 import { SellSettlementService } from './sell-settlement.service';
 import { SellController } from './sell.controller';
@@ -22,6 +23,7 @@ import { SellController } from './sell.controller';
     CeyPayModule,
     BankAccountModule,
     TelegramLoggerModule,
+    P2pModule,
   ],
   controllers: [SellController],
   providers: [SellService, SellSettlementService],

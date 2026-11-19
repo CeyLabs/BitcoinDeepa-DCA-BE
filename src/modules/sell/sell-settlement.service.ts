@@ -37,6 +37,35 @@ export class SellSettlementService {
   }
 
   /**
+   * Sales waiting for the user to approve the payment: follow their bot
+   * request (paid -> payout, declined/failed -> nothing sold) and withdraw it
+   * once the approval window passed. The app's order reads sync too; this
+   * covers users who approve in the bot chat and close the app.
+   */
+  @Cron(CronExpression.EVERY_10_SECONDS)
+  async syncCollects(): Promise<void> {
+    try {
+      const rows = await this.knexService
+        .knex<SellOrderRow>('sell_order')
+        .where('status', SellStatus.COLLECTING)
+        .whereNotNull('collect_expires_at')
+        .orderBy('updated_at')
+        .limit(50);
+      for (const row of rows) {
+        try {
+          await this.sellService.syncCollect(row);
+        } catch (error) {
+          this.logger.warn(
+            `Sell ${row.id}: collect sync failed: ${errorMessage(error)}`,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error(`Sell collect sync failed: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
    * Collected orders whose CeyPay payout wasn't created (CeyPay down). Retry n
    * waits 2^n minutes; CeyPay dedupes on externalRef, so a retry after a lost
    * response returns the same off-ramp.

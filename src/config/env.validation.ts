@@ -294,6 +294,14 @@ class EnvironmentVariables {
   @Max(600)
   SELL_QUOTE_TTL_SECONDS?: number;
 
+  // How long a confirmed sale waits for the user to approve the payment
+  // (default 300). At most the bot's own 15-minute request expiry.
+  @IsOptional()
+  @IsInt()
+  @Min(60)
+  @Max(900)
+  SELL_COLLECT_WINDOW_SECONDS?: number;
+
   @IsOptional()
   @IsInt()
   @Min(1)

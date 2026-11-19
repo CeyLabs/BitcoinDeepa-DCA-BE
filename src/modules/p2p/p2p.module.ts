@@ -10,5 +10,6 @@ import { P2pCredentialService } from './p2p-credential.service';
   imports: [AuthModule, TelegramLoggerModule],
   controllers: [P2pController],
   providers: [P2pService, P2pBotClient, P2pCredentialService],
+  exports: [P2pService],
 })
 export class P2pModule {}

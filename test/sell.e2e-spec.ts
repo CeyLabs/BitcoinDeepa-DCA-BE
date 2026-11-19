@@ -2,6 +2,7 @@ import * as request from 'supertest';
 import { randomUUID } from 'crypto';
 import {
   ceypayWebhook,
+  collectOk,
   createTestApp,
   CEYPAY_USDT_LKR,
   resetData,
@@ -164,10 +165,12 @@ describe('Sell flow (e2e)', () => {
         .expect(200);
       expect(confirmed.body.status).toBe('PAYOUT_PENDING');
 
-      expect(ctx.bitcoinDeepa.collectFunds).toHaveBeenCalledWith(
-        SATS,
+      // The order id is the request's external_id: asking again is idempotent
+      expect(ctx.bitcoinDeepa.createCollect).toHaveBeenCalledWith(
         USER,
-        `sell:${q.id}`,
+        SATS,
+        'Bitcoin Deepa sale: 21,235.50 LKR to your bank account',
+        q.id,
       );
       // USDT sized from CeyPay's rate so it pays at least our LKR
       const [usdt] = ctx.ceyPay.getQuote.mock.calls.at(-1) as [string];
@@ -218,13 +221,13 @@ describe('Sell flow (e2e)', () => {
       expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
     });
 
-    it('commits COLLECTING before the bot debit, so a crash leaves a trace', async () => {
+    it('commits COLLECTING before asking the bot, so a crash leaves a trace', async () => {
       const q = await quote();
       let statusDuringDebit: string | undefined;
-      ctx.bitcoinDeepa.collectFunds.mockImplementationOnce(async () => {
+      ctx.bitcoinDeepa.createCollect.mockImplementationOnce(async () => {
         // read from another connection: the status is already committed
         statusDuringDebit = (await order(q.id)).status;
-        return { success: true };
+        return collectOk({ paid: true });
       });
       await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(200);
       expect(statusDuringDebit).toBe('COLLECTING');
@@ -254,6 +257,23 @@ describe('Sell flow (e2e)', () => {
         .update({ status: 'REFUNDING' });
       await settlement.recoverStuckOrders();
       expect((await order(b.id)).status).toBe('REFUNDING');
+
+      // a collect request nobody finished 30 min after its window
+      const c = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: c.id })
+        .update({
+          status: 'COLLECTING',
+          bot_collect_id: 'col-stuck',
+          collect_expires_at: ctx.knex.raw("now() - interval '31 minutes'"),
+        });
+      await settlement.recoverStuckOrders();
+      expect((await order(c.id)).status).toBe('NEEDS_REVIEW');
+      expect(logAlert).toHaveBeenCalledWith(
+        'Sell',
+        expect.stringContaining('collect request col-stuck'),
+      );
     });
 
     it('enforces the per-sale and the daily limits', async () => {
@@ -291,7 +311,7 @@ describe('Sell flow (e2e)', () => {
           expires_at: new Date(Date.now() + 60_000),
         });
       await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(400);
-      expect(ctx.bitcoinDeepa.collectFunds).not.toHaveBeenCalled();
+      expect(ctx.bitcoinDeepa.createCollect).not.toHaveBeenCalled();
       expect((await order(q.id)).status).toBe('QUOTED');
     });
 
@@ -302,7 +322,7 @@ describe('Sell flow (e2e)', () => {
         .post(`/sell/orders/${q.id}/confirm`)
         .expect(200);
       expect(again.body.status).toBe('PAYOUT_PENDING');
-      expect(ctx.bitcoinDeepa.collectFunds).toHaveBeenCalledTimes(1);
+      expect(ctx.bitcoinDeepa.createCollect).toHaveBeenCalledTimes(1);
       expect(ctx.ceyPay.createOfframp).toHaveBeenCalledTimes(1);
     });
 
@@ -311,7 +331,7 @@ describe('Sell flow (e2e)', () => {
       await asUser(ctx, '100000002')
         .post(`/sell/orders/${q.id}/confirm`)
         .expect(403); // OTHER_USER has no KYC
-      expect(ctx.bitcoinDeepa.collectFunds).not.toHaveBeenCalled();
+      expect(ctx.bitcoinDeepa.createCollect).not.toHaveBeenCalled();
     });
 
     it('an expired quote moves nothing', async () => {
@@ -322,7 +342,7 @@ describe('Sell flow (e2e)', () => {
         .update({ expires_at: new Date(Date.now() - 1000) });
       await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(410);
       expect((await order(q.id)).status).toBe('EXPIRED');
-      expect(ctx.bitcoinDeepa.collectFunds).not.toHaveBeenCalled();
+      expect(ctx.bitcoinDeepa.createCollect).not.toHaveBeenCalled();
     });
 
     it('a new quote replaces the previous one', async () => {
@@ -331,34 +351,260 @@ describe('Sell flow (e2e)', () => {
       expect((await order(first.id)).status).toBe('EXPIRED');
     });
 
-    it('a rejected collect (e.g. balance spent meanwhile) cancels the quote', async () => {
-      ctx.bitcoinDeepa.collectFunds.mockResolvedValueOnce({
-        success: false,
-        message: 'insufficient balance',
+    it('a refused collect request (e.g. amount too large) cancels the sale', async () => {
+      ctx.bitcoinDeepa.createCollect.mockResolvedValueOnce({
+        kind: 'refused',
+        status: 400,
+        code: 'amount_too_large',
+        message: 'Amount is above the limit.',
       });
       const q = await quote();
-      await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(400);
+      const res = await asUser(ctx, USER)
+        .post(`/sell/orders/${q.id}/confirm`)
+        .expect(400);
+      expect(res.body.message).toBe('Amount is above the limit.');
       expect((await order(q.id)).status).toBe('EXPIRED');
       expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
     });
 
-    it('an unknown collect outcome stops everything and alerts', async () => {
-      ctx.bitcoinDeepa.collectFunds.mockResolvedValueOnce({
-        success: false,
-        outcome_unknown: true,
+    it('a wallet without can_collect alerts and answers 503', async () => {
+      ctx.bitcoinDeepa.createCollect.mockResolvedValueOnce({
+        kind: 'refused',
+        status: 403,
+        code: 'collect_not_allowed',
+        message: 'This wallet is not allowed to collect.',
+      });
+      const q = await quote();
+      await asUser(ctx, USER).post(`/sell/orders/${q.id}/confirm`).expect(503);
+      expect((await order(q.id)).status).toBe('EXPIRED');
+      expect(logAlert).toHaveBeenCalledWith(
+        'Sell',
+        expect.stringContaining('can_collect'),
+      );
+    });
+
+    it('no answer from the bot: the sync asks again with the same external_id', async () => {
+      ctx.bitcoinDeepa.createCollect.mockResolvedValueOnce({
+        kind: 'unknown',
         message: 'timeout',
       });
       const q = await quote();
       const res = await asUser(ctx, USER)
         .post(`/sell/orders/${q.id}/confirm`)
         .expect(200);
-      expect(res.body.status).toBe('NEEDS_REVIEW');
-      expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
-      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
-      expect(logAlert).toHaveBeenCalledWith(
-        'Sell',
-        expect.stringContaining(q.id),
-      );
+      expect(res.body).toMatchObject({
+        status: 'COLLECTING',
+        collect: { state: 'requesting' },
+      });
+
+      await settlement.syncCollects();
+      expect((await order(q.id)).status).toBe('PAYOUT_PENDING');
+      expect(ctx.bitcoinDeepa.createCollect).toHaveBeenCalledTimes(2);
+      for (const call of ctx.bitcoinDeepa.createCollect.mock.calls) {
+        expect(call[3]).toBe(q.id);
+      }
+      expect(ctx.ceyPay.createOfframp).toHaveBeenCalledTimes(1);
+    });
+
+    describe('waiting for the user to approve', () => {
+      const pending = () => collectOk({ status: 'pending' });
+      const confirmPending = async () => {
+        ctx.bitcoinDeepa.createCollect.mockResolvedValueOnce(pending());
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue(pending());
+        const q = await quote();
+        const res = await asUser(ctx, USER)
+          .post(`/sell/orders/${q.id}/confirm`)
+          .expect(200);
+        return { q, body: res.body as Record<string, any> };
+      };
+
+      it('stays COLLECTING with the deadline until the payment arrives', async () => {
+        const { q, body } = await confirmPending();
+        expect(body).toMatchObject({
+          status: 'COLLECTING',
+          collect: { state: 'pending', payInApp: false },
+        });
+        const deadline = new Date(body.collect.expiresAt).getTime();
+        expect(deadline - Date.now()).toBeGreaterThan(290_000);
+        expect(deadline - Date.now()).toBeLessThanOrEqual(300_000);
+        expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
+
+        // Approved in the bot chat, Confirm still needed (above the allowance)
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue(
+          collectOk({ transferStatus: 'awaiting_confirmation' }),
+        );
+        const waiting = await asUser(ctx, USER)
+          .get(`/sell/orders/${q.id}`)
+          .expect(200);
+        expect(waiting.body).toMatchObject({
+          status: 'COLLECTING',
+          collect: { state: 'awaiting_confirmation' },
+        });
+
+        // Paid: the order read moves it on and the payout starts
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue(
+          collectOk({ paid: true }),
+        );
+        const paid = await asUser(ctx, USER)
+          .get(`/sell/orders/${q.id}`)
+          .expect(200);
+        expect(paid.body).toMatchObject({
+          status: 'PAYOUT_PENDING',
+          collect: null,
+        });
+        expect(ctx.ceyPay.createOfframp).toHaveBeenCalledTimes(1);
+      });
+
+      it('declined in the bot: nothing sold', async () => {
+        const { q } = await confirmPending();
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue(
+          collectOk({ status: 'declined' }),
+        );
+        await settlement.syncCollects();
+        const res = await asUser(ctx, USER)
+          .get(`/sell/orders/${q.id}`)
+          .expect(200);
+        expect(res.body).toMatchObject({
+          status: 'EXPIRED',
+          failureReason: 'You declined the payment. Nothing was sold.',
+        });
+      });
+
+      it('a failed payment (low balance) ends the sale', async () => {
+        const { q } = await confirmPending();
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue(
+          collectOk({
+            transferStatus: 'failed',
+            transfer: {
+              id: 'p2p-col-test-1',
+              status: 'failed',
+              error: 'Insufficient balance.',
+            },
+          }),
+        );
+        await settlement.syncCollects();
+        const res = await asUser(ctx, USER)
+          .get(`/sell/orders/${q.id}`)
+          .expect(200);
+        expect(res.body).toMatchObject({
+          status: 'EXPIRED',
+          failureReason: 'Not enough sats in your wallet.',
+        });
+        expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
+      });
+
+      it('withdraws the request once the window has passed', async () => {
+        const { q } = await confirmPending();
+        await ctx
+          .knex('sell_order')
+          .where({ id: q.id })
+          .update({ collect_expires_at: new Date(Date.now() - 1000) });
+        await settlement.syncCollects();
+        expect(ctx.bitcoinDeepa.cancelCollect).toHaveBeenCalledWith(
+          'col-test-1',
+        );
+        expect((await order(q.id)).status).toBe('EXPIRED');
+      });
+
+      it('the user approving just before the cancel wins: the sale goes on', async () => {
+        const { q } = await confirmPending();
+        await ctx
+          .knex('sell_order')
+          .where({ id: q.id })
+          .update({ collect_expires_at: new Date(Date.now() - 1000) });
+        ctx.bitcoinDeepa.cancelCollect.mockResolvedValueOnce({
+          kind: 'refused',
+          status: 409,
+          code: 'request_closed',
+          message: 'This request is approved.',
+        });
+        ctx.bitcoinDeepa.getCollect
+          .mockResolvedValueOnce(pending())
+          .mockResolvedValueOnce(collectOk({ paid: true }));
+        await settlement.syncCollects();
+        expect((await order(q.id)).status).toBe('PAYOUT_PENDING');
+      });
+
+      it('the user can cancel before paying', async () => {
+        const { q } = await confirmPending();
+        const res = await asUser(ctx, USER)
+          .post(`/sell/orders/${q.id}/cancel`)
+          .expect(200);
+        expect(res.body.status).toBe('EXPIRED');
+        expect(ctx.bitcoinDeepa.cancelCollect).toHaveBeenCalledWith(
+          'col-test-1',
+        );
+      });
+
+      describe('paying in the app (P2P on)', () => {
+        const initData = () =>
+          new URLSearchParams({
+            user: JSON.stringify({ id: Number(USER), first_name: 'A' }),
+            auth_date: String(Math.floor(Date.now() / 1000) - 30),
+            hash: 'h',
+          }).toString();
+        beforeEach(() => {
+          process.env.P2P_ENABLED = 'true';
+          ctx.p2pBot.isConfigured.mockReturnValue(true);
+          ctx.p2pBot.request.mockReset();
+        });
+        afterEach(() => {
+          delete process.env.P2P_ENABLED;
+        });
+
+        it('approves with the Mini App credential, then the payout starts', async () => {
+          const { q, body } = await confirmPending();
+          expect(body.collect.payInApp).toBe(true);
+          ctx.p2pBot.request.mockResolvedValue({
+            status: 200,
+            body: { id: 'p2p-col-test-1', status: 'completed' },
+          });
+          ctx.bitcoinDeepa.getCollect.mockResolvedValue(
+            collectOk({ paid: true }),
+          );
+          const raw = initData();
+          const res = await asUser(ctx, USER)
+            .post(`/sell/orders/${q.id}/pay`)
+            .set('X-Telegram-Init-Data', raw)
+            .expect(200);
+          expect(res.body.status).toBe('PAYOUT_PENDING');
+          expect(ctx.p2pBot.request).toHaveBeenCalledWith(
+            'POST',
+            '/api/v1/p2p/collect/col-test-1/approve',
+            { kind: 'initData', value: raw },
+            {},
+          );
+        });
+
+        it('a stale Mini App login is 403 credential_stale (not 401)', async () => {
+          const { q } = await confirmPending();
+          const stale = new URLSearchParams({
+            user: JSON.stringify({ id: Number(USER) }),
+            auth_date: String(Math.floor(Date.now() / 1000) - 700),
+            hash: 'h',
+          }).toString();
+          const res = await asUser(ctx, USER)
+            .post(`/sell/orders/${q.id}/pay`)
+            .set('X-Telegram-Init-Data', stale)
+            .expect(403);
+          expect(res.body.code).toBe('credential_stale');
+          expect(ctx.p2pBot.request).not.toHaveBeenCalled();
+        });
+
+        it('refuses after the window (410) and withdraws the request', async () => {
+          const { q } = await confirmPending();
+          await ctx
+            .knex('sell_order')
+            .where({ id: q.id })
+            .update({ collect_expires_at: new Date(Date.now() - 1000) });
+          await asUser(ctx, USER)
+            .post(`/sell/orders/${q.id}/pay`)
+            .set('X-Telegram-Init-Data', initData())
+            .expect(410);
+          expect(ctx.p2pBot.request).not.toHaveBeenCalled();
+          expect((await order(q.id)).status).toBe('EXPIRED');
+        });
+      });
     });
 
     it('CeyPay rejecting the payout (no float) refunds the sats', async () => {
@@ -677,7 +923,7 @@ describe('Sell flow (e2e)', () => {
       } finally {
         if (!trx.isCompleted()) await trx.rollback();
       }
-      expect(ctx.bitcoinDeepa.collectFunds).not.toHaveBeenCalled();
+      expect(ctx.bitcoinDeepa.createCollect).not.toHaveBeenCalled();
     });
 
     it('a failed bank transfer refunds the sats', async () => {
