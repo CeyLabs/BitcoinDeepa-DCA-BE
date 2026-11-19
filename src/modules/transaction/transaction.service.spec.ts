@@ -1,5 +1,10 @@
 import { createHash } from 'crypto';
-import { parseAmount, TransactionService } from './transaction.service';
+import {
+  matchSalePayments,
+  parseAmount,
+  TransactionService,
+} from './transaction.service';
+import { saleCollectMemo } from '../sell/sell.constants';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 
 const md5U = (s: string) =>
@@ -118,5 +123,60 @@ describe('TransactionService (pure logic)', () => {
     ])('maps %s to %s', (code, status) => {
       expect(service.getPayHereStatusMapped(code)).toBe(status);
     });
+  });
+});
+
+describe('matchSalePayments', () => {
+  const order = (id: string, sats: number, lkr: number, createdAt: string) => ({
+    id,
+    sats: String(sats),
+    amount_lkr: String(lkr),
+    created_at: createdAt,
+  });
+  const payment = (amount: number, lkr: number, time: string, extra = {}) => ({
+    direction: 'outgoing',
+    success: true,
+    amount,
+    memo: saleCollectMemo(lkr),
+    time,
+    ...extra,
+  });
+
+  it("marks the outgoing payment with the sale's sats and memo", () => {
+    const rows = [
+      payment(20000, 5792, '2026-11-19T10:01:00Z'),
+      {
+        direction: 'incoming',
+        success: true,
+        amount: 20000,
+        time: '2026-11-19T10:02:00Z',
+      },
+    ];
+    const orders = [order('a', 20000, 5792, '2026-11-19T10:00:00Z')];
+    expect([...matchSalePayments(rows, orders)]).toEqual([0]);
+  });
+
+  it('ignores a transfer with another memo, amount, a failure or one made before the sale', () => {
+    const orders = [order('a', 20000, 5792, '2026-11-19T10:00:00Z')];
+    const rows = [
+      payment(20000, 5792, '2026-11-19T10:01:00Z', { memo: 'Coffee' }),
+      payment(19999, 5792, '2026-11-19T10:01:00Z'),
+      payment(20000, 5792, '2026-11-19T10:01:00Z', { success: false }),
+      payment(20000, 5792, '2026-11-19T09:59:00Z'),
+    ];
+    expect(matchSalePayments(rows, orders).size).toBe(0);
+  });
+
+  it('gives two equal sales one payment each', () => {
+    const orders = [
+      order('a', 20000, 5792, '2026-11-19T10:00:00Z'),
+      order('b', 20000, 5792, '2026-11-19T11:00:00Z'),
+    ];
+    const rows = [
+      payment(20000, 5792, '2026-11-19T11:01:00Z'),
+      payment(20000, 5792, '2026-11-19T10:01:00Z'),
+      payment(20000, 5792, '2026-11-19T12:00:00Z'), // a third: no sale left
+    ];
+    expect([...matchSalePayments(rows, orders)].sort()).toEqual([0, 1]);
   });
 });
