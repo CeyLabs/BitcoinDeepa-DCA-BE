@@ -37,6 +37,29 @@ import {
 /** Payout attempts (CeyPay unreachable) before an order needs a human */
 export const MAX_PAYOUT_ATTEMPTS = 5;
 
+/**
+ * A SATS_COLLECTED order that has used every payout attempt and hasn't been
+ * touched for this long was left behind (the process died during the last
+ * attempt, or parking it failed): recoverStuckOrders hands it to a human.
+ */
+const STUCK_PAYOUT_MINUTES = 5;
+
+/**
+ * "The next payout attempt is due": attempts left, and 2^n minutes have
+ * passed since attempt n. Used (as `.where(payoutAttemptDue)`) by the retry
+ * cron to pick orders and again by the claim itself, so a claim made from a
+ * stale read can't start a second payout next to one that is still running.
+ */
+export function payoutAttemptDue(qb: Knex.QueryBuilder): void {
+  void qb.where('retry_count', '<', MAX_PAYOUT_ATTEMPTS).where((due) => {
+    void due
+      .whereNull('last_retry_at')
+      .orWhereRaw(
+        "last_retry_at + (power(2, retry_count) * interval '1 minute') <= now()",
+      );
+  });
+}
+
 export interface SellOrderRow {
   id: string;
   user_id: string;
@@ -361,8 +384,12 @@ export class SellService {
       | { kind: 'done'; order: SellOrderRow };
 
     const claim = await this.knex.transaction(async (trx): Promise<Claim> => {
-      // One confirm per member at a time, so the daily limit can't be raced
-      await trx('user').where('id', userId).forUpdate().first();
+      // One confirm per member at a time, so the daily limit can't be raced.
+      // NO KEY UPDATE, like the buy flow: a plain FOR UPDATE blocks the FK
+      // share lock a new quote's insert takes on this row, and that quote
+      // already holds the order row we lock next (it expires the old quote
+      // first), so the two would deadlock.
+      await trx('user').where('id', userId).forNoKeyUpdate().first();
       const order = await trx<SellOrderRow>('sell_order')
         .where({ id, user_id: userId })
         .forUpdate()
@@ -408,14 +435,21 @@ export class SellService {
     );
 
     if (result.success || result.already_completed) {
+      // Payout attempt 1 is counted in the same update. The retry cron only
+      // takes orders whose backoff has passed, so it can't pick this one up
+      // and create a second payout while ours is still running.
       const collected = await this.setStatus(
         this.knex,
         id,
         [SellStatus.COLLECTING],
-        { status: SellStatus.SATS_COLLECTED },
+        {
+          status: SellStatus.SATS_COLLECTED,
+          retry_count: 1,
+          last_retry_at: this.knex.fn.now(),
+        },
       );
       // Not COLLECTING any more: the stuck-order check took it meanwhile
-      if (collected) await this.createPayout(id);
+      if (collected) await this.sendPayout(collected);
       return this.getOrder(userId, id);
     }
 
@@ -448,13 +482,26 @@ export class SellService {
   }
 
   /**
-   * Create the CeyPay off-ramp for a SATS_COLLECTED order. Safe to call again
-   * (from the retry cron): CeyPay dedupes on externalRef = order id.
+   * Retry the CeyPay off-ramp of a SATS_COLLECTED order (retry cron). Does
+   * nothing unless the order's next attempt is due.
    */
   async createPayout(id: string): Promise<void> {
     const claimed = await this.claimForPayout(id);
-    if (!claimed) return;
-    const order = claimed;
+    if (claimed) await this.sendPayout(claimed);
+  }
+
+  /**
+   * One payout attempt for an order whose attempt is already counted (by
+   * confirm or claimForPayout). Safe to repeat: CeyPay dedupes on
+   * externalRef = order id.
+   */
+  private async sendPayout(order: SellOrderRow): Promise<void> {
+    const id = order.id;
+    // fx_lock_id is stored just before the off-ramp request goes out, so one
+    // left by an earlier attempt means that request may have reached CeyPay
+    // and we never got a definite answer (an answer would have moved the
+    // order on). A payout may exist: see failPayout.
+    const payoutMayExist = order.fx_lock_id !== null;
 
     const account = await this.knex('user_bank_account as b')
       .join('user as u', 'u.id', 'b.user_id')
@@ -476,7 +523,11 @@ export class SellService {
       !account.ceypay_user_bank_id ||
       !account.ceypay_user_id
     ) {
-      await this.refund(order, 'Bank account is no longer verified');
+      await this.failPayout(
+        order,
+        'Bank account is no longer verified',
+        payoutMayExist,
+      );
       return;
     }
 
@@ -527,7 +578,7 @@ export class SellService {
           `CeyPay rejected a ${order.amount_lkr} LKR payout (sell ${id}): ${err.message}. Top up the CeyPay float.`,
         );
       }
-      await this.refund(order, err.message);
+      await this.failPayout(order, err.message, payoutMayExist);
       return;
     }
 
@@ -620,6 +671,42 @@ export class SellService {
       );
     }
     return false;
+  }
+
+  /**
+   * The payout can't be created (a definite refusal, not a timeout). Normally
+   * that means no sale happened and the sats go back.
+   *
+   * Not when an earlier attempt's off-ramp request got no answer: CeyPay may
+   * have created that payout, and this attempt can fail before CeyPay ever
+   * looks at the externalRef (our own bank-account check, the quote call,
+   * its auth guards). Refunding then could leave the member with both the
+   * LKR and the sats, so a human checks CeyPay first.
+   */
+  private async failPayout(
+    order: SellOrderRow,
+    reason: string,
+    payoutMayExist: boolean,
+  ): Promise<void> {
+    if (!payoutMayExist) {
+      await this.refund(order, reason);
+      return;
+    }
+    const parked = await this.setStatus(
+      this.knex,
+      order.id,
+      [SellStatus.SATS_COLLECTED],
+      {
+        status: SellStatus.NEEDS_REVIEW,
+        failure_reason: `Payout refused (${reason}) after an earlier attempt with no answer`,
+      },
+    );
+    if (!parked) return;
+    await this.telegramLogger.logAlert(
+      'Sell',
+      `Sell order ${order.id}: the payout was refused (${reason}), but an earlier attempt got no answer from CeyPay and may have created it. ` +
+        `${order.sats} sats of #UID${order.user_id} are collected and were NOT refunded: check CeyPay for externalRef ${order.id} before refunding.`,
+    );
   }
 
   /**
@@ -724,12 +811,15 @@ export class SellService {
     );
   }
 
-  /** Atomically count a payout attempt (FOR UPDATE SKIP LOCKED). */
   /**
    * Orders stuck mid-transfer (the process died between committing the
    * status and recording the bot's answer) go to a human, with the memo to
    * check. Nothing is retried automatically: the debit or refund may or may
    * not have happened.
+   *
+   * The same for a SATS_COLLECTED order with no payout attempts left: the
+   * retry cron no longer takes it, so if the last attempt died (or parking it
+   * failed) nothing else would ever look at it.
    */
   async recoverStuckOrders(): Promise<number> {
     const stuck: [SellStatus, number, (id: string) => string][] = [
@@ -756,6 +846,32 @@ export class SellService {
         );
       }
     }
+
+    const outOfAttempts = await this.knex<SellOrderRow>('sell_order')
+      .where('status', SellStatus.SATS_COLLECTED)
+      .where('retry_count', '>=', MAX_PAYOUT_ATTEMPTS)
+      .whereRaw(
+        `updated_at <= now() - interval '${STUCK_PAYOUT_MINUTES} minutes'`,
+      )
+      .limit(50);
+    for (const row of outOfAttempts) {
+      const parked = await this.setStatus(
+        this.knex,
+        row.id,
+        [SellStatus.SATS_COLLECTED],
+        {
+          status: SellStatus.NEEDS_REVIEW,
+          failure_reason: `No payout after ${row.retry_count} attempts${row.failure_reason ? ` (${row.failure_reason})` : ''}`,
+        },
+      );
+      if (!parked) continue;
+      count++;
+      await this.telegramLogger.logAlert(
+        'Sell',
+        `Sell order ${row.id} (${row.sats} sats, #UID${row.user_id}) used all ${row.retry_count} payout attempts and was left in SATS_COLLECTED. ` +
+          `Sats are collected; check CeyPay for externalRef ${row.id} before paying out or refunding.`,
+      );
+    }
     return count;
   }
 
@@ -778,11 +894,17 @@ export class SellService {
     return rows.length;
   }
 
+  /**
+   * Atomically count a payout attempt (FOR UPDATE SKIP LOCKED). Only when the
+   * attempt is due: right after another claim (or confirm's own first
+   * attempt) the backoff isn't over, so a second caller gets nothing.
+   */
   private async claimForPayout(id: string): Promise<SellOrderRow | null> {
     return this.knex.transaction(async (trx) => {
       const order = await trx<SellOrderRow>('sell_order')
         .where({ id, status: SellStatus.SATS_COLLECTED })
         .whereNull('ceypay_payment_id')
+        .where(payoutAttemptDue)
         .forUpdate()
         .skipLocked()
         .first();

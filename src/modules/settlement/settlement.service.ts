@@ -209,14 +209,65 @@ export class SettlementService {
         return;
       }
 
+      const memo = SettlementService.transferMemo(payhere_pay_id, kind);
+
+      // The claim and the PayHere lookup took a while. A chargeback that
+      // arrived meanwhile was told "it will not be settled": keep that true.
+      const current = await this.knexService
+        .knex('transaction')
+        .select('status', 'settled', 'hold_reason')
+        .where('payhere_pay_id', payhere_pay_id)
+        .first<{
+          status: string;
+          settled: boolean;
+          hold_reason: string | null;
+        }>();
+      if (
+        !current ||
+        current.status !== 'SUCCESS' ||
+        current.settled ||
+        current.hold_reason
+      ) {
+        const now = `${current?.status ?? 'gone'}${current?.hold_reason ? ' (held)' : ''}`;
+        this.logger.warn(
+          `Settlement of ${payhere_pay_id} skipped: it is ${now} now`,
+        );
+        // Nothing more is sent, but an earlier send with no answer may have
+        // gone through, and nothing looks at a charged-back payment again:
+        // find out now (markSettled says so if sats went out).
+        if (
+          current &&
+          !current.settled &&
+          transaction.settlement_failure === 'UNKNOWN'
+        ) {
+          const found = await this.bitcoinDeepaService.findTransferByMemo(
+            Number(telegram_id),
+            memo,
+          );
+          if (found) {
+            await this.markSettled(payhere_pay_id);
+          } else {
+            // Put back the marker the claim cleared
+            await this.knexService
+              .knex('transaction')
+              .update({ settlement_failure: 'UNKNOWN' })
+              .where('payhere_pay_id', payhere_pay_id)
+              .where('retry_count', currentRetryCount);
+            await this.telegramLogger.logAlert(
+              'Settlement',
+              `Settlement of ${payhere_pay_id} was skipped (it is ${now} now), but an earlier send of ${satoshis_purchased} sats to user ${telegram_id} got no answer and memo "${memo}" ${found === null ? "couldn't be looked up" : "isn't in their bot history"}. Check the bot before treating it as not sent.`,
+            );
+          }
+        }
+        return;
+      }
+
       const logMessage = await this.telegramLogger.logSettlement(
         payhere_pay_id,
         Number(satoshis_purchased),
         telegram_id,
         currentRetryCount,
       );
-
-      const memo = SettlementService.transferMemo(payhere_pay_id, kind);
 
       // The last send may have gone through (timeout/5xx): look for its memo
       // first. Not found (or history unreadable) means resend with the SAME
@@ -304,11 +355,28 @@ export class SettlementService {
     }
   }
 
+  /**
+   * The sats are with the member. If a chargeback arrived while they were
+   * being sent (too late to stop it), its own alert said the payment would
+   * not be settled: correct that.
+   */
   private async markSettled(payhere_pay_id: string): Promise<void> {
-    await this.knexService
+    const [row] = await this.knexService
       .knex('transaction')
       .update({ settled: true, settlement_failure: null, bot_send_id: null })
-      .where('payhere_pay_id', payhere_pay_id);
+      .where('payhere_pay_id', payhere_pay_id)
+      .returning<
+        {
+          status: string;
+          satoshis_purchased: string | number;
+          user_id: string | null;
+        }[]
+      >(['status', 'satoshis_purchased', 'user_id']);
+    if (row?.status === 'CHARGEBACK') {
+      const alert = `CHARGEBACK on ${payhere_pay_id} arrived while it was being settled: ${row.satoshis_purchased} sats were sent to user ${row.user_id} - manual reversal needed.`;
+      this.logger.error(alert);
+      await this.telegramLogger.logAlert('Settlement', alert);
+    }
   }
 
   /**

@@ -45,6 +45,22 @@ const CHANGE_24H_CACHE_TTL_SECONDS = parseInt(
 );
 const SATOSHIS_PER_BTC = 100_000_000;
 
+// Integer division, rounded down (its own constructor: Big.DP/RM are global)
+const BigFloor = Big();
+BigFloor.DP = 0;
+BigFloor.RM = Big.roundDown;
+
+/**
+ * Whole sats `amount` buys at `btcPrice` (same currency), rounded down.
+ * Decimal arithmetic: with floats an exact result comes out one sat short
+ * (128.70 LKR at 21,450,000 LKR/BTC is 600 sats, not 599).
+ */
+export const satoshisFor = (
+  amount: number | string,
+  btcPrice: number | string,
+): number =>
+  new BigFloor(amount).times(SATOSHIS_PER_BTC).div(btcPrice).toNumber();
+
 const failureKey = (key: string): string => `${key}:failed`;
 
 /**
@@ -103,7 +119,7 @@ export class BitcoinPriceService {
     if (!priceData) return null;
 
     return {
-      satoshis: Math.floor((amount / priceData.btc_price) * SATOSHIS_PER_BTC),
+      satoshis: satoshisFor(amount, priceData.btc_price),
       btc_price: priceData.btc_price,
       currency: priceData.currency,
     };
