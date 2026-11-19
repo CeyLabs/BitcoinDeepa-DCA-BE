@@ -19,6 +19,8 @@ import { SellSettlementService } from '../src/modules/sell/sell-settlement.servi
 import { SellService } from '../src/modules/sell/sell.service';
 import { CeyPayError } from '../src/modules/ceypay/ceypay.service';
 import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-logger.service';
+import { RedisService } from '../src/modules/redis/redis.service';
+import { CacheKeys } from '../src/modules/redis/utils/cache-keys.util';
 
 // 100,000 sats, 1% fee = 1,000 sats; 99,000 sats at 20,000,000 LKR/BTC
 const SATS = 100_000;
@@ -408,6 +410,9 @@ describe('Sell flow (e2e)', () => {
 
     describe('waiting for the user to approve', () => {
       const pending = () => collectOk({ status: 'pending' });
+      /** Order reads sync with the bot at most every 3s */
+      const clearReadThrottle = (id: string) =>
+        ctx.app.get(RedisService).del(CacheKeys.sell.collectSync(id));
       const confirmPending = async () => {
         ctx.bitcoinDeepa.createCollect.mockResolvedValueOnce(pending());
         ctx.bitcoinDeepa.getCollect.mockResolvedValue(pending());
@@ -433,6 +438,7 @@ describe('Sell flow (e2e)', () => {
         ctx.bitcoinDeepa.getCollect.mockResolvedValue(
           collectOk({ transferStatus: 'awaiting_confirmation' }),
         );
+        await clearReadThrottle(q.id);
         const waiting = await asUser(ctx, USER)
           .get(`/sell/orders/${q.id}`)
           .expect(200);
@@ -445,6 +451,7 @@ describe('Sell flow (e2e)', () => {
         ctx.bitcoinDeepa.getCollect.mockResolvedValue(
           collectOk({ paid: true }),
         );
+        await clearReadThrottle(q.id);
         const paid = await asUser(ctx, USER)
           .get(`/sell/orders/${q.id}`)
           .expect(200);
@@ -522,6 +529,78 @@ describe('Sell flow (e2e)', () => {
           .mockResolvedValueOnce(pending())
           .mockResolvedValueOnce(collectOk({ paid: true }));
         await settlement.syncCollects();
+        expect((await order(q.id)).status).toBe('PAYOUT_PENDING');
+      });
+
+      it('order reads ask the bot at most every few seconds', async () => {
+        const { q } = await confirmPending();
+        ctx.bitcoinDeepa.getCollect.mockClear();
+        for (let i = 0; i < 3; i++) {
+          await asUser(ctx, USER).get(`/sell/orders/${q.id}`).expect(200);
+        }
+        expect(ctx.bitcoinDeepa.getCollect).toHaveBeenCalledTimes(1);
+      });
+
+      it('our own config failing (auth) leaves sales open with one alert', async () => {
+        const a = await confirmPending();
+        const b = await confirmPending();
+        logAlert.mockClear();
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue({
+          kind: 'refused',
+          status: 403,
+          code: 'auth',
+          message: 'Access denied',
+        });
+        await settlement.syncCollects();
+        await settlement.syncCollects();
+        expect((await order(a.q.id)).status).toBe('COLLECTING');
+        expect((await order(b.q.id)).status).toBe('COLLECTING');
+        expect(logAlert).toHaveBeenCalledTimes(1);
+
+        // fixed: they move on
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue(
+          collectOk({ paid: true }),
+        );
+        await settlement.syncCollects();
+        expect((await order(a.q.id)).status).toBe('PAYOUT_PENDING');
+      });
+
+      it('a request the bot no longer knows (404) goes to a human', async () => {
+        const { q } = await confirmPending();
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue({
+          kind: 'refused',
+          status: 404,
+          code: 'not_found',
+          message: 'Request not found.',
+        });
+        await settlement.syncCollects();
+        expect((await order(q.id)).status).toBe('NEEDS_REVIEW');
+        expect(logAlert).toHaveBeenCalledWith(
+          'Sell',
+          expect.stringContaining('col-test-1'),
+        );
+      });
+
+      it("a paid request that doesn't match the order starts no payout", async () => {
+        const { q } = await confirmPending();
+        ctx.bitcoinDeepa.getCollect.mockResolvedValue(
+          collectOk({ paid: true, amount: 1 }),
+        );
+        await settlement.syncCollects();
+        expect((await order(q.id)).status).toBe('NEEDS_REVIEW');
+        expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
+      });
+
+      it('with the mock on, a sale left COLLECTING is treated as paid', async () => {
+        const { q } = await confirmPending();
+        process.env.BITCOINDEEPA_COLLECT_MOCK = 'true';
+        try {
+          ctx.bitcoinDeepa.getCollect.mockClear();
+          await settlement.syncCollects();
+        } finally {
+          process.env.BITCOINDEEPA_COLLECT_MOCK = 'false';
+        }
+        expect(ctx.bitcoinDeepa.getCollect).not.toHaveBeenCalled();
         expect((await order(q.id)).status).toBe('PAYOUT_PENDING');
       });
 

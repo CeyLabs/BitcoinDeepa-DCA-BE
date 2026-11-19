@@ -38,6 +38,12 @@ export class CacheKeys {
   // Sell flow cache keys
   static sell = {
     banks: (): string => `${CacheKeys.PREFIX}:sell:banks`,
+    // An order read asks the bot about its collect request at most this often
+    collectSync: (orderId: string): string =>
+      `${CacheKeys.PREFIX}:sell:collect-sync:${orderId}`,
+    // "Collect is failing because of our setup" alert, at most hourly
+    collectUnavailableAlert: (): string =>
+      `${CacheKeys.PREFIX}:alert:sell-collect-unavailable`,
   };
 
   // P2P relay

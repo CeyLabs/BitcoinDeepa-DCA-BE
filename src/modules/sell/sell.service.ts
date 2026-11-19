@@ -70,6 +70,9 @@ const COLLECT_CONFIG_CODES = [
 
 const DECLINED_REASON = 'Declined by the user';
 
+/** An order read syncs with the bot at most once per this many seconds */
+const READ_SYNC_SECONDS = 3;
+
 /**
  * "The next payout attempt is due": attempts left, and 2^n minutes have
  * passed since attempt n. Used (as `.where(payoutAttemptDue)`) by the retry
@@ -427,6 +430,12 @@ export class SellService {
   async getOrder(userId: string, id: string): Promise<SellOrderView> {
     const row = await this.findOrder(userId, id);
     if (row.status !== SellStatus.COLLECTING) return toSellOrderView(row);
+    // The app polls every 3s and the cron syncs too: one bot call per window
+    const due = await this.redisService.setIfAbsent(
+      CacheKeys.sell.collectSync(id),
+      READ_SYNC_SECONDS,
+    );
+    if (!due) return toSellOrderView(row);
     try {
       await this.syncCollect(row);
     } catch (error) {
@@ -551,6 +560,8 @@ export class SellService {
     if (order.status !== SellStatus.COLLECTING || !order.collect_expires_at) {
       return;
     }
+    // Confirm treats a mocked debit as paid; a row it left behind is the same
+    if (BitcoinDeepaService.isCollectMocked()) return this.markCollected(order);
     const result: CollectResult = order.bot_collect_id
       ? await this.bitcoinDeepa.getCollect(order.bot_collect_id)
       : await this.bitcoinDeepa.createCollect(
@@ -561,22 +572,65 @@ export class SellService {
         );
     if (result.kind === 'ok') return this.applyCollect(order, result.request);
     if (result.kind === 'unknown') return;
+    // Our key, clock, allowlist or wallet config: not this order's fault. It
+    // stays COLLECTING and moves on once that's fixed (or goes to a human
+    // via recoverStuckOrders); one alert, not one per open sale.
+    if (COLLECT_CONFIG_CODES.includes(result.code)) {
+      return this.alertCollectUnavailable(result);
+    }
+    // A retried create the bot refused for this request (amount, user, ...)
     if (!order.bot_collect_id) return this.collectRefused(order, result);
-
+    if (result.status !== 404) {
+      this.logger.warn(
+        `Sell ${order.id}: collect request ${order.bot_collect_id} answered ${result.status} ${result.code}; will ask again`,
+      );
+      return;
+    }
     // We made this request and the bot no longer knows it
+    await this.parkCollect(
+      order,
+      `Collect request ${order.bot_collect_id}: ${result.code} ${result.message}`,
+      `the bot answered ${result.status} ${result.code} for collect request ${order.bot_collect_id}`,
+    );
+  }
+
+  /** Something no rule covers: a human checks the request before anything moves */
+  private async parkCollect(
+    order: SellOrderRow,
+    reason: string,
+    alert: string,
+  ): Promise<void> {
     const parked = await this.setStatus(
       this.knex,
       order.id,
       [SellStatus.COLLECTING],
-      {
-        status: SellStatus.NEEDS_REVIEW,
-        failure_reason: `Collect request ${order.bot_collect_id}: ${result.code} ${result.message}`,
-      },
+      { status: SellStatus.NEEDS_REVIEW, failure_reason: reason },
     );
     if (parked) {
       await this.telegramLogger.logAlert(
         'Sell',
-        `Sell order ${order.id}: the bot answered ${result.status} ${result.code} for collect request ${order.bot_collect_id} (${order.sats} sats from #UID${order.user_id}). Check the request in the bot before doing anything.`,
+        `Sell order ${order.id} (${order.sats} sats from #UID${order.user_id}): ${alert}. Check the request in the bot before doing anything.`,
+      );
+    }
+  }
+
+  /** Collect calls fail because of our setup: alert at most hourly */
+  private async alertCollectUnavailable(
+    result: Extract<CollectResult, { kind: 'refused' }>,
+  ): Promise<void> {
+    this.logger.error(
+      `Sell collect unavailable: ${result.status} ${result.code} ${result.message}`,
+    );
+    if (
+      await this.redisService.setIfAbsent(
+        CacheKeys.sell.collectUnavailableAlert(),
+        60 * 60,
+      )
+    ) {
+      await this.telegramLogger.logAlert(
+        'Sell',
+        `Sell collect requests are failing (${result.status} ${result.code}: ${result.message}). ` +
+          'Check the DCA wallet has can_collect in api.send.whitelisted_wallets, its bot user, our send key, the server clock and the bot IP allowlist. Open sales wait until it is fixed. (Reported at most hourly.)',
       );
     }
   }
@@ -603,7 +657,9 @@ export class SellService {
       throw new GoneException('The time to pay has passed. Nothing was sold.');
     }
     await this.p2p.approveCollect(userId, initData, order.bot_collect_id);
-    return this.getOrder(userId, id);
+    // Not getOrder: its read throttle could skip the sync the user waits for
+    await this.syncCollect(await this.findOrder(userId, id));
+    return toSellOrderView(await this.findOrder(userId, id));
   }
 
   /**
@@ -663,7 +719,22 @@ export class SellService {
         return;
       }
       case 'approved': {
-        if (request.paid) return this.markCollected(order);
+        if (request.paid) {
+          // The one step that pays out from our float: the request must be
+          // this order's
+          const mismatch =
+            Number(request.amount) !== Number(order.sats) ||
+            (request.external_id !== undefined &&
+              request.external_id !== order.id);
+          if (mismatch) {
+            return this.parkCollect(
+              order,
+              `Collect request ${request.id} doesn't match the order (amount ${request.amount}, external_id ${request.external_id ?? '-'})`,
+              `collect request ${request.id} was paid but doesn't match the order (amount ${request.amount} vs ${order.sats}, external_id ${request.external_id ?? '-'}); no payout was started`,
+            );
+          }
+          return this.markCollected(order);
+        }
         const transfer = request.transfer;
         if (transfer && FAILED_TRANSFER_STATUSES.includes(transfer.status)) {
           await this.endCollect(
@@ -695,11 +766,7 @@ export class SellService {
       `Collect refused: ${result.code} ${result.message}`,
     );
     if (COLLECT_CONFIG_CODES.includes(result.code)) {
-      await this.telegramLogger.logAlert(
-        'Sell',
-        `Sell order ${order.id}: the bot refused the collect request (${result.status} ${result.code}: ${result.message}). ` +
-          'Check the DCA wallet has can_collect in api.send.whitelisted_wallets, its bot user, and our send key.',
-      );
+      await this.alertCollectUnavailable(result);
     }
   }
 

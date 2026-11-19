@@ -42,7 +42,9 @@ export class SellSettlementService {
    * once the approval window passed. The app's order reads sync too; this
    * covers users who approve in the bot chat and close the app.
    */
-  @Cron(CronExpression.EVERY_10_SECONDS)
+  // waitForCompletion: a slow bot can make a run longer than 10s; the next
+  // one starts only after it, so requests aren't asked about twice at once
+  @Cron(CronExpression.EVERY_10_SECONDS, { waitForCompletion: true })
   async syncCollects(): Promise<void> {
     try {
       const rows = await this.knexService
