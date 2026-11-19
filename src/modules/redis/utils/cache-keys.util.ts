@@ -40,6 +40,12 @@ export class CacheKeys {
     banks: (): string => `${CacheKeys.PREFIX}:sell:banks`,
   };
 
+  // P2P relay
+  static p2p = {
+    webIdToken: (userId: string): string =>
+      `${CacheKeys.PREFIX}:p2p:id-token:${userId}`,
+  };
+
   // Pattern generators for bulk operations
   static patterns = {
     userTransactionLists: (userId: string): string =>

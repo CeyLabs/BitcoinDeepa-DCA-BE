@@ -97,6 +97,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
+  /** False when REDIS_URL isn't set: every call is then a no-op / miss */
+  isEnabled(): boolean {
+    return this.redis !== null;
+  }
+
   async ping(): Promise<boolean> {
     if (!this.redis) return true; // caching disabled is not a failure
     try {

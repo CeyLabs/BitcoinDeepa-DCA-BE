@@ -5,6 +5,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { ConditionalAuthGuard } from './conditional-auth.guard';
 import { AdminKeyGuard } from './admin-key.guard';
+import { WebIdTokenStore } from './web-id-token.store';
 import { UserModule } from '../user/user.module';
 
 @Module({
@@ -19,7 +20,18 @@ import { UserModule } from '../user/user.module';
     forwardRef(() => UserModule),
   ],
   controllers: [AuthController],
-  providers: [AuthService, ConditionalAuthGuard, AdminKeyGuard],
-  exports: [AuthService, ConditionalAuthGuard, AdminKeyGuard, JwtModule],
+  providers: [
+    AuthService,
+    ConditionalAuthGuard,
+    AdminKeyGuard,
+    WebIdTokenStore,
+  ],
+  exports: [
+    AuthService,
+    ConditionalAuthGuard,
+    AdminKeyGuard,
+    JwtModule,
+    WebIdTokenStore,
+  ],
 })
 export class AuthModule {}

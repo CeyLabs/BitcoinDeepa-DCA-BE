@@ -15,6 +15,7 @@ import { DiditService } from '../../src/modules/didit/didit.service';
 import { CeyPayService } from '../../src/modules/ceypay/ceypay.service';
 import { R2StorageService } from '../../src/modules/storage/r2-storage.service';
 import { CoinMarketCapService } from '../../src/modules/coinmarketcap/coinmarketcap.service';
+import { P2pBotClient } from '../../src/modules/p2p/p2p-bot.client';
 import { TelegramLoggerService } from '../../src/modules/telegram-logger/telegram-logger.service';
 
 /**
@@ -65,6 +66,8 @@ export interface TestContext {
     presignDownload: jest.Mock;
     head: jest.Mock;
   };
+  /** The bot's /api/v1/p2p (signed requests are unit-tested) */
+  p2pBot: { isConfigured: jest.Mock; request: jest.Mock };
   /** Telegram DMs to users (never sent for real) */
   notifyUser: jest.SpyInstance;
   payHereCancel: jest.SpyInstance;
@@ -118,6 +121,11 @@ export async function createTestApp(): Promise<TestContext> {
     head: jest.fn(),
   };
 
+  const p2pBot = {
+    isConfigured: jest.fn().mockReturnValue(true),
+    request: jest.fn(),
+  };
+
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     // 24h change only (display); prices never come from CoinMarketCap
     .overrideProvider(CoinMarketCapService)
@@ -134,6 +142,8 @@ export async function createTestApp(): Promise<TestContext> {
     .useValue(ceyPay)
     .overrideProvider(R2StorageService)
     .useValue(storage)
+    .overrideProvider(P2pBotClient)
+    .useValue(p2pBot)
     .compile();
 
   const app = moduleRef.createNestApplication({ rawBody: true });
@@ -201,6 +211,7 @@ export async function createTestApp(): Promise<TestContext> {
     didit,
     ceyPay,
     storage,
+    p2pBot,
     notifyUser,
     payHereCancel,
     payHerePayments,

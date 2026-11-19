@@ -1,12 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import {
-  createHash,
-  createPrivateKey,
-  KeyObject,
-  randomBytes,
-  sign,
-} from 'crypto';
+import type { KeyObject } from 'crypto';
 import axios, { AxiosResponse, Method } from 'axios';
+import {
+  loadEd25519Key,
+  SEND_SIGNING_VERSION,
+  sha256hex,
+  signBotRequest,
+} from './bot-signer';
 
 /**
  * Why a send didn't go through. Settlement uses it to decide what to do next:
@@ -105,10 +105,6 @@ export interface SendStatusResponse {
   payment_hash?: string;
 }
 
-const SIGNING_VERSION = 'BDB-SEND-ED25519-V1';
-const sha256hex = (raw: string) =>
-  createHash('sha256').update(raw).digest('hex');
-
 // The bot's 400 message for a sending wallet without enough sats
 const LOW_BALANCE_PATTERN =
   /insufficient|low balance|not enough|balance too low/i;
@@ -135,8 +131,10 @@ export class BitcoinDeepaService {
   constructor() {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
     this.walletId = process.env.BITCOINDEEPA_WALLET_ID || '';
-    this.privateKey = this.loadPrivateKey(
+    this.privateKey = loadEd25519Key(
       process.env.BITCOINDEEPA_SEND_PRIVATE_KEY_PEM,
+      'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM',
+      this.logger,
     );
     this.timeout = parseInt(process.env.BITCOINDEEPA_TIMEOUT || '10000', 10);
     this.sendTimeout = parseInt(
@@ -147,29 +145,6 @@ export class BitcoinDeepaService {
       this.logger.warn(
         'BITCOINDEEPA_COLLECT_MOCK is on: sell debits are NOT sent to the bot (sandbox only)',
       );
-    }
-  }
-
-  /**
-   * The Ed25519 private key (PEM). Railway stores multi-line values fine, but
-   * a single-line value with literal "\n" is accepted too.
-   */
-  private loadPrivateKey(pem: string | undefined): KeyObject | null {
-    if (!pem) return null;
-    try {
-      const key = createPrivateKey(pem.replace(/\\n/g, '\n'));
-      if (key.asymmetricKeyType !== 'ed25519') {
-        this.logger.error(
-          `BITCOINDEEPA_SEND_PRIVATE_KEY_PEM is a ${key.asymmetricKeyType} key, not Ed25519: bot calls are disabled`,
-        );
-        return null;
-      }
-      return key;
-    } catch (error) {
-      this.logger.error(
-        `BITCOINDEEPA_SEND_PRIVATE_KEY_PEM can't be parsed (${String(error)}): bot calls are disabled`,
-      );
-      return null;
     }
   }
 
@@ -201,24 +176,14 @@ export class BitcoinDeepaService {
     if (!this.privateKey) {
       return Promise.reject(new Error('BitcoinDeepa API is not configured'));
     }
-    const [path, query = ''] = pathWithQuery.split('?');
     const raw = body ? JSON.stringify(body) : '';
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const nonce = randomBytes(16).toString('hex');
-    const message = [
-      SIGNING_VERSION,
+    const signed = signBotRequest({
+      version: SEND_SIGNING_VERSION,
       method,
-      path,
-      query,
-      timestamp,
-      nonce,
-      sha256hex(raw),
-    ].join('\n');
-    const signature = sign(
-      null,
-      Buffer.from(message),
-      this.privateKey,
-    ).toString('base64');
+      pathWithQuery,
+      hashedLines: [sha256hex(raw)],
+      key: this.privateKey,
+    });
 
     return axios.request<T>({
       method,
@@ -229,9 +194,7 @@ export class BitcoinDeepaService {
       headers: {
         'Content-Type': 'application/json',
         'X-Wallet-ID': this.walletId,
-        'X-Timestamp': timestamp,
-        'X-Nonce': nonce,
-        'X-Signature': signature,
+        ...signed,
       },
       timeout: timeoutMs,
     });

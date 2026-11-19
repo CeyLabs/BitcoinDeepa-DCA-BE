@@ -8,6 +8,8 @@ import {
 import { AuthService, JwtPayload } from './auth.service';
 import { TelegramAuthDto, TelegramOidcAuthDto } from './dto/telegram-auth.dto';
 import { UserService } from '../user/user.service';
+import { WebIdTokenStore } from './web-id-token.store';
+import { isP2pEnabled } from '../../common/p2p-enabled';
 
 interface AuthResponse {
   token: string;
@@ -32,6 +34,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly userService: UserService,
+    private readonly webIdTokens: WebIdTokenStore,
   ) {}
 
   @Post('telegram')
@@ -128,6 +131,12 @@ export class AuthController {
 
     const telegramId = claims.id.toString();
     const isRegistered = await this.userService.userExists(telegramId);
+
+    // P2P sends from the web forward this login to the bot, so keep it
+    // server-side (a fresh login before a send replaces it)
+    if (isP2pEnabled() && typeof claims.iat === 'number') {
+      await this.webIdTokens.save(telegramId, body.id_token, claims.iat);
+    }
 
     await this.userService.upsertTelegramUser({
       id: telegramId,
