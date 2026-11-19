@@ -46,7 +46,7 @@ describe('BitcoinDeepaService', () => {
   beforeEach(() => {
     process.env.BITCOINDEEPA_API_URL = 'https://bd.test';
     process.env.BITCOINDEEPA_WALLET_ID = 'BiccoindeepaDSATest';
-    process.env.BITCOINDEEPA_SEND_PRIVATE_KEY_PEM = PEM;
+    process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = PEM;
     delete process.env.BITCOINDEEPA_COLLECT_MOCK;
     service = new BitcoinDeepaService();
     request.mockReset();
@@ -107,15 +107,15 @@ describe('BitcoinDeepaService', () => {
     });
 
     it('accepts a one-line PEM with literal \\n', () => {
-      process.env.BITCOINDEEPA_SEND_PRIVATE_KEY_PEM = PEM.replace(/\n/g, '\\n');
+      process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = PEM.replace(/\n/g, '\\n');
       expect(new BitcoinDeepaService().isConfigured()).toBe(true);
     });
 
     it.each([
       ['no URL', 'BITCOINDEEPA_API_URL', ''],
       ['no wallet id', 'BITCOINDEEPA_WALLET_ID', ''],
-      ['no key', 'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM', ''],
-      ['an unparseable key', 'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM', 'not a pem'],
+      ['no key', 'BITCOINDEEPA_PRIVATE_KEY_PEM', ''],
+      ['an unparseable key', 'BITCOINDEEPA_PRIVATE_KEY_PEM', 'not a pem'],
     ])('is not configured with %s', (_, name, value) => {
       process.env[name] = value;
       expect(new BitcoinDeepaService().isConfigured()).toBe(false);
@@ -125,7 +125,7 @@ describe('BitcoinDeepaService', () => {
       const { privateKey: rsa } = generateKeyPairSync('rsa', {
         modulusLength: 2048,
       });
-      process.env.BITCOINDEEPA_SEND_PRIVATE_KEY_PEM = rsa
+      process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = rsa
         .export({ type: 'pkcs8', format: 'pem' })
         .toString();
       expect(new BitcoinDeepaService().isConfigured()).toBe(false);
@@ -464,7 +464,7 @@ describe('BitcoinDeepaService', () => {
   });
 
   it('refuses to call the bot when not configured', async () => {
-    process.env.BITCOINDEEPA_SEND_PRIVATE_KEY_PEM = '';
+    process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = '';
     const unconfigured = new BitcoinDeepaService();
     await expect(
       unconfigured.transferFunds(1, '42', 'm'),

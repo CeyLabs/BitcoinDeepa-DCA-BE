@@ -163,8 +163,8 @@ export class BitcoinDeepaService {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
     this.walletId = process.env.BITCOINDEEPA_WALLET_ID || '';
     this.privateKey = loadEd25519Key(
-      process.env.BITCOINDEEPA_SEND_PRIVATE_KEY_PEM,
-      'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM',
+      process.env.BITCOINDEEPA_PRIVATE_KEY_PEM,
+      'BITCOINDEEPA_PRIVATE_KEY_PEM',
       this.logger,
     );
     this.timeout = parseInt(process.env.BITCOINDEEPA_TIMEOUT || '10000', 10);

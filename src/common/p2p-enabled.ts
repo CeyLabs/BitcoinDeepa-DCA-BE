@@ -11,7 +11,7 @@ import {
  */
 export const isP2pEnabled = (): boolean =>
   process.env.P2P_ENABLED !== 'false' &&
-  !!process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM;
+  !!process.env.BITCOINDEEPA_PRIVATE_KEY_PEM;
 
 /** 503 for the /p2p endpoints while P2P is off */
 @Injectable()

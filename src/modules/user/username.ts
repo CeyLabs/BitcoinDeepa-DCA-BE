@@ -119,6 +119,7 @@ export const RESERVED_USERNAMES = new Set<string>([
   'btc',
   'sats',
   'satoshi',
+  'nakamoto',
   'bdbot',
   'bitcoindeepabot',
   'lightning',

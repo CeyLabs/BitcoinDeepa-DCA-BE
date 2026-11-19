@@ -28,7 +28,7 @@ const prodSecrets = {
   R2_BUCKET: 'statements',
   BITCOINDEEPA_API_URL: 'https://bitcoindeepa.com',
   BITCOINDEEPA_WALLET_ID: 'wallet',
-  BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: ED25519_PEM,
+  BITCOINDEEPA_PRIVATE_KEY_PEM: ED25519_PEM,
 };
 
 describe('validateEnv', () => {
@@ -86,7 +86,7 @@ describe('validateEnv', () => {
     for (const name of [
       'BITCOINDEEPA_API_URL',
       'BITCOINDEEPA_WALLET_ID',
-      'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM',
+      'BITCOINDEEPA_PRIVATE_KEY_PEM',
     ]) {
       expect(() => validateEnv({ ...prod, [name]: '' })).toThrow(
         new RegExp(name),
@@ -94,21 +94,9 @@ describe('validateEnv', () => {
     }
   });
 
-  it('never requires the P2P key (P2P is just off without it); checks it whenever set', () => {
-    const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
-    expect(() => validateEnv(prod)).not.toThrow();
-    expect(() => validateEnv({ ...prod, P2P_ENABLED: 'true' })).not.toThrow();
-    expect(() =>
-      validateEnv({
-        ...prod,
-        P2P_ENABLED: 'true',
-        BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: ED25519_PEM,
-      }),
-    ).not.toThrow();
+  it('P2P_ENABLED is true or false', () => {
     const dev = { ...base, NODE_ENV: 'development' };
-    expect(() =>
-      validateEnv({ ...dev, BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: 'nope' }),
-    ).toThrow(/BITCOINDEEPA_P2P_PRIVATE_KEY_PEM/);
+    expect(() => validateEnv({ ...dev, P2P_ENABLED: 'true' })).not.toThrow();
     expect(() => validateEnv({ ...dev, P2P_ENABLED: 'yes' })).toThrow(
       /P2P_ENABLED/,
     );
@@ -117,16 +105,16 @@ describe('validateEnv', () => {
   it('rejects a bot key that is not an Ed25519 PEM, in any environment', () => {
     const dev = { ...base, NODE_ENV: 'development' };
     expect(() =>
-      validateEnv({ ...dev, BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: 'nope' }),
+      validateEnv({ ...dev, BITCOINDEEPA_PRIVATE_KEY_PEM: 'nope' }),
     ).toThrow(/Ed25519/);
     expect(() =>
-      validateEnv({ ...dev, BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: pem('x25519') }),
+      validateEnv({ ...dev, BITCOINDEEPA_PRIVATE_KEY_PEM: pem('x25519') }),
     ).toThrow(/Ed25519/);
     // one line with literal \n, as some secret stores keep it
     expect(() =>
       validateEnv({
         ...dev,
-        BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: ED25519_PEM.replace(/\n/g, '\\n'),
+        BITCOINDEEPA_PRIVATE_KEY_PEM: ED25519_PEM.replace(/\n/g, '\\n'),
       }),
     ).not.toThrow();
     expect(() => validateEnv(dev)).not.toThrow(); // optional outside production
