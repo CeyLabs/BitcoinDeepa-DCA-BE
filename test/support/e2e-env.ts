@@ -115,10 +115,14 @@ Object.assign(process.env, {
   R2_BUCKET: '',
 });
 
-// P2P is on when its key is set (the bot client is mocked; signing is unit-tested)
-process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = generateKeyPairSync('ed25519')
-  .privateKey.export({ type: 'pkcs8', format: 'pem' })
-  .toString();
+// The send key, and P2P's own key: P2P is on when it is set (the bot client
+// is mocked; signing is unit-tested)
+const ed25519Pem = () =>
+  generateKeyPairSync('ed25519')
+    .privateKey.export({ type: 'pkcs8', format: 'pem' })
+    .toString();
+process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = ed25519Pem();
+process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM = ed25519Pem();
 
 // CeyPay signs webhooks with ED25519; tests sign with this throwaway key.
 const ceypayWebhookKeys = generateKeyPairSync('ed25519');

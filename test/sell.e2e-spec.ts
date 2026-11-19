@@ -688,18 +688,12 @@ describe('Sell flow (e2e)', () => {
       });
 
       describe('paying in the app (P2P on)', () => {
-        const initData = () =>
-          new URLSearchParams({
-            user: JSON.stringify({ id: Number(USER), first_name: 'A' }),
-            auth_date: String(Math.floor(Date.now() / 1000) - 30),
-            hash: 'h',
-          }).toString();
         beforeEach(() => {
           ctx.p2pBot.isConfigured.mockReturnValue(true);
           ctx.p2pBot.request.mockReset();
         });
 
-        it('approves with the Mini App credential, then the payout starts', async () => {
+        it('approves as the session user (X-BDB-User), then the payout starts', async () => {
           const { q, body } = await confirmPending();
           expect(body.collect.payInApp).toBe(true);
           ctx.p2pBot.request.mockResolvedValue({
@@ -709,33 +703,28 @@ describe('Sell flow (e2e)', () => {
           ctx.bitcoinDeepa.getCollect.mockResolvedValue(
             collectOk({ paid: true }),
           );
-          const raw = initData();
           const res = await asUser(ctx, USER)
             .post(`/sell/orders/${q.id}/pay`)
-            .set('X-Telegram-Init-Data', raw)
             .expect(200);
           expect(res.body.status).toBe('PAYOUT_PENDING');
           expect(ctx.p2pBot.request).toHaveBeenCalledWith(
             'POST',
             '/api/v1/p2p/collect/col-test-1/approve',
-            { kind: 'initData', value: raw },
+            { kind: 'user', telegramId: USER },
             {},
           );
         });
 
-        it('a stale Mini App login is 403 credential_stale (not 401)', async () => {
+        it('a user the bot has not linked gets 401 relogin_required', async () => {
           const { q } = await confirmPending();
-          const stale = new URLSearchParams({
-            user: JSON.stringify({ id: Number(USER) }),
-            auth_date: String(Math.floor(Date.now() / 1000) - 700),
-            hash: 'h',
-          }).toString();
+          ctx.p2pBot.request.mockResolvedValue({
+            status: 403,
+            body: { code: 'login_required', message: 'Log in first.' },
+          });
           const res = await asUser(ctx, USER)
             .post(`/sell/orders/${q.id}/pay`)
-            .set('X-Telegram-Init-Data', stale)
-            .expect(403);
-          expect(res.body.code).toBe('credential_stale');
-          expect(ctx.p2pBot.request).not.toHaveBeenCalled();
+            .expect(401);
+          expect(res.body.code).toBe('relogin_required');
         });
 
         it('refuses after the window (410) and withdraws the request', async () => {
@@ -744,10 +733,7 @@ describe('Sell flow (e2e)', () => {
             .knex('sell_order')
             .where({ id: q.id })
             .update({ collect_expires_at: new Date(Date.now() - 1000) });
-          await asUser(ctx, USER)
-            .post(`/sell/orders/${q.id}/pay`)
-            .set('X-Telegram-Init-Data', initData())
-            .expect(410);
+          await asUser(ctx, USER).post(`/sell/orders/${q.id}/pay`).expect(410);
           expect(ctx.p2pBot.request).not.toHaveBeenCalled();
           expect((await order(q.id)).status).toBe('EXPIRED');
         });

@@ -83,9 +83,9 @@ export class SellController {
   }
 
   /**
-   * Pay a confirmed sale from the app with the user's Telegram credential
-   * (Mini App: X-Telegram-Init-Data; web: the saved login). The bot chat's
-   * Pay button does the same without this.
+   * Pay a confirmed sale from the app, as the signed-in user (relayed to the
+   * bot's /p2p/collect/{id}/approve). The bot chat's Pay button does the same
+   * without this.
    */
   @Post('orders/:id/pay')
   @UseGuards(P2pEnabledGuard, ConditionalAuthGuard)
@@ -93,9 +93,8 @@ export class SellController {
   pay(
     @CurrentUser() user: JwtPayload,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
-    @Headers('x-telegram-init-data') initData: string | undefined,
   ) {
-    return this.sellService.payInApp(user.id, id, initData);
+    return this.sellService.payInApp(user.id, id);
   }
 
   /** Withdraw a sale the user hasn't paid yet */

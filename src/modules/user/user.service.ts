@@ -108,6 +108,28 @@ export class UserService {
       .whereNull('user.email');
   }
 
+  /**
+   * Remember the web login's OIDC `sub` (unique when set). Accounts link on
+   * the Telegram ID (user.id), so this is a record only: a clash with another
+   * row is logged and ignored, never used to pick an account.
+   */
+  async setTelegramSub(id: string, sub: string | undefined): Promise<void> {
+    if (!sub) return;
+    try {
+      await this.knexService
+        .knex('user')
+        .where('id', id)
+        .where((q) => {
+          void q.whereNull('telegram_sub').orWhereNot('telegram_sub', sub);
+        })
+        .update({ telegram_sub: sub });
+    } catch (error) {
+      this.logger.warn(
+        `Could not store telegram_sub for user ${id}: ${String(error)}`,
+      );
+    }
+  }
+
   async updateProfileDetails(
     id: string,
     profile: ProfileDetails,

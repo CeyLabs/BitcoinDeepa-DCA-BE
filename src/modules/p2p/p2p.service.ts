@@ -5,12 +5,12 @@ import {
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { P2pBotClient, type P2pBotResponse } from './p2p-bot.client';
 import {
-  P2pCredentialService,
-  type P2pPurpose,
-  spendFreshUntil,
-} from './p2p-credential.service';
+  P2pBotClient,
+  P2P_KEY_ENV,
+  type P2pBotResponse,
+  type P2pCaller,
+} from './p2p-bot.client';
 import type { P2pInitDto, P2pResolveDto, P2pSendDto } from './dto/p2p.dto';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
@@ -42,14 +42,23 @@ const describeBody = (data: Record<string, unknown>, body: unknown): string =>
       ? body.slice(0, 80)
       : '';
 
+/** Reads may be retried freely; a spend with no answer may have gone through */
+type P2pPurpose = 'read' | 'spend';
+
+/** A Telegram login credential: only POST /api/v1/init carries one */
+export type P2pLoginCredential = Extract<P2pCaller, { value: string }>;
+
 const asObject = (body: unknown): Record<string, unknown> =>
   body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
 
 /**
- * The P2P relay: a user sends sats from their own bot wallet. We resolve the
- * user's Telegram credential, sign the call with the P2P key and pass the
- * bot's answer through (its messages are written for users). What isn't the
- * user's to fix - our signature, IP allowlist, a bot outage - is mapped:
+ * The P2P relay: a user sends sats from their own bot wallet. The Telegram
+ * login is checked once, at login (init, which links the user on the bot for
+ * a year); after that our session names the user (X-BDB-User, signed V2 with
+ * the P2P key) and we pass the bot's answer through (its messages are written
+ * for users). A user the bot hasn't linked (403 login_required) gets our 401
+ * relogin_required: logging in again links them. What isn't the user's to
+ * fix - our signature, IP allowlist, a bot outage - is mapped:
  * - 401 bad_service_signature / 403 forbidden / plain-text 403 → 502
  *   p2p_unavailable, with an alert (at most hourly): it's our config
  * - no answer or a 5xx on /send → 502 outcome_unknown: it may have gone
@@ -63,51 +72,28 @@ export class P2pService {
 
   constructor(
     private readonly bot: P2pBotClient,
-    private readonly credentials: P2pCredentialService,
     private readonly redis: RedisService,
     private readonly telegramLogger: TelegramLoggerService,
     private readonly users: UserService,
   ) {}
 
-  async me(userId: string, initData?: string): Promise<P2pResult> {
-    const resolved = await this.credentials.resolve(userId, initData, 'read');
-    const result = await this.call(
-      'GET',
-      `${P2P_PATH}/me`,
-      resolved.credential,
-      'read',
-    );
-    return {
-      ...result,
-      body: {
-        ...result.body,
-        // For the app: warn (or ask for a fresh login) before a send fails
-        credential: {
-          platform: resolved.platform,
-          spend_fresh_until: new Date(
-            spendFreshUntil(resolved.issuedAt) * 1000,
-          ).toISOString(),
-        },
-      },
-    };
+  async me(userId: string): Promise<P2pResult> {
+    return this.call('GET', `${P2P_PATH}/me`, user(userId), 'read');
   }
 
   /**
-   * Creates the user's bot wallet if they never pressed Start in the bot
-   * (201, created: true; else 200). Safe on every app open. can_message false
-   * (new wallets only) means the bot can't message them yet: the app should
-   * offer t.me/<bot>?start=... so Confirm buttons and receipts reach them.
+   * The login call: forwards the user's fresh Telegram credential (verified
+   * by us just before) to the bot's /api/v1/init, which creates their wallet
+   * if they never pressed Start (201, created: true; else 200) and links them
+   * for X-BDB-User for a year. Called by every login; the credential is not
+   * kept. can_message false (new wallets only) means the bot can't message
+   * them yet: the app should offer t.me/<bot>?start=...
    */
   async init(
     userId: string,
-    initData: string | undefined,
+    credential: P2pLoginCredential,
     dto: P2pInitDto,
   ): Promise<P2pResult> {
-    const { credential } = await this.credentials.resolve(
-      userId,
-      initData,
-      'read',
-    );
     const result = await this.call(
       'POST',
       INIT_PATH,
@@ -168,20 +154,11 @@ export class P2pService {
     };
   }
 
-  async send(
-    userId: string,
-    initData: string | undefined,
-    dto: P2pSendDto,
-  ): Promise<P2pResult> {
-    const { credential } = await this.credentials.resolve(
-      userId,
-      initData,
-      'spend',
-    );
+  async send(userId: string, dto: P2pSendDto): Promise<P2pResult> {
     const result = await this.call(
       'POST',
       `${P2P_PATH}/send`,
-      credential,
+      user(userId),
       'spend',
       {
         to_telegram_id: dto.to_telegram_id,
@@ -197,42 +174,24 @@ export class P2pService {
   }
 
   /**
-   * The user pays a collect request (a sale's debit) from the app. Needs a
-   * spend-fresh credential, like /send; repeats return the same transfer.
+   * The user pays a collect request (a sale's debit) from the app. Repeats
+   * return the same transfer.
    */
-  async approveCollect(
-    userId: string,
-    initData: string | undefined,
-    collectId: string,
-  ): Promise<P2pResult> {
-    const { credential } = await this.credentials.resolve(
-      userId,
-      initData,
-      'spend',
-    );
+  async approveCollect(userId: string, collectId: string): Promise<P2pResult> {
     return this.call(
       'POST',
       `${P2P_PATH}/collect/${encodeURIComponent(collectId)}/approve`,
-      credential,
+      user(userId),
       'spend',
       {},
     );
   }
 
-  async transfer(
-    userId: string,
-    initData: string | undefined,
-    id: string,
-  ): Promise<P2pResult> {
-    const { credential } = await this.credentials.resolve(
-      userId,
-      initData,
-      'read',
-    );
+  async transfer(userId: string, id: string): Promise<P2pResult> {
     return this.call(
       'GET',
       `${P2P_PATH}/transfers/${encodeURIComponent(id)}`,
-      credential,
+      user(userId),
       'read',
     );
   }
@@ -240,7 +199,7 @@ export class P2pService {
   private async call(
     method: 'GET' | 'POST',
     path: string,
-    credential: Parameters<P2pBotClient['request']>[2],
+    caller: P2pCaller,
     purpose: P2pPurpose,
     body?: Record<string, unknown>,
   ): Promise<P2pResult> {
@@ -252,27 +211,42 @@ export class P2pService {
     }
     let response: P2pBotResponse;
     try {
-      response = await this.bot.request(method, path, credential, body);
+      response = await this.bot.request(method, path, caller, body);
     } catch (error) {
       this.logger.error(
         `P2P ${method} ${path}: no answer from the bot (${errorMessage(error)})`,
       );
       throw unreachable(purpose);
     }
-    return this.mapResponse(method, path, purpose, response);
+    return this.mapResponse(method, path, caller, purpose, response);
   }
 
   private async mapResponse(
     method: string,
     path: string,
+    caller: P2pCaller,
     purpose: P2pPurpose,
     { status, body }: P2pBotResponse,
   ): Promise<P2pResult> {
     const data = asObject(body);
     if (status >= 200 && status < 300) return { status, body: data };
 
+    // Not linked on the bot (never logged in through init, or the year ran
+    // out): logging in again links them. 401 so the app re-logs in.
+    if (status === 403 && data.code === 'login_required') {
+      throw new HttpException(
+        {
+          code: 'relogin_required',
+          message: 'Please log in again to use your wallet.',
+        },
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+
     const ourConfig =
       (status === 401 && data.code === 'bad_service_signature') ||
+      // X-BDB-User missing/bad, or init sent X-BDB-User: our bug, not the user's
+      (status === 401 && caller.kind === 'user') ||
       (status === 403 &&
         (data.code === 'forbidden' || typeof body !== 'object'));
     if (ourConfig) {
@@ -297,8 +271,8 @@ export class P2pService {
       }
       throw unreachable(purpose);
     }
-    // The bot refused the user's Telegram credential: our session is fine, so
-    // not a 401 (the app signs the user out on 401). Same fix as stale.
+    // init: the bot refused the Telegram credential we just verified (too
+    // old for it, or used twice). Logging in again gives a fresh one.
     if (status === 401) {
       throw new HttpException(
         {
@@ -327,7 +301,7 @@ export class P2pService {
       await this.telegramLogger
         .logAlert(
           'P2P',
-          `P2P sends are failing: ${reason}. Check BITCOINDEEPA_PRIVATE_KEY_PEM (its public key must be the bot's api.p2p.service_public_key), the server clock and the bot's IP allowlist. (Reported at most hourly.)`,
+          `P2P sends are failing: ${reason}. Check ${P2P_KEY_ENV} (its public key must be the bot's api.p2p.service_public_key), the server clock and the bot's IP allowlist. (Reported at most hourly.)`,
         )
         .catch(() => undefined);
     }
@@ -361,3 +335,5 @@ function unreachable(purpose: P2pPurpose): HttpException {
         HttpStatus.SERVICE_UNAVAILABLE,
       );
 }
+
+const user = (telegramId: string): P2pCaller => ({ kind: 'user', telegramId });

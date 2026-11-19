@@ -2,7 +2,6 @@ import {
   Body,
   Controller,
   Get,
-  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -21,12 +20,9 @@ import { TransferIdPipe } from './transfer-id.pipe';
 
 /**
  * Send sats from the user's own bot wallet to another bot user (relayed to
- * the bot's /api/v1/p2p). In the Mini App, send the raw initData in
- * X-Telegram-Init-Data; on the web, the latest "Log In with Telegram" is used.
- * Sends need a credential under 10 min old: a 403 credential_stale (or the
- * bot's refusal, 403 credential_rejected) asks the app to get a fresh one
- * (reopen the Mini App / log in again), then retry with the same
- * idempotency_key. 401 is only ever our own session.
+ * the bot's /api/v1/p2p). Our session names the user; no Telegram credential
+ * is needed after login. 401 relogin_required means the bot hasn't linked the
+ * user (log in again), then retry with the same idempotency_key.
  */
 @Controller('p2p')
 @UseGuards(P2pEnabledGuard, ConditionalAuthGuard)
@@ -36,10 +32,9 @@ export class P2pController {
   @Get('me')
   async me(
     @CurrentUser() user: JwtPayload,
-    @Headers('x-telegram-init-data') initData: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return reply(res, await this.p2p.me(user.id, initData));
+    return reply(res, await this.p2p.me(user.id));
   }
 
   @Post('resolve')
@@ -56,21 +51,19 @@ export class P2pController {
   @Post('send')
   async send(
     @CurrentUser() user: JwtPayload,
-    @Headers('x-telegram-init-data') initData: string | undefined,
     @Body() dto: P2pSendDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return reply(res, await this.p2p.send(user.id, initData, dto));
+    return reply(res, await this.p2p.send(user.id, dto));
   }
 
   @Get('transfers/:id')
   async transfer(
     @CurrentUser() user: JwtPayload,
-    @Headers('x-telegram-init-data') initData: string | undefined,
     @Param('id', TransferIdPipe) id: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return reply(res, await this.p2p.transfer(user.id, initData, id));
+    return reply(res, await this.p2p.transfer(user.id, id));
   }
 }
 

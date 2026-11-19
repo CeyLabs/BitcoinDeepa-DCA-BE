@@ -1,15 +1,20 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
-import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { ConditionalAuthGuard } from './conditional-auth.guard';
 import { AdminKeyGuard } from './admin-key.guard';
-import { WebIdTokenStore } from './web-id-token.store';
+import { SessionService } from './session.service';
 import { UserModule } from '../user/user.module';
 
+/**
+ * Who is calling: sessions, the guard and the Telegram verifiers. Modules
+ * that use ConditionalAuthGuard import this. The login routes live in
+ * LoginModule (they also need the P2P relay, which imports this module).
+ */
 @Module({
   imports: [
+    // Only to verify legacy 7-day JWTs until they expire
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -19,19 +24,13 @@ import { UserModule } from '../user/user.module';
     }),
     forwardRef(() => UserModule),
   ],
-  controllers: [AuthController],
-  providers: [
-    AuthService,
-    ConditionalAuthGuard,
-    AdminKeyGuard,
-    WebIdTokenStore,
-  ],
+  providers: [AuthService, ConditionalAuthGuard, AdminKeyGuard, SessionService],
   exports: [
     AuthService,
     ConditionalAuthGuard,
     AdminKeyGuard,
     JwtModule,
-    WebIdTokenStore,
+    SessionService,
   ],
 })
 export class AuthModule {}

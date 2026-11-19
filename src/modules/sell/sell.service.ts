@@ -658,15 +658,11 @@ export class SellService {
   }
 
   /**
-   * The user pays from the app (Mini App or web), with their own Telegram
-   * credential: the bot's /p2p/collect/{id}/approve. Credential and bot
-   * errors come back as the P2P relay's (credential_stale, ...).
+   * The user pays from the app (Mini App or web): the bot's
+   * /p2p/collect/{id}/approve as the signed-in user. Bot errors come back as
+   * the P2P relay's (relogin_required, ...).
    */
-  async payInApp(
-    userId: string,
-    id: string,
-    initData: string | undefined,
-  ): Promise<SellOrderView> {
+  async payInApp(userId: string, id: string): Promise<SellOrderView> {
     const order = await this.findOrder(userId, id);
     if (order.status !== SellStatus.COLLECTING || !order.bot_collect_id) {
       throw new ConflictException('This sale is not waiting for a payment.');
@@ -678,7 +674,7 @@ export class SellService {
       await this.syncCollect(order);
       throw new GoneException('The time to pay has passed. Nothing was sold.');
     }
-    await this.p2p.approveCollect(userId, initData, order.bot_collect_id);
+    await this.p2p.approveCollect(userId, order.bot_collect_id);
     // Not getOrder: its read throttle could skip the sync the user waits for
     await this.syncCollect(await this.findOrder(userId, id));
     return toSellOrderView(await this.findOrder(userId, id));

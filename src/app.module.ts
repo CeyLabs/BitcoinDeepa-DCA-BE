@@ -4,6 +4,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { SubscriptionModule } from './modules/subscription/subscription.module';
 import { PackageModule } from './modules/package/package.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { LoginModule } from './modules/auth/login.module';
 import { UserModule } from './modules/user/user.module';
 import { TransactionModule } from './modules/transaction/transaction.module';
 import { RedisModule } from './modules/redis/redis.module';
@@ -25,6 +26,7 @@ import { validateEnv } from './config/env.validation';
     SubscriptionModule,
     PackageModule,
     AuthModule,
+    LoginModule,
     UserModule,
     TransactionModule,
     HealthModule,

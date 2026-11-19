@@ -11,10 +11,12 @@ import {
  * Ed25519 request signing shared by the bot's APIs. Each API signs its own
  * first line, so a signature for one can't be replayed on the other:
  * - send API (our DCA wallet): BDB-SEND-ED25519-V1 ... sha256hex(body)
- * - P2P API (a user's own wallet): BDB-P2P-ED25519-V1 ... sha256hex(credential), sha256hex(body)
+ * - P2P login (POST /api/v1/init only): BDB-P2P-ED25519-V1 ... sha256hex(credential), sha256hex(body)
+ * - P2P calls for a linked user: BDB-P2P-ED25519-V2 ... telegramId, sha256hex(body)
  */
 export const SEND_SIGNING_VERSION = 'BDB-SEND-ED25519-V1';
 export const P2P_SIGNING_VERSION = 'BDB-P2P-ED25519-V1';
+export const P2P_SIGNING_VERSION_V2 = 'BDB-P2P-ED25519-V2';
 
 export const sha256hex = (raw: string): string =>
   createHash('sha256').update(raw).digest('hex');
@@ -56,7 +58,7 @@ export interface SignedHeaders {
 /**
  * Sign one request: `[version, METHOD, PATH, QUERY, TIMESTAMP, NONCE,
  * ...hashedLines].join('\n')` (no trailing newline). `hashedLines` are the
- * API's trailing hex hashes, in order. Every call gets a fresh timestamp and
+ * API's trailing lines, in order (hex hashes, or V2's Telegram ID). Every call gets a fresh timestamp and
  * nonce: the bot rejects a reused nonce, so retries must be signed again.
  */
 export function signBotRequest(params: {

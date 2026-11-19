@@ -103,7 +103,7 @@ describe('Auth, KYC, subscriptions and read endpoints (e2e)', () => {
       // Token verification itself is covered in telegram-oidc.spec.ts
       const verify = jest.spyOn(
         ctx.app.get(AuthService),
-        'verifyTelegramOidcToken',
+        'verifyTelegramOidcIdToken',
       );
       const original = process.env.TELEGRAM_OIDC_CLIENT_ID;
       try {
