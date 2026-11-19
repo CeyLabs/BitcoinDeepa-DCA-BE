@@ -1,12 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import {
-  createHash,
-  createPrivateKey,
-  KeyObject,
-  randomBytes,
-  sign,
-} from 'crypto';
+import type { KeyObject } from 'crypto';
 import axios, { AxiosResponse, Method } from 'axios';
+import {
+  loadEd25519Key,
+  SEND_SIGNING_VERSION,
+  sha256hex,
+  signBotRequest,
+} from './bot-signer';
 
 /**
  * Why a send didn't go through. Settlement uses it to decide what to do next:
@@ -34,12 +34,43 @@ export interface FundTransferResponse {
   awaiting_approval_id?: string;
 }
 
-/** Debit a user's wallet into the platform wallet (sell flow). */
-export interface FundCollectRequest {
-  telegram_id: number;
-  amount: number; // satoshis
-  memo: string; // unique per sell order; the API rejects a duplicate memo
+/** A collect request: we ask a user to pay the DCA wallet (sell flow). */
+export type CollectRequestStatus =
+  | 'pending'
+  | 'approved'
+  | 'declined'
+  | 'cancelled'
+  | 'expired';
+
+export interface CollectRequest {
+  id: string;
+  status: CollectRequestStatus;
+  /** true once the approved payment completed */
+  paid: boolean;
+  amount: number;
+  external_id?: string;
+  /** false: the bot couldn't message the user (blocked it); the app can still pay */
+  notified?: boolean;
+  expires_at?: string;
+  /** Set once approved: the user's P2P payment to us */
+  transfer?: {
+    id: string;
+    status: string;
+    error?: string;
+    confirm_by?: string;
+  };
 }
+
+/**
+ * - ok: the bot's answer
+ * - unknown: no answer, a 5xx, 429 or 409 in_progress. Safe to ask again:
+ *   create is idempotent on external_id, the others don't move anything
+ * - refused: a definite 4xx ({code, message} from the bot)
+ */
+export type CollectResult =
+  | { kind: 'ok'; request: CollectRequest }
+  | { kind: 'unknown'; message: string }
+  | { kind: 'refused'; status: number; code: string; message: string };
 
 export interface UserBalanceRequest {
   telegram_id: number;
@@ -105,10 +136,6 @@ export interface SendStatusResponse {
   payment_hash?: string;
 }
 
-const SIGNING_VERSION = 'BDB-SEND-ED25519-V1';
-const sha256hex = (raw: string) =>
-  createHash('sha256').update(raw).digest('hex');
-
 // The bot's 400 message for a sending wallet without enough sats
 const LOW_BALANCE_PATTERN =
   /insufficient|low balance|not enough|balance too low/i;
@@ -135,8 +162,10 @@ export class BitcoinDeepaService {
   constructor() {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
     this.walletId = process.env.BITCOINDEEPA_WALLET_ID || '';
-    this.privateKey = this.loadPrivateKey(
+    this.privateKey = loadEd25519Key(
       process.env.BITCOINDEEPA_SEND_PRIVATE_KEY_PEM,
+      'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM',
+      this.logger,
     );
     this.timeout = parseInt(process.env.BITCOINDEEPA_TIMEOUT || '10000', 10);
     this.sendTimeout = parseInt(
@@ -151,31 +180,9 @@ export class BitcoinDeepaService {
   }
 
   /**
-   * The Ed25519 private key (PEM). Railway stores multi-line values fine, but
-   * a single-line value with literal "\n" is accepted too.
-   */
-  private loadPrivateKey(pem: string | undefined): KeyObject | null {
-    if (!pem) return null;
-    try {
-      const key = createPrivateKey(pem.replace(/\\n/g, '\n'));
-      if (key.asymmetricKeyType !== 'ed25519') {
-        this.logger.error(
-          `BITCOINDEEPA_SEND_PRIVATE_KEY_PEM is a ${key.asymmetricKeyType} key, not Ed25519: bot calls are disabled`,
-        );
-        return null;
-      }
-      return key;
-    } catch (error) {
-      this.logger.error(
-        `BITCOINDEEPA_SEND_PRIVATE_KEY_PEM can't be parsed (${String(error)}): bot calls are disabled`,
-      );
-      return null;
-    }
-  }
-
-  /**
-   * Until the bot's collect endpoint exists, dev can pretend every debit
-   * succeeded. Env validation only allows it with the CeyPay sandbox.
+   * Dev without a collect-enabled wallet on the bot can pretend every sell
+   * debit was approved and paid. Env validation only allows it with the
+   * CeyPay sandbox.
    */
   static isCollectMocked(): boolean {
     return process.env.BITCOINDEEPA_COLLECT_MOCK === 'true';
@@ -201,24 +208,14 @@ export class BitcoinDeepaService {
     if (!this.privateKey) {
       return Promise.reject(new Error('BitcoinDeepa API is not configured'));
     }
-    const [path, query = ''] = pathWithQuery.split('?');
     const raw = body ? JSON.stringify(body) : '';
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const nonce = randomBytes(16).toString('hex');
-    const message = [
-      SIGNING_VERSION,
+    const signed = signBotRequest({
+      version: SEND_SIGNING_VERSION,
       method,
-      path,
-      query,
-      timestamp,
-      nonce,
-      sha256hex(raw),
-    ].join('\n');
-    const signature = sign(
-      null,
-      Buffer.from(message),
-      this.privateKey,
-    ).toString('base64');
+      pathWithQuery,
+      hashedLines: [sha256hex(raw)],
+      key: this.privateKey,
+    });
 
     return axios.request<T>({
       method,
@@ -229,9 +226,7 @@ export class BitcoinDeepaService {
       headers: {
         'Content-Type': 'application/json',
         'X-Wallet-ID': this.walletId,
-        'X-Timestamp': timestamp,
-        'X-Nonce': nonce,
-        'X-Signature': signature,
+        ...signed,
       },
       timeout: timeoutMs,
     });
@@ -435,47 +430,79 @@ export class BitcoinDeepaService {
   }
 
   /**
-   * Debit satoshis from a user's wallet into the platform wallet (sell flow).
-   * Same result semantics as transferFunds, except that any 5xx is an unknown
-   * outcome: the debit may have happened before the error, and the endpoint's
-   * contract doesn't promise otherwise yet.
+   * Ask a user to pay the DCA wallet (POST /api/v1/collect). Nothing moves
+   * until they approve, in the bot chat or in the app. external_id makes it
+   * idempotent: asking again returns the same request (200 instead of 201).
    */
-  async collectFunds(
+  createCollect(
+    toTelegramId: string,
     amount: number,
-    fromTelegramId: string,
     memo: string,
-  ): Promise<FundTransferResponse> {
-    if (BitcoinDeepaService.isCollectMocked()) {
-      this.logger.warn(
-        `MOCK collect: ${amount} sats from user ${fromTelegramId} (${memo}) treated as debited`,
-      );
-      return { success: true, message: 'Mock collect (not sent to the bot)' };
-    }
-    const requestBody: FundCollectRequest = {
-      telegram_id: Number(fromTelegramId),
+    externalId: string,
+  ): Promise<CollectResult> {
+    return this.collectCall('POST', this.collectEndpoint, {
+      to: toTelegramId,
       amount: Number(amount),
       memo,
-    };
+      external_id: externalId,
+    });
+  }
 
+  getCollect(id: string): Promise<CollectResult> {
+    return this.collectCall(
+      'GET',
+      `${this.collectEndpoint}/${encodeURIComponent(id)}`,
+    );
+  }
+
+  /** Withdraw a pending request. 409 request_closed: it was answered first. */
+  cancelCollect(id: string): Promise<CollectResult> {
+    return this.collectCall(
+      'POST',
+      `${this.collectEndpoint}/${encodeURIComponent(id)}/cancel`,
+      {},
+    );
+  }
+
+  private async collectCall(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: object,
+  ): Promise<CollectResult> {
     try {
-      const response = await this.signedRequest<FundTransferResponse>(
-        'POST',
-        this.collectEndpoint,
-        requestBody,
+      const response = await this.signedRequest<CollectRequest>(
+        method,
+        path,
+        body,
       );
-      this.logger.log(
-        `BitcoinDeepa collect OK: ${amount} sats from user ${fromTelegramId} (status ${response.status})`,
+      return { kind: 'ok', request: response.data };
+    } catch (error: unknown) {
+      const response = (
+        error as {
+          response?: {
+            status?: number;
+            data?: { code?: unknown; message?: unknown };
+          };
+        }
+      )?.response;
+      const status = response?.status;
+      const data = response?.data;
+      const code = typeof data?.code === 'string' ? data.code : '';
+      const message = BitcoinDeepaService.errorMessage(error, 'Collect failed');
+      const unknown =
+        status === undefined ||
+        status >= 500 ||
+        status === 429 ||
+        (status === 409 && code === 'in_progress');
+      this.logger[unknown ? 'warn' : 'error'](
+        `BitcoinDeepa ${method} ${path}: ${status ?? 'no answer'} ${code} ${message}`,
       );
-      return response.data;
-    } catch (error: any) {
-      const message = BitcoinDeepaService.errorMessage(
-        error,
-        'Fund collect failed',
-      );
-      this.logger.error(
-        `BitcoinDeepa collect failed: ${amount} sats from user ${fromTelegramId}: ${message} (status: ${error.response?.status})`,
-      );
-      return BitcoinDeepaService.toFailedTransfer(error, message);
+      if (unknown) return { kind: 'unknown', message };
+      if (status === 401 || (status === 403 && !code)) {
+        // Our key, wallet id, clock or IP (a plain-text 403 is the allowlist)
+        return { kind: 'refused', status, code: 'auth', message };
+      }
+      return { kind: 'refused', status, code, message };
     }
   }
 

@@ -9,12 +9,17 @@ import { configureApp } from '../../src/app.setup';
 import { KnexService } from '../../src/modules/knex/knex.service';
 import { RedisService } from '../../src/modules/redis/redis.service';
 import { BitcoinPriceService } from '../../src/modules/bitcoin-price/bitcoin-price.service';
-import { BitcoinDeepaService } from '../../src/modules/bitcoindeepa/bitcoindeepa.service';
+import {
+  BitcoinDeepaService,
+  type CollectRequest,
+  type CollectResult,
+} from '../../src/modules/bitcoindeepa/bitcoindeepa.service';
 import { PayHereService } from '../../src/modules/payhere/payhere.service';
 import { DiditService } from '../../src/modules/didit/didit.service';
 import { CeyPayService } from '../../src/modules/ceypay/ceypay.service';
 import { R2StorageService } from '../../src/modules/storage/r2-storage.service';
 import { CoinMarketCapService } from '../../src/modules/coinmarketcap/coinmarketcap.service';
+import { P2pBotClient } from '../../src/modules/p2p/p2p-bot.client';
 import { TelegramLoggerService } from '../../src/modules/telegram-logger/telegram-logger.service';
 
 /**
@@ -42,7 +47,9 @@ export interface TestContext {
   bitcoinDeepa: {
     isConfigured: jest.Mock;
     transferFunds: jest.Mock;
-    collectFunds: jest.Mock;
+    createCollect: jest.Mock;
+    getCollect: jest.Mock;
+    cancelCollect: jest.Mock;
     getUserBalance: jest.Mock;
     getUserTransactions: jest.Mock;
     getSendStatus: jest.Mock;
@@ -65,6 +72,8 @@ export interface TestContext {
     presignDownload: jest.Mock;
     head: jest.Mock;
   };
+  /** The bot's /api/v1/p2p (signed requests are unit-tested) */
+  p2pBot: { isConfigured: jest.Mock; request: jest.Mock };
   /** Telegram DMs to users (never sent for real) */
   notifyUser: jest.SpyInstance;
   payHereCancel: jest.SpyInstance;
@@ -79,7 +88,9 @@ export async function createTestApp(): Promise<TestContext> {
   const bitcoinDeepa = {
     isConfigured: jest.fn().mockReturnValue(true),
     transferFunds: jest.fn().mockResolvedValue({ success: true }),
-    collectFunds: jest.fn().mockResolvedValue({ success: true }),
+    createCollect: jest.fn(),
+    getCollect: jest.fn(),
+    cancelCollect: jest.fn(),
     getUserBalance: jest
       .fn()
       .mockResolvedValue({ success: true, balance: 0, balance_lkr: '0.00' }),
@@ -118,6 +129,11 @@ export async function createTestApp(): Promise<TestContext> {
     head: jest.fn(),
   };
 
+  const p2pBot = {
+    isConfigured: jest.fn().mockReturnValue(true),
+    request: jest.fn(),
+  };
+
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     // 24h change only (display); prices never come from CoinMarketCap
     .overrideProvider(CoinMarketCapService)
@@ -137,6 +153,8 @@ export async function createTestApp(): Promise<TestContext> {
     .useValue(ceyPay)
     .overrideProvider(R2StorageService)
     .useValue(storage)
+    .overrideProvider(P2pBotClient)
+    .useValue(p2pBot)
     .compile();
 
   const app = moduleRef.createNestApplication({ rawBody: true });
@@ -204,6 +222,7 @@ export async function createTestApp(): Promise<TestContext> {
     didit,
     ceyPay,
     storage,
+    p2pBot,
     notifyUser,
     payHereCancel,
     payHerePayments,
@@ -305,12 +324,53 @@ export function resetSellMocks(ctx: TestContext): void {
     size: 120_000,
     contentType: 'application/pdf',
   });
-  bitcoinDeepa.collectFunds.mockResolvedValue({ success: true });
+  // By default the user approves at once and the payment completes.
+  // mockReset: clearAllMocks keeps queued *Once answers a test didn't use
+  bitcoinDeepa.createCollect.mockReset();
+  bitcoinDeepa.getCollect.mockReset();
+  bitcoinDeepa.cancelCollect.mockReset();
+  bitcoinDeepa.createCollect.mockResolvedValue(collectOk({ paid: true }));
+  bitcoinDeepa.getCollect.mockResolvedValue(collectOk({ paid: true }));
+  bitcoinDeepa.cancelCollect.mockResolvedValue(
+    collectOk({ status: 'cancelled' }),
+  );
   bitcoinDeepa.getUserBalance.mockResolvedValue({
     success: true,
     balance: 0,
     balance_lkr: '0.00',
   });
+}
+
+/**
+ * The bot's answer about a collect request. Approved and paid by default;
+ * `paid: false` with a transfer status for a payment still under way.
+ */
+export function collectOk(
+  overrides: Partial<CollectRequest> & { transferStatus?: string } = {},
+): CollectResult {
+  const { transferStatus, ...rest } = overrides;
+  const status = rest.status ?? 'approved';
+  const paid = rest.paid ?? false;
+  return {
+    kind: 'ok',
+    request: {
+      id: 'col-test-1',
+      status,
+      paid,
+      amount: 100_000,
+      notified: true,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      ...(status === 'approved'
+        ? {
+            transfer: {
+              id: 'p2p-col-test-1',
+              status: transferStatus ?? (paid ? 'completed' : 'processing'),
+            },
+          }
+        : {}),
+      ...rest,
+    },
+  };
 }
 
 /** Headers + raw body for a CeyPay webhook signed like CeyPay does. */

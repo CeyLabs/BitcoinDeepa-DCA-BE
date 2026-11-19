@@ -94,6 +94,26 @@ describe('validateEnv', () => {
     }
   });
 
+  it('never requires the P2P key (P2P is just off without it); checks it whenever set', () => {
+    const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
+    expect(() => validateEnv(prod)).not.toThrow();
+    expect(() => validateEnv({ ...prod, P2P_ENABLED: 'true' })).not.toThrow();
+    expect(() =>
+      validateEnv({
+        ...prod,
+        P2P_ENABLED: 'true',
+        BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: ED25519_PEM,
+      }),
+    ).not.toThrow();
+    const dev = { ...base, NODE_ENV: 'development' };
+    expect(() =>
+      validateEnv({ ...dev, BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: 'nope' }),
+    ).toThrow(/BITCOINDEEPA_P2P_PRIVATE_KEY_PEM/);
+    expect(() => validateEnv({ ...dev, P2P_ENABLED: 'yes' })).toThrow(
+      /P2P_ENABLED/,
+    );
+  });
+
   it('rejects a bot key that is not an Ed25519 PEM, in any environment', () => {
     const dev = { ...base, NODE_ENV: 'development' };
     expect(() =>

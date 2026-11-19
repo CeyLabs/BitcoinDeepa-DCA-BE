@@ -14,6 +14,7 @@ import { AdminModule } from './modules/admin/admin.module';
 import { BankAccountModule } from './modules/bank-account/bank-account.module';
 import { SellModule } from './modules/sell/sell.module';
 import { BuyModule } from './modules/buy/buy.module';
+import { P2pModule } from './modules/p2p/p2p.module';
 import { validateEnv } from './config/env.validation';
 
 @Module({
@@ -32,6 +33,7 @@ import { validateEnv } from './config/env.validation';
     BankAccountModule,
     SellModule,
     BuyModule,
+    P2pModule,
     AdminModule,
   ],
 })

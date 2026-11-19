@@ -32,8 +32,8 @@ class IsEd25519PrivateKeyPem implements ValidatorConstraintInterface {
       return false;
     }
   }
-  defaultMessage(): string {
-    return 'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM must be an Ed25519 private key PEM';
+  defaultMessage(args: ValidationArguments): string {
+    return `${args.property} must be an Ed25519 private key PEM`;
   }
 }
 
@@ -204,6 +204,21 @@ class EnvironmentVariables {
   @Validate(IsEd25519PrivateKeyPem)
   BITCOINDEEPA_SEND_PRIVATE_KEY_PEM?: string;
 
+  // P2P sends (users' own wallets, relayed to the bot's /api/v1/p2p). On by
+  // default; P2P_ENABLED=false switches it off (/p2p/* answers 503).
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  P2P_ENABLED?: string;
+
+  // A separate Ed25519 key for P2P (not the send key); its public key is the
+  // bot's api.p2p.service_public_key. Optional: without it P2P is off (503),
+  // never a failed boot. Checked whenever set.
+  @ValidateIf(
+    (env: EnvironmentVariables) => !!env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM,
+  )
+  @Validate(IsEd25519PrivateKeyPem)
+  BITCOINDEEPA_P2P_PRIVATE_KEY_PEM?: string;
+
   // Shared secret the bot sends as X-Callback-Secret on its deposit callback.
   // Optional until the bot supports it; when set, the callback requires it.
   @IsOptional()
@@ -276,6 +291,14 @@ class EnvironmentVariables {
   @Min(10)
   @Max(600)
   SELL_QUOTE_TTL_SECONDS?: number;
+
+  // How long a confirmed sale waits for the user to approve the payment
+  // (default 300). At most the bot's own 15-minute request expiry.
+  @IsOptional()
+  @IsInt()
+  @Min(60)
+  @Max(900)
+  SELL_COLLECT_WINDOW_SECONDS?: number;
 
   @IsOptional()
   @IsInt()

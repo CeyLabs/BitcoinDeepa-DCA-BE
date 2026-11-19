@@ -362,33 +362,83 @@ describe('BitcoinDeepaService', () => {
     });
   });
 
-  describe('collectFunds (sell flow)', () => {
-    it('posts a signed debit of the user to /api/v1/collect', async () => {
-      request.mockResolvedValue({ status: 200, data: { success: true } });
-      await service.collectFunds(5000, '42', 'sell:abc');
+  describe('collect requests (sell flow)', () => {
+    /** An AxiosError with the bot's {code, message} body */
+    const botError = (status: number, code: string) =>
+      Object.assign(new AxiosError('Request failed'), {
+        response: { status, data: { code, message: `msg ${code}` } },
+      });
+
+    it('creates a signed request with the order id as external_id', async () => {
+      request.mockResolvedValue({
+        status: 201,
+        data: { id: 'col-1', status: 'pending', paid: false, amount: 5000 },
+      });
+      await expect(
+        service.createCollect('42', 5000, 'Sell 5,000 sats', 'order-uuid-1'),
+      ).resolves.toEqual({
+        kind: 'ok',
+        request: expect.objectContaining({ id: 'col-1', status: 'pending' }),
+      });
       const config = call();
+      expect(config.method).toBe('POST');
       expect(config.url).toBe('https://bd.test/api/v1/collect');
       expect(JSON.parse(config.data as string)).toEqual({
-        telegram_id: 42,
+        to: '42',
         amount: 5000,
-        memo: 'sell:abc',
+        memo: 'Sell 5,000 sats',
+        external_id: 'order-uuid-1',
       });
       expect(verifySigned(config)).toBe(true);
     });
 
-    it('treats a 500 as an unknown outcome (the debit may have happened)', async () => {
-      request.mockRejectedValue(apiError(500, 'boom'));
-      await expect(service.collectFunds(1, '42', 'm')).resolves.toMatchObject({
-        outcome_unknown: true,
+    it('reads and cancels by id', async () => {
+      request.mockResolvedValue({ status: 200, data: { id: 'col-1' } });
+      await service.getCollect('col-1');
+      await service.cancelCollect('col-1');
+      expect(call(0)).toMatchObject({
+        method: 'GET',
+        url: 'https://bd.test/api/v1/collect/col-1',
+      });
+      expect(call(1)).toMatchObject({
+        method: 'POST',
+        url: 'https://bd.test/api/v1/collect/col-1/cancel',
+      });
+      expect(verifySigned(call(0))).toBe(true);
+      expect(verifySigned(call(1))).toBe(true);
+    });
+
+    it.each([
+      ['no answer', new AxiosError('timeout')],
+      ['a 5xx', botError(500, 'internal_error')],
+      ['429', botError(429, 'rate_limited')],
+      ['409 in_progress', botError(409, 'in_progress')],
+    ])('%s is unknown (safe to ask again)', async (_, error) => {
+      request.mockRejectedValue(error);
+      await expect(service.getCollect('col-1')).resolves.toMatchObject({
+        kind: 'unknown',
       });
     });
 
-    it('with the mock on, succeeds without calling the bot', async () => {
-      process.env.BITCOINDEEPA_COLLECT_MOCK = 'true';
-      await expect(service.collectFunds(1, '42', 'm')).resolves.toMatchObject({
-        success: true,
+    it('passes a definite refusal through with its code', async () => {
+      request.mockRejectedValue(botError(409, 'request_closed'));
+      await expect(service.cancelCollect('col-1')).resolves.toEqual({
+        kind: 'refused',
+        status: 409,
+        code: 'request_closed',
+        message: 'msg request_closed',
       });
-      expect(request).not.toHaveBeenCalled();
+    });
+
+    it('a 401 or plain-text 403 is our auth', async () => {
+      request.mockRejectedValue(
+        Object.assign(new AxiosError('Request failed'), {
+          response: { status: 403, data: 'Access denied' },
+        }),
+      );
+      await expect(
+        service.createCollect('42', 1, 'm', 'order-uuid-1'),
+      ).resolves.toMatchObject({ kind: 'refused', code: 'auth' });
     });
   });
 
