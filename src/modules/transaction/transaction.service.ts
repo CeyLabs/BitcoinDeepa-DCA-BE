@@ -19,6 +19,7 @@ import { PayHereService } from '../payhere/payhere.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 import { errorMessage } from '../../common/error-message';
 import { computeBuyFees } from '../../common/buy-fees';
+import { saleCollectMemo, SellStatus } from '../sell/sell.constants';
 import {
   BUY_ORDER_EXPIRY_GRACE_MINUTES,
   buyLimits,
@@ -1392,6 +1393,37 @@ export class TransactionService {
 
   private static readonly SETTLEMENT_REF = /\(Ref: ([^)]+)\)$/;
 
+  /**
+   * Marks the bot-history rows that are a sale's payment (the user's approved
+   * collect request), so the app shows that sale once. Matched against the
+   * user's own sell orders whose sats left their wallet, by
+   * matchSalePayments. Left unmarked: a refunded sale's payment (it nets out
+   * with the refund, which is listed too) and anything that doesn't match.
+   */
+  async markSalePayments<T extends SaleMatchRow>(
+    userId: string,
+    rows: T[],
+  ): Promise<(T & { sale_payment: boolean })[]> {
+    const amounts = [
+      ...new Set(
+        rows
+          .filter((r) => r.direction === 'outgoing' && r.success)
+          .map((r) => Number(r.amount)),
+      ),
+    ];
+    const orders =
+      amounts.length === 0
+        ? []
+        : await this.knexService
+            .knex('sell_order')
+            .where('user_id', userId)
+            .whereIn('status', SALE_PAID_STATUSES)
+            .whereIn('sats', amounts)
+            .select<SaleMatchOrder[]>('id', 'sats', 'amount_lkr', 'created_at');
+    const paid = matchSalePayments(rows, orders);
+    return rows.map((row, i) => ({ ...row, sale_payment: paid.has(i) }));
+  }
+
   async getLatestTransactionForUser(
     user_id: string,
   ): Promise<Record<string, unknown> | null> {
@@ -1558,4 +1590,69 @@ export class TransactionService {
       CacheKeys.patterns.userTransactionLists(user_id),
     );
   }
+}
+
+/** Sell statuses whose sats may have left the user's wallet (not refunded) */
+const SALE_PAID_STATUSES: SellStatus[] = [
+  SellStatus.COLLECTING,
+  SellStatus.SATS_COLLECTED,
+  SellStatus.PAYOUT_PENDING,
+  SellStatus.COMPLETED,
+  SellStatus.REFUNDING,
+  SellStatus.NEEDS_REVIEW,
+];
+
+export interface SaleMatchRow {
+  direction: string;
+  time: string;
+  memo?: string;
+  amount: number;
+  success: boolean;
+}
+
+export interface SaleMatchOrder {
+  id: string;
+  sats: string | number;
+  amount_lkr: string | number;
+  created_at: Date | string;
+}
+
+/**
+ * Which rows (by index) are a sale's payment: an outgoing successful transfer
+ * of the order's exact sats, with the memo its collect request carried
+ * (saleCollectMemo, the same function that set it), made after the order was
+ * created. Each order matches at most one row; a row goes to the most recent
+ * order created before it, so two equal sales each keep their own payment.
+ */
+export function matchSalePayments(
+  rows: SaleMatchRow[],
+  orders: SaleMatchOrder[],
+): Set<number> {
+  const open = orders
+    .map((o) => ({
+      id: o.id,
+      sats: Number(o.sats),
+      memo: saleCollectMemo(o.amount_lkr),
+      createdAt: new Date(o.created_at).getTime(),
+    }))
+    // newest first: a payment belongs to the latest sale started before it
+    .sort((a, b) => b.createdAt - a.createdAt);
+  const matched = new Set<number>();
+  // Oldest payments first, so each claims its own sale before a later one
+  const byTime = rows
+    .map((row, i) => ({ row, i, at: new Date(row.time).getTime() }))
+    .sort((a, b) => a.at - b.at);
+  for (const { row, i, at } of byTime) {
+    if (row.direction !== 'outgoing' || !row.success) continue;
+    const k = open.findIndex(
+      (o) =>
+        o.sats === Number(row.amount) &&
+        o.memo === row.memo &&
+        o.createdAt <= at,
+    );
+    if (k === -1) continue;
+    open.splice(k, 1);
+    matched.add(i);
+  }
+  return matched;
 }

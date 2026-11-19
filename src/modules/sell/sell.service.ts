@@ -39,6 +39,7 @@ import {
   DEFAULT_SELL_DAILY_MAX_SATS,
   DEFAULT_SELL_MAX_SATS,
   SATS_PER_BTC,
+  saleCollectMemo,
   SellStatus,
 } from './sell.constants';
 
@@ -224,7 +225,7 @@ export function toCollectState(request: CollectRequest): CollectState {
 
 /** Shown to the user in the bot's Pay / Decline prompt */
 const collectMemo = (row: SellOrderRow): string =>
-  `Bitcoin Deepa sale: ${Number(row.amount_lkr).toLocaleString('en-US', { minimumFractionDigits: 2 })} LKR to your bank account`;
+  saleCollectMemo(row.amount_lkr);
 
 /**
  * CEYPAY_WEBHOOK_URL, else BASE_URL + the webhook route. CeyPay refuses
