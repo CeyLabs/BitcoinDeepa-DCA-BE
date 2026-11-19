@@ -1248,12 +1248,22 @@ export class TransactionService {
 
   /**
    * Marks the bot-history rows that are a purchase's settlement transfer
-   * (memo "... (Ref: <payment id>)"), so the app shows that purchase once.
-   * Only the user's own SUCCESS payments count: memos are free text (a P2P
-   * sender can copy the format), and a charged-back purchase's row reads as
-   * not credited, so its transfer stays the record that the sats arrived.
+   * (memo "... (Ref: <payment id>)", amount = its sats), so the app shows that
+   * purchase once. Memos are free text, so the ref must be one of the user's
+   * own SUCCESS payments and the amount must match. Left unmarked, so the
+   * transfer stays the record that the sats arrived:
+   * - a charged-back purchase (its row reads as not credited);
+   * - a successful transfer for a purchase not marked settled (an unknown
+   *   send outcome: the purchase still reads as "Processing").
    */
-  async markPurchaseSettlements<T extends { direction: string; memo?: string }>(
+  async markPurchaseSettlements<
+    T extends {
+      direction: string;
+      memo?: string;
+      amount: number;
+      success: boolean;
+    },
+  >(
     userId: string,
     rows: T[],
   ): Promise<(T & { purchase_settlement: boolean })[]> {
@@ -1262,19 +1272,33 @@ export class TransactionService {
         ? TransactionService.SETTLEMENT_REF.exec(row.memo ?? '')?.[1]
         : undefined;
     const refs = [...new Set(rows.map(refOf).filter((r): r is string => !!r))];
-    const settled = new Set<string>();
+    const purchases = new Map<string, { settled: boolean; sats: number }>();
     if (refs.length > 0) {
       const found = await this.knexService
         .knex('transaction')
         .where('user_id', userId)
         .where('status', 'SUCCESS')
         .whereIn('payhere_pay_id', refs)
-        .pluck<string[]>('payhere_pay_id');
-      found.forEach((id) => settled.add(id));
+        .select<
+          {
+            payhere_pay_id: string;
+            settled: boolean;
+            satoshis_purchased: string | number | null;
+          }[]
+        >('payhere_pay_id', 'settled', 'satoshis_purchased');
+      for (const p of found) {
+        purchases.set(p.payhere_pay_id, {
+          settled: p.settled,
+          sats: Number(p.satoshis_purchased),
+        });
+      }
     }
     return rows.map((row) => {
       const ref = refOf(row);
-      return { ...row, purchase_settlement: !!ref && settled.has(ref) };
+      const p = ref === undefined ? undefined : purchases.get(ref);
+      const isSettlement =
+        !!p && Number(row.amount) === p.sats && (p.settled || !row.success);
+      return { ...row, purchase_settlement: isSettlement };
     });
   }
 
