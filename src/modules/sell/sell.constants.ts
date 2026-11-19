@@ -19,6 +19,29 @@ export enum SellStatus {
   NEEDS_REVIEW = 'NEEDS_REVIEW',
 }
 
+/**
+ * Where a COLLECTING order's payment is (`sell_order.collect_state`, the app
+ * sees it as `collect.state`). The bot's request and transfer statuses, in
+ * its own lowercase words; anything it adds later is stored as PROCESSING.
+ */
+export enum CollectState {
+  /** Asking the bot to create the request (no answer yet). View only, never stored */
+  REQUESTING = 'requesting',
+  /** Waiting for the user to approve */
+  PENDING = 'pending',
+  /** Approved; above the user's daily allowance, Confirm in the bot chat */
+  AWAITING_CONFIRMATION = 'awaiting_confirmation',
+  /** Approved; being paid */
+  PROCESSING = 'processing',
+  IN_FLIGHT = 'in_flight',
+  COMPLETED = 'completed',
+  /** The approved payment failed (e.g. low balance) */
+  FAILED = 'failed',
+  DECLINED = 'declined',
+  CANCELLED = 'cancelled',
+  EXPIRED = 'expired',
+}
+
 /** Orders whose bank account must not be removed */
 export const IN_FLIGHT_SELL_STATUSES = [
   SellStatus.QUOTED,

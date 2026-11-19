@@ -34,6 +34,7 @@ import {
   maskAccountNumber,
 } from '../bank-account/bank-account.service';
 import {
+  CollectState,
   COUNTED_SELL_STATUSES,
   DEFAULT_SELL_DAILY_MAX_SATS,
   DEFAULT_SELL_MAX_SATS,
@@ -108,7 +109,7 @@ export interface SellOrderRow {
   ceypay_payment_id: string | null;
   bot_collect_id: string | null;
   collect_expires_at: Date | null;
-  collect_state: string | null;
+  collect_state: CollectState | null;
   bank_ref: string | null;
   failure_reason: string | null;
   refunded: boolean;
@@ -142,7 +143,7 @@ export interface SellOrderView {
    * Confirm in the bot chat), processing / in_flight (being paid).
    */
   collect: {
-    state: string;
+    state: CollectState;
     expiresAt: string;
     payInApp: boolean;
   } | null;
@@ -193,15 +194,33 @@ export const toSellOrderView = (row: SellOrderRow): SellOrderView => ({
   collect:
     row.status === SellStatus.COLLECTING && row.collect_expires_at
       ? {
-          state: row.collect_state ?? 'requesting',
+          state: row.collect_state ?? CollectState.REQUESTING,
           expiresAt: new Date(row.collect_expires_at).toISOString(),
           payInApp:
             isP2pEnabled() &&
             !!row.bot_collect_id &&
-            row.collect_state === 'pending',
+            row.collect_state === CollectState.PENDING,
         }
       : null,
 });
+
+const STORED_COLLECT_STATES = new Set<string>(
+  Object.values(CollectState).filter((s) => s !== CollectState.REQUESTING),
+);
+
+/**
+ * The bot's request (or, once approved, its transfer) status as ours. One we
+ * don't know yet is PROCESSING: still going, checked again on the next sync.
+ */
+export function toCollectState(request: CollectRequest): CollectState {
+  const raw =
+    request.status === 'approved'
+      ? (request.transfer?.status ?? CollectState.PROCESSING)
+      : request.status;
+  return STORED_COLLECT_STATES.has(raw)
+    ? (raw as CollectState)
+    : CollectState.PROCESSING;
+}
 
 /** Shown to the user in the bot's Pay / Decline prompt */
 const collectMemo = (row: SellOrderRow): string =>
@@ -690,10 +709,7 @@ export class SellService {
     request: CollectRequest,
     mayCancel = true,
   ): Promise<void> {
-    const state =
-      request.status === 'approved'
-        ? (request.transfer?.status ?? 'processing')
-        : request.status;
+    const state = toCollectState(request);
     if (order.bot_collect_id !== request.id || order.collect_state !== state) {
       await this.knex('sell_order')
         .where({ id: order.id, status: SellStatus.COLLECTING })
@@ -789,7 +805,7 @@ export class SellService {
       [SellStatus.COLLECTING],
       {
         status: SellStatus.SATS_COLLECTED,
-        collect_state: 'completed',
+        collect_state: CollectState.COMPLETED,
         retry_count: 1,
         last_retry_at: this.knex.fn.now(),
       },
