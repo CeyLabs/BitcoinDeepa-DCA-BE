@@ -40,6 +40,8 @@ export interface User {
   kyc_rejection_reason?: string;
   /** Name Didit verified from the ID (first/last_name are the Telegram name) */
   kyc_full_name?: string | null;
+  /** Seed of the user's DiceBear avatar (the app draws it); null = drawn from the id */
+  avatar_seed?: string | null;
 }
 
 export interface TelegramProfile {
@@ -103,6 +105,13 @@ export class UserService {
     profile: ProfileDetails,
   ): Promise<void> {
     await this.knexService.knex('user').where('id', id).update(profile);
+  }
+
+  async setAvatarSeed(id: string, seed: string): Promise<void> {
+    await this.knexService
+      .knex('user')
+      .where('id', id)
+      .update({ avatar_seed: seed });
   }
 
   async getUserById(id: string): Promise<User | undefined> {

@@ -114,7 +114,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 
 **Tables:**
 - `package`: Subscription packages (UUID PK, name, frequency, amount, currency)
-- `user`: User profiles (Telegram ID as PK, personal info, address, KYC status and verification data)
+- `user`: User profiles (Telegram ID as PK, personal info, address, KYC status and verification data, `avatar_seed`)
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
 - `transaction`: Payment records (PayHere pay ID as PK, `kind` RECURRING/ONE_TIME, `user_id` (owner - read paths, settlement and admin use this, not the subscription), subscription ID (recurring only), `payhere_order_id` (one-time only), status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
 - `buy_order`: Every checkout we start (order_id → user; `kind`; package for RECURRING, amount + currency for ONE_TIME)
@@ -252,7 +252,8 @@ PORT=3000
 
 ### User Management
 - `POST /user` - Complete profile (email, phone, address, city, country) for the already-registered user (authenticated)
-- `GET /user/me` - Get current user profile, including `is_profile_complete` (authenticated)
+- `GET /user/me` - Get current user profile, including `is_profile_complete` and `avatar_seed` (authenticated)
+- `PATCH /user/avatar` - `{ seed }` (1-64 of `[A-Za-z0-9_-]`) saves the seed of the user's DiceBear avatar (the app draws it; null until set, when the app draws it from the Telegram id); returns the profile like `/user/me` (authenticated)
 - `GET /user/exists/:telegramId` - Check if a user has been registered (public)
 - `POST /user/kyc/initiate` - Initiate KYC verification process (authenticated)
 - `GET /user/kyc/status` - Get current KYC verification status (authenticated)
