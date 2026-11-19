@@ -48,7 +48,6 @@ describe('P2P sends (e2e)', () => {
   afterAll(() => ctx?.close());
   beforeEach(async () => {
     await resetData(ctx);
-    process.env.P2P_ENABLED = 'true';
     ctx.p2pBot.isConfigured.mockReturnValue(true);
     ctx.p2pBot.request.mockReset();
   });
@@ -56,10 +55,17 @@ describe('P2P sends (e2e)', () => {
     delete process.env.P2P_ENABLED;
   });
 
-  it('is off (503) unless P2P_ENABLED=true, and needs a signed-in user', async () => {
-    delete process.env.P2P_ENABLED;
+  it('is on by default, off (503) with P2P_ENABLED=false or no key, and needs a signed-in user', async () => {
+    process.env.P2P_ENABLED = 'false';
     await http().get('/p2p/me').set(auth()).expect(503);
-    process.env.P2P_ENABLED = 'true';
+    delete process.env.P2P_ENABLED;
+    const key = process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM;
+    delete process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM;
+    try {
+      await http().get('/p2p/me').set(auth()).expect(503);
+    } finally {
+      process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM = key;
+    }
     await http().get('/p2p/me').expect(401);
     expect(ctx.p2pBot.request).not.toHaveBeenCalled();
   });

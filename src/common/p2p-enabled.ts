@@ -4,10 +4,16 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 
-/** P2P sends (a user's own bot wallet, relayed to the bot) are off unless P2P_ENABLED=true */
-export const isP2pEnabled = (): boolean => process.env.P2P_ENABLED === 'true';
+/**
+ * P2P sends (a user's own bot wallet, relayed to the bot) are on by default.
+ * P2P_ENABLED=false is the off-switch; without our P2P key there is nothing
+ * to sign with, so it's off too (the app shows "not available").
+ */
+export const isP2pEnabled = (): boolean =>
+  process.env.P2P_ENABLED !== 'false' &&
+  !!process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM;
 
-/** 503 for the /p2p endpoints while P2P is switched off */
+/** 503 for the /p2p endpoints while P2P is off */
 @Injectable()
 export class P2pEnabledGuard implements CanActivate {
   canActivate(): boolean {

@@ -44,6 +44,14 @@ export class P2pBotClient {
     this.logger,
   );
 
+  constructor() {
+    if (process.env.P2P_ENABLED !== 'false' && !this.key) {
+      this.logger.warn(
+        'P2P is on but BITCOINDEEPA_P2P_PRIVATE_KEY_PEM is not set (or invalid): /p2p answers 503',
+      );
+    }
+  }
+
   isConfigured(): boolean {
     return !!(this.apiUrl && this.key);
   }

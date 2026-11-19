@@ -427,7 +427,7 @@ describe('Sell flow (e2e)', () => {
         const { q, body } = await confirmPending();
         expect(body).toMatchObject({
           status: 'COLLECTING',
-          collect: { state: 'pending', payInApp: false },
+          collect: { state: 'pending', payInApp: true },
         });
         const deadline = new Date(body.collect.expiresAt).getTime();
         expect(deadline - Date.now()).toBeGreaterThan(290_000);
@@ -623,12 +623,8 @@ describe('Sell flow (e2e)', () => {
             hash: 'h',
           }).toString();
         beforeEach(() => {
-          process.env.P2P_ENABLED = 'true';
           ctx.p2pBot.isConfigured.mockReturnValue(true);
           ctx.p2pBot.request.mockReset();
-        });
-        afterEach(() => {
-          delete process.env.P2P_ENABLED;
         });
 
         it('approves with the Mini App credential, then the payout starts', async () => {

@@ -115,6 +115,11 @@ Object.assign(process.env, {
   R2_BUCKET: '',
 });
 
+// P2P is on when its key is set (the bot client is mocked; signing is unit-tested)
+process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM = generateKeyPairSync('ed25519')
+  .privateKey.export({ type: 'pkcs8', format: 'pem' })
+  .toString();
+
 // CeyPay signs webhooks with ED25519; tests sign with this throwaway key.
 const ceypayWebhookKeys = generateKeyPairSync('ed25519');
 process.env.CEYPAY_WEBHOOK_PUBLIC_KEY = ceypayWebhookKeys.publicKey

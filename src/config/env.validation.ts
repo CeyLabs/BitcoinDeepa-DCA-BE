@@ -45,11 +45,6 @@ const presentOrProduction =
 const isProduction = (env: EnvironmentVariables) =>
   env.NODE_ENV === 'production';
 
-/** P2P key: checked whenever set, required in production once P2P is switched on */
-const p2pKeyRequired = (env: EnvironmentVariables) =>
-  !!env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM ||
-  (isProduction(env) && env.P2P_ENABLED === 'true');
-
 /** Selling also needs CeyPay's webhook key and R2: required in production once it is switched on */
 const sellRequired = (env: EnvironmentVariables) =>
   isProduction(env) && env.SELL_ENABLED === 'true';
@@ -209,15 +204,18 @@ class EnvironmentVariables {
   @Validate(IsEd25519PrivateKeyPem)
   BITCOINDEEPA_SEND_PRIVATE_KEY_PEM?: string;
 
-  // P2P sends (users' own wallets, relayed to the bot's /api/v1/p2p). Off
-  // unless P2P_ENABLED=true: /p2p/* answers 503.
+  // P2P sends (users' own wallets, relayed to the bot's /api/v1/p2p). On by
+  // default; P2P_ENABLED=false switches it off (/p2p/* answers 503).
   @IsOptional()
   @IsIn(['true', 'false'])
   P2P_ENABLED?: string;
 
   // A separate Ed25519 key for P2P (not the send key); its public key is the
-  // bot's api.p2p.service_public_key
-  @ValidateIf(p2pKeyRequired)
+  // bot's api.p2p.service_public_key. Optional: without it P2P is off (503),
+  // never a failed boot. Checked whenever set.
+  @ValidateIf(
+    (env: EnvironmentVariables) => !!env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM,
+  )
   @Validate(IsEd25519PrivateKeyPem)
   BITCOINDEEPA_P2P_PRIVATE_KEY_PEM?: string;
 

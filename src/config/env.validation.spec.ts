@@ -94,12 +94,10 @@ describe('validateEnv', () => {
     }
   });
 
-  it('requires the P2P key in production only once P2P is enabled; checks it whenever set', () => {
+  it('never requires the P2P key (P2P is just off without it); checks it whenever set', () => {
     const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
-    expect(() => validateEnv(prod)).not.toThrow(); // P2P off
-    expect(() => validateEnv({ ...prod, P2P_ENABLED: 'true' })).toThrow(
-      /BITCOINDEEPA_P2P_PRIVATE_KEY_PEM must be an Ed25519 private key PEM/,
-    );
+    expect(() => validateEnv(prod)).not.toThrow();
+    expect(() => validateEnv({ ...prod, P2P_ENABLED: 'true' })).not.toThrow();
     expect(() =>
       validateEnv({
         ...prod,
