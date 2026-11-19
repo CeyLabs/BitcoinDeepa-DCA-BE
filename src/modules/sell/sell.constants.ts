@@ -69,3 +69,11 @@ export const DEFAULT_SELL_MAX_SATS = 5_000_000;
 export const DEFAULT_SELL_DAILY_MAX_SATS = 20_000_000;
 
 export const SATS_PER_BTC = 100_000_000;
+
+/**
+ * The memo of a sale's collect request: shown in the bot's Pay / Decline
+ * prompt, and how the sale's payment is recognised in the user's bot history
+ * (TransactionService.markSalePayments). Change it here only.
+ */
+export const saleCollectMemo = (amountLkr: string | number): string =>
+  `Bitcoin Deepa sale: ${Number(amountLkr).toLocaleString('en-US', { minimumFractionDigits: 2 })} LKR to your bank account`;
