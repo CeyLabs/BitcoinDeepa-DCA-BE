@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
+import { SessionRequiredGuard } from '../auth/session-required.guard';
 import { KycVerifiedGuard } from '../auth/kyc-verified.guard';
 import { RequireKyc } from '../auth/require-kyc.decorator';
 import { CurrentUser } from '../auth/user.decorator';
@@ -83,19 +84,18 @@ export class SellController {
   }
 
   /**
-   * Pay a confirmed sale from the app with the user's Telegram credential
-   * (Mini App: X-Telegram-Init-Data; web: the saved login). The bot chat's
-   * Pay button does the same without this.
+   * Pay a confirmed sale from the app, as the signed-in user (relayed to the
+   * bot's /p2p/collect/{id}/approve). The bot chat's Pay button does the same
+   * without this.
    */
   @Post('orders/:id/pay')
-  @UseGuards(P2pEnabledGuard, ConditionalAuthGuard)
+  @UseGuards(P2pEnabledGuard, ConditionalAuthGuard, SessionRequiredGuard)
   @HttpCode(HttpStatus.OK)
   pay(
     @CurrentUser() user: JwtPayload,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
-    @Headers('x-telegram-init-data') initData: string | undefined,
   ) {
-    return this.sellService.payInApp(user.id, id, initData);
+    return this.sellService.payInApp(user.id, id);
   }
 
   /** Withdraw a sale the user hasn't paid yet */

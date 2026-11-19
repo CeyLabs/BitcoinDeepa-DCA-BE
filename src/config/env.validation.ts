@@ -1,5 +1,5 @@
 import { plainToInstance } from 'class-transformer';
-import { createPrivateKey } from 'crypto';
+import { createPrivateKey, createPublicKey } from 'crypto';
 import {
   IsIn,
   IsInt,
@@ -10,6 +10,7 @@ import {
   Min,
   MinLength,
   IsUrl,
+  Matches,
   Validate,
   ValidateIf,
   type ValidationArguments,
@@ -62,6 +63,41 @@ class NotNoneInProduction implements ValidatorConstraintInterface {
   }
 }
 
+/** Auth can't be switched off in production */
+@ValidatorConstraint({ name: 'notFalseInProduction' })
+class NotFalseInProduction implements ValidatorConstraintInterface {
+  validate(value: unknown, args: ValidationArguments): boolean {
+    return !(
+      value === 'false' && isProduction(args.object as EnvironmentVariables)
+    );
+  }
+  defaultMessage(): string {
+    return "can't be 'false' in production";
+  }
+}
+
+/** The P2P key must be its own key pair, not the send key */
+@ValidatorConstraint({ name: 'differsFromSendKey' })
+class DiffersFromSendKey implements ValidatorConstraintInterface {
+  validate(value: unknown, args: ValidationArguments): boolean {
+    const send = (args.object as EnvironmentVariables)
+      .BITCOINDEEPA_PRIVATE_KEY_PEM;
+    if (typeof value !== 'string' || !send) return true;
+    try {
+      const pub = (pem: string) =>
+        createPublicKey(createPrivateKey(pem.replace(/\\n/g, '\n')))
+          .export({ type: 'spki', format: 'der' })
+          .toString('base64');
+      return pub(value) !== pub(send);
+    } catch {
+      return true; // IsEd25519PrivateKeyPem reports a bad key
+    }
+  }
+  defaultMessage(): string {
+    return 'must be a different key pair from BITCOINDEEPA_PRIVATE_KEY_PEM (the send key)';
+  }
+}
+
 /**
  * Validated at startup by ConfigModule.forRoot - the app refuses to boot on
  * a missing/invalid value instead of failing later at runtime.
@@ -83,9 +119,65 @@ class EnvironmentVariables {
   @IsNotEmpty()
   JWT_SECRET!: string;
 
+  // Turning auth off (mock user) is for local development only
   @IsOptional()
   @IsIn(['true', 'false'])
+  @Validate(NotFalseInProduction)
   ENABLE_AUTH?: string;
+
+  // Legacy 7-day JWT logins (POST /auth/telegram, /auth/telegram-oidc).
+  // 'false' once the session-based app is live: they answer 410 and mint
+  // nothing, while JWTs already issued keep working until they expire.
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  LEGACY_JWT_ISSUE?: string;
+
+  // Public origin of the user app (Mini App + web), e.g. https://app.example.com.
+  // It gets credentialed CORS, cookie-authenticated writes must come from it
+  // (Origin), and the web login returns to it. Required in production.
+  @ValidateIf(isProduction)
+  @IsUrl({ require_tld: false, require_protocol: true })
+  APP_URL?: string;
+
+  // User-app session cookie across sites, for dev/staging only (a vercel.app
+  // app with a railway.app API): 'none' = SameSite=None; Secure. Production
+  // shares one site (app./api.bitcoindeepa.com) and stays 'lax'.
+  @IsOptional()
+  @IsIn(['lax', 'none'])
+  @Validate(NotNoneInProduction)
+  APP_COOKIE_SAME_SITE?: string;
+
+  // Log In with Telegram (OIDC redirect flow). Client ID = the bot ID,
+  // secret from BotFather > Login Widget. Redirect URI defaults to
+  // BASE_URL + /auth/telegram/callback and must be registered there.
+  @ValidateIf(presentOrProduction('TELEGRAM_OIDC_CLIENT_ID'))
+  @IsString()
+  @Matches(/^\d+$/)
+  TELEGRAM_OIDC_CLIENT_ID?: string;
+
+  @ValidateIf(presentOrProduction('TELEGRAM_OIDC_CLIENT_ID'))
+  @IsString()
+  @IsNotEmpty()
+  TELEGRAM_OIDC_CLIENT_SECRET?: string;
+
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  TELEGRAM_OIDC_REDIRECT_URI?: string;
+
+  // Defaults to 'openid profile' (profile carries the numeric id we link on)
+  @IsOptional()
+  @IsString()
+  @Matches(/(^| )profile( |$)/)
+  TELEGRAM_OIDC_SCOPE?: string;
+
+  // Express "trust proxy": hops in front of us (Railway's edge), so req.ip is
+  // the real client for the login rate limits. A number of hops, or a
+  // comma-separated list of proxy IPs/CIDRs. Required in production: unset,
+  // every client looks like the proxy and shares one limit.
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  TRUST_PROXY?: string;
 
   @ValidateIf(isProduction)
   @IsString()
@@ -200,15 +292,25 @@ class EnvironmentVariables {
   @IsNotEmpty()
   BITCOINDEEPA_WALLET_ID?: string;
 
-  // One Ed25519 key signs both the send API and P2P
+  // The send key: our DCA wallet's API (payouts, collect requests). Its
+  // public key is the wallet's ed25519_public_key on the bot.
   @ValidateIf(presentOrProduction('BITCOINDEEPA_PRIVATE_KEY_PEM'))
   @Validate(IsEd25519PrivateKeyPem)
   BITCOINDEEPA_PRIVATE_KEY_PEM?: string;
 
+  // The P2P key: users' own wallets (login via /api/v1/init, then
+  // /api/v1/p2p/* naming the user with X-BDB-User). A separate key pair from
+  // the send key, and a different one per environment; its public key is the
+  // bot's api.p2p.service_public_key. If it leaks it can pay from any linked
+  // user's wallet up to the bot's daily_limit: keep it in the secret store.
+  @IsOptional()
+  @Validate(IsEd25519PrivateKeyPem)
+  @Validate(DiffersFromSendKey)
+  BITCOINDEEPA_P2P_PRIVATE_KEY_PEM?: string;
+
   // P2P sends (users' own wallets, relayed to the bot's /api/v1/p2p). On by
-  // default; P2P_ENABLED=false switches it off (/p2p/* answers 503). Signed
-  // with the same BITCOINDEEPA_PRIVATE_KEY_PEM (also the bot's
-  // api.p2p.service_public_key).
+  // default; P2P_ENABLED=false switches it off (/p2p/* answers 503), and it
+  // is off without BITCOINDEEPA_P2P_PRIVATE_KEY_PEM.
   @IsOptional()
   @IsIn(['true', 'false'])
   P2P_ENABLED?: string;

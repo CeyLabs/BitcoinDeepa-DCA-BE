@@ -29,6 +29,10 @@ const prodSecrets = {
   BITCOINDEEPA_API_URL: 'https://bitcoindeepa.com',
   BITCOINDEEPA_WALLET_ID: 'wallet',
   BITCOINDEEPA_PRIVATE_KEY_PEM: ED25519_PEM,
+  APP_URL: 'https://app.example.com',
+  TELEGRAM_OIDC_CLIENT_ID: '8219648988',
+  TELEGRAM_OIDC_CLIENT_SECRET: 'oidc-secret',
+  TRUST_PROXY: '1',
 };
 
 describe('validateEnv', () => {
@@ -92,6 +96,79 @@ describe('validateEnv', () => {
         new RegExp(name),
       );
     }
+  });
+
+  it('requires the app URL, Log In with Telegram and TRUST_PROXY in production', () => {
+    for (const name of [
+      'APP_URL',
+      'TELEGRAM_OIDC_CLIENT_ID',
+      'TELEGRAM_OIDC_CLIENT_SECRET',
+      'TRUST_PROXY',
+    ]) {
+      expect(() =>
+        validateEnv({
+          ...base,
+          NODE_ENV: 'production',
+          ...prodSecrets,
+          [name]: '',
+        }),
+      ).toThrow(new RegExp(name));
+    }
+    expect(() =>
+      validateEnv({ ...base, TELEGRAM_OIDC_CLIENT_ID: 'not-a-bot-id' }),
+    ).toThrow(/TELEGRAM_OIDC_CLIENT_ID/);
+  });
+
+  it('allows a cross-site (SameSite=None) user-app cookie outside production only', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'development',
+        APP_COOKIE_SAME_SITE: 'none',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        APP_COOKIE_SAME_SITE: 'none',
+      }),
+    ).toThrow(/APP_COOKIE_SAME_SITE/);
+  });
+
+  it("can't switch auth off in production", () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        NODE_ENV: 'production',
+        ...prodSecrets,
+        ENABLE_AUTH: 'false',
+      }),
+    ).toThrow(/ENABLE_AUTH/);
+    expect(() =>
+      validateEnv({ ...base, NODE_ENV: 'development', ENABLE_AUTH: 'false' }),
+    ).not.toThrow();
+  });
+
+  it('the P2P key is its own Ed25519 key pair, not the send key', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        BITCOINDEEPA_PRIVATE_KEY_PEM: ED25519_PEM,
+        BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: ED25519_PEM,
+      }),
+    ).toThrow(/BITCOINDEEPA_P2P_PRIVATE_KEY_PEM/);
+    expect(() =>
+      validateEnv({
+        ...base,
+        BITCOINDEEPA_PRIVATE_KEY_PEM: ED25519_PEM,
+        BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: pem('ed25519'),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateEnv({ ...base, BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: pem('x25519') }),
+    ).toThrow(/BITCOINDEEPA_P2P_PRIVATE_KEY_PEM/);
   });
 
   it('P2P_ENABLED is true or false', () => {

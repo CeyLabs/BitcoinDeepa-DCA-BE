@@ -45,6 +45,16 @@ export interface TelegramInitData {
   hash: string;
 }
 
+/**
+ * The Mini App exchanges initData for a session once, at launch, so a short
+ * window limits how long a leaked initData can be replayed. Kept under the
+ * bot's 1 h init_data_max_age: the same initData goes on to its /init.
+ */
+export const MINIAPP_INITDATA_MAX_AGE_SECONDS = 15 * 60;
+
+/** Why a Telegram OIDC id_token was refused (the web login's ?error= code) */
+export type OidcRejection = 'missing_telegram_id' | 'invalid_id_token';
+
 export interface JwtPayload {
   id: string;
   username?: string;
@@ -71,7 +81,16 @@ export class AuthService {
 
   constructor(private readonly jwtService: JwtService) {}
 
-  verifyTelegramInitData(initData: string, botToken: string): boolean {
+  /**
+   * Mini App initData: HMAC-SHA256 keyed with HMAC("WebAppData", botToken)
+   * over the sorted key=value lines (all but hash), constant-time compare,
+   * and auth_date at most maxAgeSeconds old. Separate from the OIDC check.
+   */
+  verifyTelegramMiniAppInitData(
+    initData: string,
+    botToken: string,
+    maxAgeSeconds = MINIAPP_INITDATA_MAX_AGE_SECONDS,
+  ): boolean {
     try {
       const parsed = new URLSearchParams(initData);
       const hash = parsed.get('hash');
@@ -92,9 +111,6 @@ export class AuthService {
       }
 
       const ageSeconds = dayjs().diff(dayjs.unix(authTimestamp), 'second');
-      // initData is exchanged for a 7-day JWT right at app launch, so a
-      // short window limits how long a leaked initData can be replayed.
-      const maxAgeSeconds = 60 * 60; // 1 hour
       const maxClockSkewSeconds = 60;
 
       if (ageSeconds > maxAgeSeconds || ageSeconds < -maxClockSkewSeconds) {
@@ -143,39 +159,43 @@ export class AuthService {
   /**
    * Verifies a Telegram Login (OIDC) id_token: signature against Telegram's
    * JWKS, issuer, and audience (must match this app's Client ID from
-   * BotFather). jwtVerify also rejects expired tokens.
+   * BotFather). jwtVerify also rejects expired tokens. The numeric `id`
+   * claim (scope `profile`) is the Telegram user ID and our user id; `sub` is
+   * not, and is never used in its place: a token without `id` is refused
+   * (missing_telegram_id) rather than creating a second account.
    * https://core.telegram.org/bots/telegram-login#validating-id-tokens
    */
-  async verifyTelegramOidcToken(
+  async verifyTelegramOidcIdToken(
     idToken: string,
     clientId: string,
   ): Promise<TelegramOidcClaims> {
+    let payload: JWTPayload;
     try {
       const { jwtVerify } = await importJose();
       const jwks = await getTelegramJwks();
-      const { payload } = await jwtVerify(idToken, jwks, {
+      ({ payload } = await jwtVerify(idToken, jwks, {
         issuer: TELEGRAM_OIDC_ISSUER,
         audience: clientId,
         // Telegram's default; update if BotFather's Login Widget > Advanced
         // signing algorithm is changed.
         algorithms: ['RS256'],
-      });
-
-      const rawId = payload.id;
-      const isNumericId =
-        typeof rawId === 'number' ||
-        (typeof rawId === 'string' && /^\d+$/.test(rawId));
-      if (!isNumericId) {
-        throw new Error('id_token missing numeric "id" claim');
-      }
-
-      return { ...payload, id: String(rawId) } as TelegramOidcClaims;
+      }));
     } catch (error) {
       this.logger.warn(
         `Telegram OIDC id_token verification failed: ${errorMessage(error)}`,
       );
-      throw new UnauthorizedException('Invalid Telegram login token');
+      throw oidcRejected('invalid_id_token');
     }
+
+    const rawId = payload.id;
+    const isNumericId =
+      (typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId > 0) ||
+      (typeof rawId === 'string' && /^[1-9]\d*$/.test(rawId));
+    if (!isNumericId) {
+      this.logger.warn('Telegram OIDC id_token has no numeric "id" claim');
+      throw oidcRejected('missing_telegram_id');
+    }
+    return { ...payload, id: String(rawId) } as TelegramOidcClaims;
   }
 
   parseTelegramInitData(initData: string): TelegramInitData | null {
@@ -204,4 +224,11 @@ export class AuthService {
     this.logger.log(`JWT token generated for user: ${payload.id}`);
     return token;
   }
+}
+
+function oidcRejected(code: OidcRejection): UnauthorizedException {
+  return new UnauthorizedException({
+    code,
+    message: 'Invalid Telegram login token',
+  });
 }

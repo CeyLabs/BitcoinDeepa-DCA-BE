@@ -12,7 +12,7 @@ const importJose = new Function('return import("jose")') as () => Promise<
 const ISSUER = 'https://oauth.telegram.org';
 const CLIENT_ID = '1234567890';
 
-describe('AuthService.verifyTelegramOidcToken', () => {
+describe('AuthService.verifyTelegramOidcIdToken', () => {
   const service = new AuthService(new JwtService({ secret: 'test' }));
   let jose: typeof import('jose');
   let telegramKey: CryptoKey;
@@ -63,7 +63,7 @@ describe('AuthService.verifyTelegramOidcToken', () => {
   afterAll(() => fetchSpy.mockRestore());
 
   it('accepts a valid token and returns the Telegram id as a string', async () => {
-    const claims = await service.verifyTelegramOidcToken(
+    const claims = await service.verifyTelegramOidcIdToken(
       await idToken(),
       CLIENT_ID,
     );
@@ -77,7 +77,7 @@ describe('AuthService.verifyTelegramOidcToken', () => {
   });
 
   it('accepts a numeric id claim', async () => {
-    const claims = await service.verifyTelegramOidcToken(
+    const claims = await service.verifyTelegramOidcIdToken(
       await idToken({ id: 100000001 }),
       CLIENT_ID,
     );
@@ -91,20 +91,32 @@ describe('AuthService.verifyTelegramOidcToken', () => {
       'an expired token',
       () => idToken({}, { exp: Math.floor(Date.now() / 1000) - 60 }),
     ],
-    ['a missing id claim', () => idToken({ id: undefined })],
-    ['a non-numeric id', () => idToken({ id: 'admin' })],
     ['garbage', () => Promise.resolve('not.a.jwt')],
   ])('rejects %s', async (_, makeToken) => {
     await expect(
-      service.verifyTelegramOidcToken(await makeToken(), CLIENT_ID),
+      service.verifyTelegramOidcIdToken(await makeToken(), CLIENT_ID),
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
+
+  it.each([
+    ['a missing id claim', () => idToken({ id: undefined })],
+    ['a non-numeric id', () => idToken({ id: 'admin' })],
+  ])(
+    'refuses %s as missing_telegram_id (never falls back to sub)',
+    async (_, makeToken) => {
+      await expect(
+        service.verifyTelegramOidcIdToken(await makeToken(), CLIENT_ID),
+      ).rejects.toMatchObject({
+        response: { code: 'missing_telegram_id' },
+      });
+    },
+  );
 
   it('rejects a token signed with a key that is not in Telegram JWKS', async () => {
     const { privateKey } = await jose.generateKeyPair('RS256');
     for (const kid of ['tg-1', 'other']) {
       await expect(
-        service.verifyTelegramOidcToken(
+        service.verifyTelegramOidcIdToken(
           await idToken({}, { key: privateKey, kid }),
           CLIENT_ID,
         ),
@@ -120,7 +132,7 @@ describe('AuthService.verifyTelegramOidcToken', () => {
       .setExpirationTime('5m')
       .sign(new TextEncoder().encode('guessed-secret-guessed-secret-32b'));
     await expect(
-      service.verifyTelegramOidcToken(token, CLIENT_ID),
+      service.verifyTelegramOidcIdToken(token, CLIENT_ID),
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 });

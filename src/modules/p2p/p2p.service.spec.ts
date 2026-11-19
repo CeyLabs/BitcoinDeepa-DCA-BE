@@ -1,13 +1,15 @@
 import { HttpException } from '@nestjs/common';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
-import { P2pService } from './p2p.service';
+import { LOGIN_INIT_TIMEOUT_MS, P2pService } from './p2p.service';
 import type { P2pBotClient } from './p2p-bot.client';
-import type { P2pCredentialService } from './p2p-credential.service';
 import type { RedisService } from '../redis/redis.service';
 import type { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import type { UserService } from '../user/user.service';
 
+/** Login only: the fresh Telegram credential for /api/v1/init */
 const credential = { kind: 'initData' as const, value: 'init' };
+/** Every other call: our session names the user (X-BDB-User, V2) */
+const asUser = { kind: 'user' as const, telegramId: '42' };
 
 async function errorOf(
   p: Promise<unknown>,
@@ -26,19 +28,17 @@ async function errorOf(
 
 describe('P2pService', () => {
   const bot = { isConfigured: jest.fn(), request: jest.fn() };
-  const credentials = { resolve: jest.fn() };
   const redis = { setIfAbsent: jest.fn(), del: jest.fn() };
   const telegramLogger = { logAlert: jest.fn().mockResolvedValue(undefined) };
   const users = { getUserByUsername: jest.fn() };
   const service = new P2pService(
     bot as unknown as P2pBotClient,
-    credentials as unknown as P2pCredentialService,
     redis as unknown as RedisService,
     telegramLogger as unknown as TelegramLoggerService,
     users as unknown as UserService,
   );
   const send = (extra = {}) =>
-    service.send('42', 'init', {
+    service.send('42', {
       to_telegram_id: 7,
       amount: 100,
       idempotency_key: 'key-12345',
@@ -48,15 +48,10 @@ describe('P2pService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     bot.isConfigured.mockReturnValue(true);
-    credentials.resolve.mockResolvedValue({
-      credential,
-      platform: 'mini_app',
-      issuedAt: 1_700_000_000,
-    });
     redis.setIfAbsent.mockResolvedValue(true);
   });
 
-  it('sends exactly the documented fields (memo only when given) with a spend credential', async () => {
+  it('sends exactly the documented fields (memo only when given) as the session user', async () => {
     bot.request.mockResolvedValue({
       status: 202,
       body: { id: 'p2p-a', status: 'awaiting_confirmation' },
@@ -65,11 +60,10 @@ describe('P2pService', () => {
       status: 202,
       body: { id: 'p2p-a', status: 'awaiting_confirmation' },
     });
-    expect(credentials.resolve).toHaveBeenCalledWith('42', 'init', 'spend');
     expect(bot.request).toHaveBeenCalledWith(
       'POST',
       '/api/v1/p2p/send',
-      credential,
+      asUser,
       {
         to_telegram_id: 7,
         amount: 100,
@@ -175,20 +169,38 @@ describe('P2pService', () => {
     },
   );
 
-  it("the bot refusing the user's credential (401) becomes 403 credential_rejected (our session is fine)", async () => {
+  it('a user the bot has not linked (403 login_required) becomes our 403 relogin_required (not a sign-out 401)', async () => {
+    bot.request.mockResolvedValue({
+      status: 403,
+      body: { code: 'login_required', message: 'Log in first.' },
+    });
+    expect(await errorOf(send())).toMatchObject({
+      status: 403,
+      body: { code: 'relogin_required' },
+    });
+    expect(telegramLogger.logAlert).not.toHaveBeenCalled();
+  });
+
+  it('a 401 on an X-BDB-User call is our bug: 502 p2p_unavailable + alert', async () => {
     bot.request.mockResolvedValue({
       status: 401,
-      body: {
-        code: 'unauthorized',
-        message: 'Your session expired. Close and reopen the Mini App.',
-      },
+      body: { code: 'unauthorized', message: 'x' },
     });
-    expect(await errorOf(send())).toEqual({
+    expect(await errorOf(send())).toMatchObject({
+      status: 502,
+      body: { code: 'p2p_unavailable' },
+    });
+    expect(telegramLogger.logAlert).toHaveBeenCalled();
+  });
+
+  it('init: the bot refusing the Telegram credential (401) is 403 credential_rejected', async () => {
+    bot.request.mockResolvedValue({
+      status: 401,
+      body: { code: 'unauthorized', message: 'Log in again.' },
+    });
+    expect(await errorOf(service.init('42', credential, {}))).toEqual({
       status: 403,
-      body: {
-        code: 'credential_rejected',
-        message: 'Your session expired. Close and reopen the Mini App.',
-      },
+      body: { code: 'credential_rejected', message: 'Log in again.' },
     });
     expect(telegramLogger.logAlert).not.toHaveBeenCalled();
   });
@@ -217,7 +229,7 @@ describe('P2pService', () => {
         message: 'Could not load your balance. Try again.',
       },
     });
-    expect(await errorOf(service.me('42', 'init'))).toEqual({
+    expect(await errorOf(service.me('42'))).toEqual({
       status: 503,
       body: {
         code: 'balance_unavailable',
@@ -225,48 +237,46 @@ describe('P2pService', () => {
       },
     });
     bot.request.mockRejectedValue(new Error('ECONNRESET'));
-    expect(
-      await errorOf(service.transfer('42', 'init', 'p2p-ab')),
-    ).toMatchObject({
+    expect(await errorOf(service.transfer('42', 'p2p-ab'))).toMatchObject({
       status: 503,
       body: { code: 'p2p_unavailable' },
     });
   });
 
-  it('/me adds when the credential stops being fresh enough to send', async () => {
+  it('/me, transfers and collect approve name the session user, never a Telegram credential', async () => {
     bot.request.mockResolvedValue({ status: 200, body: { balance: 5 } });
-    await expect(service.me('42', 'init')).resolves.toEqual({
+    await expect(service.me('42')).resolves.toEqual({
       status: 200,
-      body: {
-        balance: 5,
-        credential: {
-          platform: 'mini_app',
-          spend_fresh_until: new Date(
-            (1_700_000_000 + 570) * 1000,
-          ).toISOString(),
-        },
-      },
+      body: { balance: 5 },
     });
-    expect(credentials.resolve).toHaveBeenCalledWith('42', 'init', 'read');
+    await service.transfer('42', 'p2p-ab');
+    await service.approveCollect('42', 'col-1');
+    expect(
+      (bot.request.mock.calls as unknown[][]).map((c) => [c[1], c[2]]),
+    ).toEqual([
+      ['/api/v1/p2p/me', asUser],
+      ['/api/v1/p2p/transfers/p2p-ab', asUser],
+      ['/api/v1/p2p/collect/col-1/approve', asUser],
+    ]);
   });
 
-  it('init forwards only referral_code to /api/v1/init with a read credential', async () => {
+  it('init forwards the login credential and only referral_code to /api/v1/init', async () => {
     bot.request.mockResolvedValue({
       status: 201,
       body: { telegram_id: 42, created: true, can_message: false },
     });
     await expect(
-      service.init('42', 'init', { referral_code: 'PROMO2024' }),
+      service.init('42', credential, { referral_code: 'PROMO2024' }),
     ).resolves.toEqual({
       status: 201,
       body: { telegram_id: 42, created: true, can_message: false },
     });
-    expect(credentials.resolve).toHaveBeenCalledWith('42', 'init', 'read');
     expect(bot.request).toHaveBeenCalledWith(
       'POST',
       '/api/v1/init',
       credential,
       { referral_code: 'PROMO2024' },
+      LOGIN_INIT_TIMEOUT_MS,
     );
     expect(redis.del).toHaveBeenCalledWith(
       CacheKeys.transaction.dcaSummary('42'),
@@ -278,7 +288,7 @@ describe('P2pService', () => {
       status: 200,
       body: { telegram_id: 42, created: false },
     });
-    await expect(service.init('42', 'init', {})).resolves.toMatchObject({
+    await expect(service.init('42', credential, {})).resolves.toMatchObject({
       status: 200,
     });
     expect(bot.request.mock.calls[0][3]).toEqual({});
@@ -290,7 +300,7 @@ describe('P2pService', () => {
       status: 403,
       body: { code: 'sender_not_allowed', message: 'Not allowed.' },
     });
-    expect(await errorOf(service.init('42', 'init', {}))).toEqual({
+    expect(await errorOf(service.init('42', credential, {}))).toEqual({
       status: 403,
       body: { code: 'sender_not_allowed', message: 'Not allowed.' },
     });
@@ -298,7 +308,7 @@ describe('P2pService', () => {
       status: 503,
       body: { code: 'wallet_unavailable', message: 'Retry.' },
     });
-    expect(await errorOf(service.init('42', 'init', {}))).toEqual({
+    expect(await errorOf(service.init('42', credential, {}))).toEqual({
       status: 503,
       body: { code: 'wallet_unavailable', message: 'Retry.' },
     });

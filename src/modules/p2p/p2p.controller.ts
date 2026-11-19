@@ -2,7 +2,6 @@ import {
   Body,
   Controller,
   Get,
-  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -12,6 +11,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
+import { SessionRequiredGuard } from '../auth/session-required.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { P2pEnabledGuard } from '../../common/p2p-enabled';
@@ -21,25 +21,22 @@ import { TransferIdPipe } from './transfer-id.pipe';
 
 /**
  * Send sats from the user's own bot wallet to another bot user (relayed to
- * the bot's /api/v1/p2p). In the Mini App, send the raw initData in
- * X-Telegram-Init-Data; on the web, the latest "Log In with Telegram" is used.
- * Sends need a credential under 10 min old: a 403 credential_stale (or the
- * bot's refusal, 403 credential_rejected) asks the app to get a fresh one
- * (reopen the Mini App / log in again), then retry with the same
+ * the bot's /api/v1/p2p). Our session names the user; no Telegram credential
+ * is needed after login. 403 relogin_required means the bot hasn't linked the
+ * user, or this is a legacy JWT (log in again), then retry with the same
  * idempotency_key. 401 is only ever our own session.
  */
 @Controller('p2p')
-@UseGuards(P2pEnabledGuard, ConditionalAuthGuard)
+@UseGuards(P2pEnabledGuard, ConditionalAuthGuard, SessionRequiredGuard)
 export class P2pController {
   constructor(private readonly p2p: P2pService) {}
 
   @Get('me')
   async me(
     @CurrentUser() user: JwtPayload,
-    @Headers('x-telegram-init-data') initData: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return reply(res, await this.p2p.me(user.id, initData));
+    return reply(res, await this.p2p.me(user.id));
   }
 
   @Post('resolve')
@@ -56,21 +53,19 @@ export class P2pController {
   @Post('send')
   async send(
     @CurrentUser() user: JwtPayload,
-    @Headers('x-telegram-init-data') initData: string | undefined,
     @Body() dto: P2pSendDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return reply(res, await this.p2p.send(user.id, initData, dto));
+    return reply(res, await this.p2p.send(user.id, dto));
   }
 
   @Get('transfers/:id')
   async transfer(
     @CurrentUser() user: JwtPayload,
-    @Headers('x-telegram-init-data') initData: string | undefined,
     @Param('id', TransferIdPipe) id: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return reply(res, await this.p2p.transfer(user.id, initData, id));
+    return reply(res, await this.p2p.transfer(user.id, id));
   }
 }
 

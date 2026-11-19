@@ -148,6 +148,29 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * INCR `key`, setting its TTL when the counter is new (a fixed window).
+   * null when Redis is unavailable: rate limits built on it then fail open,
+   * like the other cache calls.
+   */
+  async incrWithTtl(key: string, ttlSeconds: number): Promise<number | null> {
+    if (!this.redis) return null;
+    try {
+      // SET NX EX starts the window (works on any Redis version); INCR keeps
+      // the TTL
+      const results = await this.redis
+        .multi()
+        .set(key, 0, 'EX', ttlSeconds, 'NX')
+        .incr(key)
+        .exec();
+      const count = results?.[1]?.[1];
+      return typeof count === 'number' ? count : null;
+    } catch (error) {
+      this.logger.warn(`Cache INCR failed for ${key}: ${String(error)}`);
+      return null;
+    }
+  }
+
+  /**
    * Return the cached value, or run `loader`, cache its result and return it.
    * null/undefined results are not cached.
    */

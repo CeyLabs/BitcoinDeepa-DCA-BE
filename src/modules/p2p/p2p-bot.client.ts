@@ -4,14 +4,21 @@ import axios from 'axios';
 import {
   loadEd25519Key,
   P2P_SIGNING_VERSION,
+  P2P_SIGNING_VERSION_V2,
   sha256hex,
   signBotRequest,
 } from '../bitcoindeepa/bot-signer';
 
-/** The user's Telegram credential, forwarded unchanged: it names the sender */
-export type P2pCredential =
+/**
+ * Who a P2P call is for (bot `docs/dca-backend-integration.md` §5):
+ * - a Telegram credential, forwarded unchanged: only for the login call
+ *   (POST /api/v1/init), which links the user to us for a year
+ * - a linked user, named by our own session (X-BDB-User): every other call
+ */
+export type P2pCaller =
   | { kind: 'initData'; value: string }
-  | { kind: 'idToken'; value: string };
+  | { kind: 'idToken'; value: string }
+  | { kind: 'user'; telegramId: string };
 
 export interface P2pBotResponse {
   status: number;
@@ -24,11 +31,14 @@ const MAX_BODY_BYTES = 16 * 1024;
 /** Internal sends run synchronously in the request */
 const SEND_TIMEOUT_MS = 60_000;
 
+export const P2P_KEY_ENV = 'BITCOINDEEPA_P2P_PRIVATE_KEY_PEM';
+
 /**
- * The bot's /api/v1/p2p API, signed with the P2P key (not the DCA wallet's
- * send key): BDB-P2P-ED25519-V1 over method, path, query, timestamp, nonce,
- * sha256(credential header value) and sha256(body). No X-Wallet-ID: the
- * sender is whoever the credential names.
+ * The bot's /api/v1/init and /api/v1/p2p API, signed with the P2P key (not
+ * the DCA wallet's send key). No X-Wallet-ID.
+ * - init: BDB-P2P-ED25519-V1 over ..., sha256(credential), sha256(body)
+ * - everything else: BDB-P2P-ED25519-V2 over ..., telegramId, sha256(body),
+ *   with X-BDB-User: telegramId and no Telegram header
  */
 @Injectable()
 export class P2pBotClient {
@@ -39,15 +49,15 @@ export class P2pBotClient {
     10,
   );
   private readonly key: KeyObject | null = loadEd25519Key(
-    process.env.BITCOINDEEPA_PRIVATE_KEY_PEM,
-    'BITCOINDEEPA_PRIVATE_KEY_PEM',
+    process.env[P2P_KEY_ENV],
+    P2P_KEY_ENV,
     this.logger,
   );
 
   constructor() {
     if (process.env.P2P_ENABLED !== 'false' && !this.key) {
       this.logger.warn(
-        'P2P is on but BITCOINDEEPA_PRIVATE_KEY_PEM is not set (or invalid): /p2p answers 503',
+        `P2P is on but ${P2P_KEY_ENV} is not set (or invalid): /p2p answers 503`,
       );
     }
   }
@@ -65,21 +75,46 @@ export class P2pBotClient {
   async request(
     method: 'GET' | 'POST',
     path: string,
-    credential: P2pCredential,
+    caller: P2pCaller,
     body?: Record<string, unknown>,
+    /** Overrides the default (BITCOINDEEPA_TIMEOUT; 60 s for /send) */
+    timeoutMs?: number,
   ): Promise<P2pBotResponse> {
     if (!this.key) throw new Error('P2P API is not configured');
     const raw = body ? JSON.stringify(body) : '';
     if (Buffer.byteLength(raw) > MAX_BODY_BYTES) {
       throw new Error('P2P request body is over 16 KiB');
     }
-    const signed = signBotRequest({
-      version: P2P_SIGNING_VERSION,
-      method,
-      pathWithQuery: path,
-      hashedLines: [sha256hex(credential.value), sha256hex(raw)],
-      key: this.key,
-    });
+
+    let who: Record<string, string>;
+    let signed: ReturnType<typeof signBotRequest>;
+    if (caller.kind === 'user') {
+      if (!/^\d+$/.test(caller.telegramId)) {
+        throw new Error('P2P caller is not a numeric Telegram ID');
+      }
+      who = { 'X-BDB-User': caller.telegramId };
+      signed = signBotRequest({
+        version: P2P_SIGNING_VERSION_V2,
+        method,
+        pathWithQuery: path,
+        hashedLines: [caller.telegramId, sha256hex(raw)],
+        key: this.key,
+      });
+    } else {
+      who = {
+        [caller.kind === 'initData'
+          ? 'X-Telegram-Init-Data'
+          : 'X-Telegram-ID-Token']: caller.value,
+      };
+      signed = signBotRequest({
+        version: P2P_SIGNING_VERSION,
+        method,
+        pathWithQuery: path,
+        hashedLines: [sha256hex(caller.value), sha256hex(raw)],
+        key: this.key,
+      });
+    }
+
     const response = await axios.request<unknown>({
       method,
       url: `${this.apiUrl}${path}`,
@@ -87,14 +122,9 @@ export class P2pBotClient {
       // The signed bytes must be the sent bytes
       transformRequest: [(data: unknown) => data],
       validateStatus: () => true,
-      headers: {
-        'Content-Type': 'application/json',
-        [credential.kind === 'initData'
-          ? 'X-Telegram-Init-Data'
-          : 'X-Telegram-ID-Token']: credential.value,
-        ...signed,
-      },
-      timeout: path.endsWith('/send') ? SEND_TIMEOUT_MS : this.timeout,
+      headers: { 'Content-Type': 'application/json', ...who, ...signed },
+      timeout:
+        timeoutMs ?? (path.endsWith('/send') ? SEND_TIMEOUT_MS : this.timeout),
     });
     return { status: response.status, body: response.data };
   }
