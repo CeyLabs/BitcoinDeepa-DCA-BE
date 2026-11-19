@@ -11,6 +11,7 @@ import {
 } from './support/test-app';
 import { SettlementService } from '../src/modules/settlement/settlement.service';
 import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-logger.service';
+import { TransactionService } from '../src/modules/transaction/transaction.service';
 
 describe('One-time buy (e2e)', () => {
   let ctx: TestContext;
@@ -225,19 +226,40 @@ describe('One-time buy (e2e)', () => {
       expect(await tx('B1')).toBeUndefined();
     });
 
-    it('refuses to turn a one-time order into a subscription, and cancels it at PayHere', async () => {
-      const { order_id, amount } = await newBuy(1000);
-      await notify({
-        order_id,
-        payment_id: 'B1',
-        subscription_id: 'S9',
-        payhere_amount: amount,
-      }).expect(400);
-      expect(await tx('B1')).toBeUndefined();
+    it('rejects a one-time order sent as a subscription and leaves cancelling to a human', async () => {
+      const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
+      // a subscription we know (e.g. from before order binding)
+      await ctx.knex('subscription').insert({
+        payhere_sub_id: 'S-known',
+        user_id: OTHER_USER,
+        package_id: PACKAGE_WEEKLY,
+        is_active: true,
+      });
+      for (const subscription_id of ['S9', 'S-known']) {
+        const { order_id, amount } = await newBuy(1000);
+        await notify({
+          order_id,
+          payment_id: `B-${subscription_id}`,
+          subscription_id,
+          payhere_amount: amount,
+        }).expect(400);
+        expect(await tx(`B-${subscription_id}`)).toBeUndefined();
+      }
+      // subscription_id isn't signed: never cancel or change anything
+      expect(ctx.payHereCancel).not.toHaveBeenCalled();
       expect(
         await ctx.knex('subscription').where({ payhere_sub_id: 'S9' }).first(),
       ).toBeUndefined();
-      expect(ctx.payHereCancel).toHaveBeenCalledWith('S9');
+      expect(
+        await ctx
+          .knex('subscription')
+          .where({ payhere_sub_id: 'S-known' })
+          .first(),
+      ).toMatchObject({ is_active: true, payhere_order_id: null });
+      expect(alert).toHaveBeenCalledWith(
+        'PayHere webhook',
+        expect.stringContaining('cancel it and refund the charge in PayHere'),
+      );
     });
 
     it('follows the forward-only status rules', async () => {
@@ -292,6 +314,46 @@ describe('One-time buy (e2e)', () => {
         ctx.bitcoinDeepa.transferFunds.mock.calls as unknown[][]
       ).map((c) => c[2]);
       expect(memos).toEqual(['One-time BTC purchase (Ref: B1)']);
+    });
+
+    it('holds one of two payments of the same order that arrive at the same time', async () => {
+      // Make the race real: each payment, after its hold check but before
+      // it commits, waits (up to 500ms) for the other's check. Unlocked, both
+      // checks run before either commits and neither sees the other; with the
+      // member lock the second can't start its check until the first commits.
+      type HoldCheck = (...args: unknown[]) => Promise<string | null>;
+      const service = ctx.app.get<
+        TransactionService,
+        { oneTimeHoldReason: HoldCheck }
+      >(TransactionService);
+      const original: HoldCheck = service.oneTimeHoldReason.bind(service);
+      let checked = 0;
+      const spy = jest
+        .spyOn(service, 'oneTimeHoldReason')
+        .mockImplementation(async (...args: unknown[]) => {
+          const reason: string | null = await original(...args);
+          checked++;
+          const until = Date.now() + 500;
+          while (checked < 2 && Date.now() < until) {
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          return reason;
+        });
+
+      const { order_id, amount } = await newBuy(1000);
+      await Promise.all([
+        notify({ order_id, payment_id: 'B1', payhere_amount: amount }).expect(
+          200,
+        ),
+        notify({ order_id, payment_id: 'B2', payhere_amount: amount }).expect(
+          200,
+        ),
+      ]);
+      spy.mockRestore();
+      const held = [await tx('B1'), await tx('B2')].filter(
+        (t: { hold_reason: string | null }) => t.hold_reason,
+      );
+      expect(held).toHaveLength(1);
     });
 
     it('holds a payment made after the checkout expired', async () => {
@@ -351,11 +413,22 @@ describe('One-time buy (e2e)', () => {
         .expect(200);
       expect(held.body).toMatchObject({ status: 'SUCCESS', held: true });
 
+      // retry resets don't release holds
       await http()
         .post('/transaction/reset-retry-count/B1')
         .set('x-admin-key', process.env.ADMIN_API_KEY!)
         .expect(201);
+      expect((await tx('B1')).hold_reason).toContain('expired');
+
+      await http()
+        .post('/transaction/release-hold/B1')
+        .set('x-admin-key', process.env.ADMIN_API_KEY!)
+        .expect(201);
       expect(await tx('B1')).toMatchObject({ hold_reason: null });
+      await http()
+        .post('/transaction/release-hold/B1')
+        .set('x-admin-key', process.env.ADMIN_API_KEY!)
+        .expect(404);
       await settlement.retryUnsettledTransactions();
       expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
       expect(await tx('B1')).toMatchObject({ settled: true });

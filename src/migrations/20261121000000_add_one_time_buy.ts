@@ -30,7 +30,7 @@ export async function up(knex: Knex): Promise<void> {
       .inTable('payhere_order')
       .onDelete('RESTRICT');
     // Set = not settled automatically; a human checks it and releases it
-    // (POST /transaction/reset-retry-count/:paymentId)
+    // (POST /transaction/release-hold/:paymentId)
     table.text('hold_reason').nullable();
     table.index(['user_id', 'created_at'], 'idx_transaction_user_created_at');
   });

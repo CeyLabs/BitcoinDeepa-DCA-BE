@@ -146,8 +146,8 @@ interface PayHereOrderRow {
 /**
  * A subscription notification for a one-time order: the payer added
  * recurrence fields (not covered by the checkout hash), so PayHere created a
- * subscription. Rejected like any bad order; it is also cancelled at PayHere
- * so it doesn't keep charging the payer for nothing.
+ * subscription. Always rejected. Never cancelled automatically: subscription_id
+ * isn't signed, so it could be someone else's; the alert asks a human to check.
  */
 class OneTimeOrderAsSubscriptionException extends BadRequestException {
   constructor() {
@@ -184,18 +184,51 @@ export class TransactionService {
     const updated = await this.knexService
       .knex('transaction')
       .where({ payhere_pay_id, settled: false })
-      // Also releases a held one-time buy (hold_reason)
-      .update({ retry_count: 0, last_retry_at: null, hold_reason: null });
+      .update({ retry_count: 0, last_retry_at: null });
     if (!updated) {
       throw new NotFoundException(
         `No unsettled transaction with payment_id ${payhere_pay_id}`,
       );
     }
 
-    this.logger.warn(
-      `Settlement retries reset (and any hold released) for ${payhere_pay_id}`,
-    );
+    this.logger.warn(`Settlement retries reset for ${payhere_pay_id}`);
     return { payhere_pay_id };
+  }
+
+  /**
+   * Let settlement pay a held one-time buy, after a human checked it (see
+   * oneTimeHoldReason). Separate from resetRetryCount so the log says which
+   * decision was made.
+   */
+  async releaseHold(
+    payhere_pay_id: string,
+  ): Promise<{ payhere_pay_id: string; hold_reason: string }> {
+    const row = await this.knexService.knex.transaction(async (trx) => {
+      const held = await trx<Transaction>('transaction')
+        .select('hold_reason')
+        .where({ payhere_pay_id, settled: false })
+        .whereNotNull('hold_reason')
+        .forUpdate()
+        .first();
+      if (!held?.hold_reason) return null;
+      await trx('transaction')
+        .update({ hold_reason: null })
+        .where('payhere_pay_id', payhere_pay_id);
+      return { hold_reason: held.hold_reason };
+    });
+    if (!row) {
+      throw new NotFoundException(
+        `No held, unsettled transaction with payment_id ${payhere_pay_id}`,
+      );
+    }
+    this.logger.warn(
+      `Hold released for ${payhere_pay_id} (was: ${row.hold_reason}) - it will be settled`,
+    );
+    await this.telegramLoggerService.logAlert(
+      'Settlement',
+      `Hold released for one-time buy ${payhere_pay_id} (was: ${row.hold_reason}). It will be settled.`,
+    );
+    return { payhere_pay_id, hold_reason: row.hold_reason };
   }
 
   /**
@@ -320,6 +353,11 @@ export class TransactionService {
       if (oneTime) {
         order = await this.resolveOneTimeOrder(trx, data);
         userId = order.user_id;
+        // Payments of the same member run one after another, so the hold
+        // checks (paid twice, 24h limit) always see each other's rows. NO KEY
+        // UPDATE: compatible with the FK share lock an insert takes, like
+        // the link endpoint and activateIfFirstSuccess.
+        await trx('user').where('id', userId).forNoKeyUpdate().first();
         link = {
           kind: 'ONE_TIME',
           payhere_sub_id: null,
@@ -388,7 +426,7 @@ export class TransactionService {
             .where('payhere_pay_id', payment_id);
           alerts.push(
             `One-time buy ${payment_id} (order ${order_id}, user ${userId}, ${payhere_amount} ${payhere_currency}) is HELD, not settled: ${holdReason}. ` +
-              `Check it, then release it with POST /transaction/reset-retry-count/${payment_id}, or refund it in PayHere.`,
+              `Check it, then release it with POST /transaction/release-hold/${payment_id}, or refund it in PayHere.`,
           );
         }
       }
@@ -403,7 +441,7 @@ export class TransactionService {
       if (error instanceof BadRequestException) {
         let extra = '';
         if (error instanceof OneTimeOrderAsSubscriptionException) {
-          extra = ` ${await this.cancelTamperedSubscription(subscription_id)}`;
+          extra = ` If PayHere shows subscription ${subscription_id ?? '-'} was created from this one-time checkout, cancel it and refund the charge in PayHere (subscription_id isn't signed: check before acting).`;
         }
         await this.telegramLoggerService.logAlert(
           'PayHere webhook',
@@ -487,22 +525,6 @@ export class TransactionService {
     }
 
     return reasons.length ? reasons.join('; ') : null;
-  }
-
-  /** Cancel a subscription created from a one-time order. Returns alert text. */
-  private async cancelTamperedSubscription(
-    subscription_id: string | undefined,
-  ): Promise<string> {
-    if (!subscription_id) return '';
-    try {
-      const result =
-        await this.payHereService.cancelSubscription(subscription_id);
-      return result.status === 1
-        ? `The payer turned a one-time checkout into subscription ${subscription_id}; it was cancelled at PayHere. Refund this charge in PayHere.`
-        : `The payer turned a one-time checkout into subscription ${subscription_id}; PayHere refused to cancel it (${result.msg}) - cancel it and refund manually.`;
-    } catch (error: unknown) {
-      return `The payer turned a one-time checkout into subscription ${subscription_id}; cancelling it at PayHere failed (${errorMessage(error)}) - cancel it and refund manually.`;
-    }
   }
 
   /**

@@ -98,8 +98,8 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 13. **Buy Module** (`src/modules/buy/`) - one-time BTC buys: one PayHere checkout (no recurrence) for a custom whole-LKR amount
    - `POST /buy/payhere-link` stores a `payhere_order` with `kind = ONE_TIME`, `amount`, `currency` (no package) and returns a one-off checkout link (no `recurrence`/`duration`). KYC + complete profile required; allowed alongside an active subscription
    - **Limits** (`src/common/buy-limits.ts`): `BUY_MIN_LKR` (100), `BUY_MAX_LKR` (100,000) per buy, `BUY_DAILY_MAX_LKR` (250,000) per member over a rolling 24h = paid ONE_TIME PENDING/SUCCESS/CHARGEBACK payments **plus unpaid checkouts that haven't expired** (reserved). Each checkout expires after `BUY_ORDER_TTL_MINUTES` (30); PayHere has no link expiry, so this is ours. `BUY_LINKS_PER_HOUR` (10) checkouts per member per hour, else 429 (counted from `payhere_order`)
-   - **Holds:** PayHere can't stop a checkout being paid late or twice, so when a one-time payment becomes SUCCESS the webhook re-checks: paid twice, paid after `expires_at` + 10 min, or the member's 24h total over the limit → `transaction.hold_reason` is set and a Telegram alert goes out. Settlement skips held rows; `POST /transaction/reset-retry-count/:paymentId` releases one (or refund it in PayHere). The order view shows `held: true`
-   - Same fees as subscriptions (`src/common/buy-fees.ts`, used by the webhook too). The webhook, pricing, backfill and settlement are shared: a notification **without `subscription_id`** goes to `handleOneTimeNotification`, which requires a ONE_TIME order and the signed amount/currency to equal the order's; a ONE_TIME order with a `subscription_id` (payer added recurrence) is rejected and that subscription is cancelled at PayHere
+   - **Holds:** PayHere can't stop a checkout being paid late or twice, so when a one-time payment becomes SUCCESS the webhook re-checks: paid twice, paid after `expires_at` + 10 min, or the member's 24h total over the limit → `transaction.hold_reason` is set and a Telegram alert goes out. The member's `user` row is locked first (`FOR NO KEY UPDATE`), so two payments arriving together can't both skip these checks. Settlement skips held rows; `POST /transaction/release-hold/:paymentId` (`x-admin-key`) releases one (or refund it in PayHere). The order view shows `held: true`
+   - Same fees as subscriptions (`src/common/buy-fees.ts`, used by the webhook too). The webhook, pricing, backfill and settlement are shared: a notification **without `subscription_id`** goes to `handleOneTimeNotification`, which requires a ONE_TIME order and the signed amount/currency to equal the order's; a ONE_TIME order with a `subscription_id` (payer added recurrence) is rejected and alerted; it is never cancelled automatically (`subscription_id` isn't signed, so it could be someone else's) - a human checks it in PayHere and cancels/refunds
    - Settlement confirms one-time payments with PayHere's Retrieval API (`getPaymentsByOrderId`, `GET /merchant/v1/payment/search?order_id=`); memo `One-time BTC purchase (Ref: <payment_id>)`
 
 ### Database Schema
@@ -288,7 +288,8 @@ PORT=3000
 
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
-- `POST /transaction/reset-retry-count/:paymentId` - Re-enable settlement for one payment after checking it on BitcoinDeepa, and release a held one-time buy (internal, requires `x-admin-key`)
+- `POST /transaction/reset-retry-count/:paymentId` - Re-enable settlement for one payment after checking it on BitcoinDeepa (internal, requires `x-admin-key`)
+- `POST /transaction/release-hold/:paymentId` - Let settlement pay a held one-time buy after a human checked it (internal, requires `x-admin-key`; 404 unless held and unsettled)
 - `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 

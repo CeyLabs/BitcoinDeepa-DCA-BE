@@ -98,6 +98,13 @@ export class TransactionController {
     return this.transactionService.resetRetryCount(paymentId);
   }
 
+  /** Let settlement pay a held one-time buy, after a human checked it. */
+  @Post('release-hold/:paymentId')
+  @UseGuards(AdminKeyGuard)
+  async releaseHold(@Param('paymentId') paymentId: string) {
+    return this.transactionService.releaseHold(paymentId);
+  }
+
   @Get('list')
   @UseGuards(ConditionalAuthGuard)
   async getUserTransactions(
