@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosResponse } from 'axios';
+import Big from 'big.js';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
+import { CeyPayError, CeyPayService } from '../ceypay/ceypay.service';
 import { CoinMarketCapService } from '../coinmarketcap/coinmarketcap.service';
 import { errorMessage } from '../../common/error-message';
 
@@ -10,40 +12,65 @@ export interface BitcoinPriceData {
   currency: string;
 }
 
-interface CeylonCashResponse {
-  selling_rate: number;
+/** BTC/LKR and the two rates it is made of. */
+export interface BtcLkrRate {
+  /** LKR per BTC, rounded down to cents */
+  btcLkr: number;
+  /** Ceylon Cash BTC/USD */
+  btcUsd: number;
+  /** CeyPay USDT/LKR (USDT taken as 1 USD) */
+  usdtLkr: number;
 }
 
 /** fx.ceyloncash.com/currency/BTC */
 interface CeylonCashBtcResponse {
-  buying_rate_lkr?: number;
-  selling_rate_lkr?: number;
   usd_price?: number;
 }
 
-interface BitcoinCacheData {
-  price: number;
-  percent_change_24h: number;
-}
+/** Both rates are cached this long */
+export const RATE_CACHE_TTL_SECONDS = 30;
+/** CoinMarketCap 24h change (display only) */
+const CHANGE_24H_CACHE_TTL_SECONDS = parseInt(
+  process.env.BTC_PRICE_CACHE_TTL || '300',
+  10,
+);
+const SATOSHIS_PER_BTC = 100_000_000;
 
+/**
+ * LKR per BTC: BTC/USD × USDT/LKR (USDT taken as 1 USD), rounded down to
+ * cents.
+ */
+export const btcLkrRate = (btcUsd: number, usdtLkr: number): number =>
+  new Big(btcUsd).times(usdtLkr).round(2, Big.roundDown).toNumber();
+
+/**
+ * The one BTC/LKR price used everywhere (buy, DCA, sell, wallet):
+ * Ceylon Cash BTC/USD × CeyPay's USDT/LKR, so our LKR matches what CeyPay
+ * pays for the same USDT. CoinMarketCap is only used for the 24h change shown
+ * on the wallet, never for a price.
+ */
 @Injectable()
 export class BitcoinPriceService {
   private readonly logger = new Logger(BitcoinPriceService.name);
-  private readonly BTC_PRICE_CACHE_TTL_SECONDS = parseInt(
-    process.env.BTC_PRICE_CACHE_TTL || '300',
-    10,
-  );
-  private readonly USD_LKR_CACHE_TTL_SECONDS = parseInt(
-    process.env.USD_LKR_CACHE_TTL || '20',
-    10,
-  );
-  private readonly BTC_SELL_RATE_CACHE_TTL_SECONDS = 30;
-  private readonly SATOSHIS_PER_BTC = 100_000_000;
 
   constructor(
     private readonly redisService: RedisService,
-    private readonly coinMarketCapService: CoinMarketCapService,
+    private readonly ceyPay: CeyPayService,
+    private readonly coinMarketCap: CoinMarketCapService,
   ) {}
+
+  /** BTC/LKR with its parts; null when either rate is unavailable. Never throws. */
+  async getBtcLkrRate(): Promise<BtcLkrRate | null> {
+    const [btcUsd, usdtLkr] = await Promise.all([
+      this.getBtcUsd(),
+      this.getUsdtLkr().catch((error) => {
+        this.logger.error(`CeyPay USDT/LKR rate: ${errorMessage(error)}`);
+        return null;
+      }),
+    ]);
+    if (!btcUsd || !usdtLkr) return null;
+    return { btcLkr: btcLkrRate(btcUsd, usdtLkr), btcUsd, usdtLkr };
+  }
 
   async getBitcoinPrice(currency: string): Promise<BitcoinPriceData | null> {
     if (currency.toUpperCase() !== 'LKR') {
@@ -53,8 +80,8 @@ export class BitcoinPriceService {
       return null;
     }
 
-    const price = await this.getCurrentPrice();
-    return price ? { btc_price: price.lkr, currency: 'LKR' } : null;
+    const rate = await this.getBtcLkrRate();
+    return rate ? { btc_price: rate.btcLkr, currency: 'LKR' } : null;
   }
 
   async calculateSatoshis(
@@ -65,46 +92,33 @@ export class BitcoinPriceService {
     if (!priceData) return null;
 
     return {
-      satoshis: Math.floor(
-        (amount / priceData.btc_price) * this.SATOSHIS_PER_BTC,
-      ),
+      satoshis: Math.floor((amount / priceData.btc_price) * SATOSHIS_PER_BTC),
       btc_price: priceData.btc_price,
       currency: priceData.currency,
     };
   }
 
-  async getBitcoin24HrChange(): Promise<number | null> {
-    const data = await this.getBitcoinMarketData();
-    return data?.percent_change_24h ?? null;
-  }
-
-  /** BTC price in USD and LKR (BTC/USD from CoinMarketCap × USD/LKR). */
-  async getCurrentPrice(): Promise<{
-    usd: number;
-    lkr: number;
-    timestamp: Date;
-  } | null> {
-    const btc = await this.getBitcoinMarketData();
-    if (!btc) return null;
-
-    const usdLkrRate = await this.getUsdLkrRate();
-    if (!usdLkrRate) return null;
-
-    return {
-      usd: btc.price,
-      lkr: btc.price * usdLkrRate,
-      timestamp: new Date(),
-    };
-  }
-
   /**
-   * BTC/USD from our own Ceylon Cash FX (sell flow; the LKR side comes from
-   * CeyPay's USDT/LKR rate). Cached briefly; null when unavailable or invalid.
+   * BTC's 24h % change from CoinMarketCap, for display only (cached).
+   * Null when unavailable.
    */
-  getBtcUsdSellPrice(): Promise<number | null> {
+  async getBitcoin24HrChange(): Promise<number | null> {
+    const data = await this.redisService.getOrSet(
+      CacheKeys.bitcoin.cmc24hChange(),
+      CHANGE_24H_CACHE_TTL_SECONDS,
+      async () => {
+        const btc = await this.coinMarketCap.fetchBitcoinData();
+        return btc ? { change: btc.percent_change_24h } : null;
+      },
+    );
+    return data?.change ?? null;
+  }
+
+  /** BTC/USD from Ceylon Cash FX (cached). Null when unavailable or invalid. */
+  getBtcUsd(): Promise<number | null> {
     return this.redisService.getOrSet(
       CacheKeys.bitcoin.ceylonCashBtcUsd(),
-      this.BTC_SELL_RATE_CACHE_TTL_SECONDS,
+      RATE_CACHE_TTL_SECONDS,
       async () => {
         try {
           const response: AxiosResponse<CeylonCashBtcResponse> =
@@ -127,49 +141,24 @@ export class BitcoinPriceService {
     );
   }
 
-  private getBitcoinMarketData(): Promise<BitcoinCacheData | null> {
-    return this.redisService.getOrSet(
-      CacheKeys.bitcoin.price('USD'),
-      this.BTC_PRICE_CACHE_TTL_SECONDS,
-      async () => {
-        const data = await this.coinMarketCapService.fetchBitcoinData();
-        if (!data) return null;
-        this.logger.log(
-          `Fetched fresh BTC data: price=${data.price}, 24hr_change=${data.percent_change_24h}%`,
-        );
-        return {
-          price: data.price,
-          percent_change_24h: data.percent_change_24h,
-        };
-      },
+  /** CeyPay's current USDT/LKR rate (cached). Throws when it has none. */
+  async getUsdtLkr(): Promise<number> {
+    const rate = await this.redisService.getOrSet(
+      CacheKeys.bitcoin.ceypayUsdtLkr(),
+      RATE_CACHE_TTL_SECONDS,
+      async () => (await this.ceyPay.getQuote('1')).rateUsdtLkr,
     );
+    if (!rate || !(rate > 0)) {
+      throw new CeyPayError('CeyPay returned no rate', undefined, true);
+    }
+    return rate;
   }
 
-  private async getUsdLkrRate(): Promise<number | null> {
-    const cached = await this.redisService.getOrSet(
-      CacheKeys.bitcoin.usdLkr(),
-      this.USD_LKR_CACHE_TTL_SECONDS,
-      async () => {
-        try {
-          const response: AxiosResponse<CeylonCashResponse> = await axios.get(
-            'https://fx.ceyloncash.com/currency/USD',
-            { timeout: 10000 },
-          );
-          const rate = response.data?.selling_rate;
-          if (typeof rate !== 'number' || rate <= 0) {
-            this.logger.warn(`Invalid USD/LKR rate from Ceylon Cash: ${rate}`);
-            return null;
-          }
-          return { rate };
-        } catch (error) {
-          this.logger.error(
-            `Ceylon Cash API error for USD/LKR: ${errorMessage(error)}`,
-          );
-          return null;
-        }
-      },
-    );
-    return cached?.rate ?? null;
+  /** Replace the cached USDT/LKR rate with a fresher one (e.g. from a quote). */
+  async setUsdtLkr(rate: number): Promise<void> {
+    await this.redisService.set(CacheKeys.bitcoin.ceypayUsdtLkr(), rate, {
+      ttl: RATE_CACHE_TTL_SECONDS,
+    });
   }
 
   async clearCache(): Promise<void> {

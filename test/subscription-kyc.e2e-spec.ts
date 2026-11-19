@@ -470,7 +470,7 @@ describe('Auth, KYC, subscriptions and read endpoints (e2e)', () => {
       });
       expect(summary.body.current_btc_price).toEqual({
         usd: 65000,
-        lkr: 19_500_000,
+        lkr: 21_450_000,
       });
     });
 
