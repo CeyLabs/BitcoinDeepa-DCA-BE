@@ -89,6 +89,8 @@ export interface DcaSummary {
   };
   total_balance: number;
   total_lkr: string;
+  /** False when the BitcoinDeepa wallet balance couldn't be fetched (total_* are then 0, not real) */
+  balance_available: boolean;
   currency: string;
   '24_hr_change': number;
   current_btc_price?: {
@@ -1190,12 +1192,15 @@ export class TransactionService {
   }
 
   async getDCASummaryForUser(user_id: string): Promise<DcaSummary> {
-    const summary = await this.redisService.getOrSet(
-      CacheKeys.transaction.dcaSummary(user_id),
-      300,
-      () => this.computeDcaSummary(user_id),
-    );
-    return summary!;
+    const key = CacheKeys.transaction.dcaSummary(user_id);
+    const cached = await this.redisService.get<DcaSummary>(key);
+    if (cached) return cached;
+    const summary = await this.computeDcaSummary(user_id);
+    // A missing wallet balance is retried soon instead of sticking for 5 min
+    await this.redisService.set(key, summary, {
+      ttl: summary.balance_available ? 300 : 30,
+    });
+    return summary;
   }
 
   private async computeDcaSummary(user_id: string): Promise<DcaSummary> {
@@ -1268,6 +1273,7 @@ export class TransactionService {
   ): Promise<Omit<DcaSummary, 'dca' | 'currency'>> {
     let total_balance = 0;
     let total_lkr = '0.00';
+    let balance_available = false;
     if (this.bitcoinDeepaService.isConfigured()) {
       const balance = await this.bitcoinDeepaService.getUserBalance(
         parseInt(user_id, 10),
@@ -1275,6 +1281,7 @@ export class TransactionService {
       if (balance.success) {
         total_balance = balance.balance ?? 0;
         total_lkr = balance.balance_lkr ?? '0.00';
+        balance_available = true;
       }
     }
 
@@ -1288,6 +1295,7 @@ export class TransactionService {
     return {
       total_balance,
       total_lkr,
+      balance_available,
       '24_hr_change': change24h ?? 0,
       current_btc_price: rate
         ? { usd: rate.btcUsd, lkr: rate.btcLkr }
