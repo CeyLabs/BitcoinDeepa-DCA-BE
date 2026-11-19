@@ -27,8 +27,17 @@ interface CeylonCashBtcResponse {
   usd_price?: number;
 }
 
-/** Both rates are cached this long */
-export const RATE_CACHE_TTL_SECONDS = 30;
+/** Ceylon Cash BTC/USD is cached this long */
+export const BTC_USD_CACHE_TTL_SECONDS = 30;
+/**
+ * CeyPay's USDT/LKR only changes every ~10 min, and each fetch is a quote
+ * (a row in CeyPay's aggregator_fx_quote), so it is cached longer.
+ */
+export const USDT_LKR_CACHE_TTL_SECONDS = 300;
+/** After a failed fetch, answer "unavailable" from cache for this long */
+const FAILURE_CACHE_TTL_SECONDS = 10;
+/** Price lookups sit on request paths: fail fast instead of hanging */
+const PRICE_FETCH_TIMEOUT_MS = 3000;
 /** CoinMarketCap 24h change (display only) */
 const CHANGE_24H_CACHE_TTL_SECONDS = parseInt(
   process.env.BTC_PRICE_CACHE_TTL || '300',
@@ -51,6 +60,8 @@ export const satoshisFor = (
   btcPrice: number | string,
 ): number =>
   new BigFloor(amount).times(SATOSHIS_PER_BTC).div(btcPrice).toNumber();
+
+const failureKey = (key: string): string => `${key}:failed`;
 
 /**
  * LKR per BTC: BTC/USD × USDT/LKR (USDT taken as 1 USD), rounded down to
@@ -132,14 +143,14 @@ export class BitcoinPriceService {
 
   /** BTC/USD from Ceylon Cash FX (cached). Null when unavailable or invalid. */
   getBtcUsd(): Promise<number | null> {
-    return this.redisService.getOrSet(
+    return this.cached(
       CacheKeys.bitcoin.ceylonCashBtcUsd(),
-      RATE_CACHE_TTL_SECONDS,
+      BTC_USD_CACHE_TTL_SECONDS,
       async () => {
         try {
           const response: AxiosResponse<CeylonCashBtcResponse> =
             await axios.get('https://fx.ceyloncash.com/currency/BTC', {
-              timeout: 10000,
+              timeout: PRICE_FETCH_TIMEOUT_MS,
             });
           const usd = response.data?.usd_price;
           if (typeof usd !== 'number' || !(usd > 0)) {
@@ -159,13 +170,29 @@ export class BitcoinPriceService {
 
   /** CeyPay's current USDT/LKR rate (cached). Throws when it has none. */
   async getUsdtLkr(): Promise<number> {
-    const rate = await this.redisService.getOrSet(
+    let failure: unknown;
+    const rate = await this.cached(
       CacheKeys.bitcoin.ceypayUsdtLkr(),
-      RATE_CACHE_TTL_SECONDS,
-      async () => (await this.ceyPay.getQuote('1')).rateUsdtLkr,
+      USDT_LKR_CACHE_TTL_SECONDS,
+      async () => {
+        try {
+          const quote = await this.ceyPay.getQuote('1', {
+            timeoutMs: PRICE_FETCH_TIMEOUT_MS,
+          });
+          return quote.rateUsdtLkr > 0 ? quote.rateUsdtLkr : null;
+        } catch (error) {
+          failure = error;
+          return null;
+        }
+      },
     );
-    if (!rate || !(rate > 0)) {
-      throw new CeyPayError('CeyPay returned no rate', undefined, true);
+    if (!rate) {
+      if (failure instanceof CeyPayError) throw failure;
+      throw new CeyPayError(
+        failure ? errorMessage(failure) : 'CeyPay returned no rate',
+        undefined,
+        true,
+      );
     }
     return rate;
   }
@@ -173,8 +200,28 @@ export class BitcoinPriceService {
   /** Replace the cached USDT/LKR rate with a fresher one (e.g. from a quote). */
   async setUsdtLkr(rate: number): Promise<void> {
     await this.redisService.set(CacheKeys.bitcoin.ceypayUsdtLkr(), rate, {
-      ttl: RATE_CACHE_TTL_SECONDS,
+      ttl: USDT_LKR_CACHE_TTL_SECONDS,
     });
+    await this.redisService.del(failureKey(CacheKeys.bitcoin.ceypayUsdtLkr()));
+  }
+
+  /**
+   * getOrSet that also remembers a failure for FAILURE_CACHE_TTL_SECONDS, so
+   * an outage costs one slow call per window instead of one per request.
+   */
+  private async cached<T>(
+    key: string,
+    ttlSeconds: number,
+    loader: () => Promise<T | null>,
+  ): Promise<T | null> {
+    if (await this.redisService.get<boolean>(failureKey(key))) return null;
+    const value = await this.redisService.getOrSet(key, ttlSeconds, loader);
+    if (value === null) {
+      await this.redisService.set(failureKey(key), true, {
+        ttl: FAILURE_CACHE_TTL_SECONDS,
+      });
+    }
+    return value;
   }
 
   async clearCache(): Promise<void> {

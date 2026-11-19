@@ -6,7 +6,7 @@ import { RedisService } from '../redis/redis.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { errorMessage } from '../../common/error-message';
 import { SellStatus } from '../sell/sell.constants';
-import { MAX_SETTLEMENT_ATTEMPTS } from './settlement.service';
+import { MAX_SETTLEMENT_ATTEMPTS } from '../transaction/transaction.service';
 
 /** How often the reminder goes out while anything is waiting */
 export const REMINDER_INTERVAL_HOURS = 3;
@@ -155,6 +155,8 @@ export class ReviewReminderService {
         .knex('transaction')
         .where({ status: 'SUCCESS', settled: false })
         .whereNull('hold_reason')
+        // Awaiting approval in the bot: followed by pollAwaitingApprovals
+        .whereNull('bot_send_id')
         .whereNotNull('satoshis_purchased')
         .where('retry_count', '>=', MAX_SETTLEMENT_ATTEMPTS)
         .whereRaw(
@@ -169,8 +171,9 @@ export class ReviewReminderService {
           payhere_pay_id: string;
           user_id: string | null;
           satoshis_purchased: string;
+          settlement_failure: string | null;
         }[]
-      >('payhere_pay_id', 'user_id', 'satoshis_purchased')
+      >('payhere_pay_id', 'user_id', 'satoshis_purchased', 'settlement_failure')
       .orderBy('last_retry_at')
       .limit(LISTED_PER_GROUP);
     return {
@@ -178,7 +181,8 @@ export class ReviewReminderService {
       total: await this.count(query()),
       lines: rows.map(
         (row) =>
-          `${row.payhere_pay_id}: ${num(row.satoshis_purchased)} sats, #UID${row.user_id ?? '?'}`,
+          `${row.payhere_pay_id}: ${num(row.satoshis_purchased)} sats, #UID${row.user_id ?? '?'}` +
+          (row.settlement_failure ? ` - ${row.settlement_failure}` : ''),
       ),
     };
   }

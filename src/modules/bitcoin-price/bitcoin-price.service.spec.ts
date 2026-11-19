@@ -5,7 +5,7 @@ import {
   satoshisFor,
 } from './bitcoin-price.service';
 import { RedisService } from '../redis/redis.service';
-import { CeyPayService } from '../ceypay/ceypay.service';
+import { CeyPayError, CeyPayService } from '../ceypay/ceypay.service';
 import { CoinMarketCapService } from '../coinmarketcap/coinmarketcap.service';
 
 const get = jest.spyOn(axios, 'get');
@@ -64,7 +64,9 @@ describe('BitcoinPriceService', () => {
       usdtLkr: 330,
     });
     expect(get.mock.calls[0][0]).toBe('https://fx.ceyloncash.com/currency/BTC');
-    expect(ceyPay.getQuote).toHaveBeenCalledWith('1');
+    // Short timeout: a price lookup must fail fast, not hang a request
+    expect(ceyPay.getQuote).toHaveBeenCalledWith('1', { timeoutMs: 3000 });
+    expect(get.mock.calls[0][1]).toEqual({ timeout: 3000 });
     // CoinMarketCap's price is never used
     expect(cmc.fetchBitcoinData).not.toHaveBeenCalled();
   });
@@ -105,6 +107,11 @@ describe('BitcoinPriceService', () => {
     arrange();
     await expect(service.getBtcLkrRate()).resolves.toBeNull();
     await expect(service.calculateSatoshis(980, 'LKR')).resolves.toBeNull();
+  });
+
+  it('getUsdtLkr passes on CeyPay errors', async () => {
+    ceyPay.getQuote.mockRejectedValue(new CeyPayError('down', 503, true));
+    await expect(service.getUsdtLkr()).rejects.toThrow('down');
   });
 
   it('getUsdtLkr throws when CeyPay has no rate', async () => {

@@ -472,6 +472,7 @@ describe('Auth, KYC, subscriptions and read endpoints (e2e)', () => {
         usd: 65000,
         lkr: 21_450_000,
       });
+      expect(summary.body.balance_available).toBe(true);
     });
 
     it('clamps bad pagination instead of erroring', async () => {

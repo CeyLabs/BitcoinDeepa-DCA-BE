@@ -45,6 +45,8 @@ export interface TestContext {
     collectFunds: jest.Mock;
     getUserBalance: jest.Mock;
     getUserTransactions: jest.Mock;
+    getSendStatus: jest.Mock;
+    findTransferByMemo: jest.Mock;
   };
   didit: { createVerificationSession: jest.Mock; getSession: jest.Mock };
   ceyPay: {
@@ -86,6 +88,8 @@ export async function createTestApp(): Promise<TestContext> {
       transactions: [],
       count: 0,
     }),
+    getSendStatus: jest.fn().mockResolvedValue(null),
+    findTransferByMemo: jest.fn().mockResolvedValue(false),
   };
   const didit = {
     createVerificationSession: jest.fn(),

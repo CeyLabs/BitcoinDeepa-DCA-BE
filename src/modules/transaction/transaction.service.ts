@@ -89,6 +89,8 @@ export interface DcaSummary {
   };
   total_balance: number;
   total_lkr: string;
+  /** False when the BitcoinDeepa wallet balance couldn't be fetched (total_* are then 0, not real) */
+  balance_available: boolean;
   currency: string;
   '24_hr_change': number;
   current_btc_price?: {
@@ -106,6 +108,11 @@ export interface PaginatedTransactions {
 }
 
 const SATOSHIS_PER_BTC = 100_000_000;
+/** Settlement attempts per payment before it waits for a human */
+export const MAX_SETTLEMENT_ATTEMPTS = 5;
+/** Longest a /send can be in flight (BITCOINDEEPA_SEND_TIMEOUT 95s) plus margin */
+const SEND_IN_FLIGHT_MS = 2 * 60_000;
+const DEPOSIT_RESET_THROTTLE_SECONDS = 30;
 
 // Unpriced payments older than this are alerted, not auto-priced and paid.
 const BACKFILL_MAX_AGE_HOURS = 24;
@@ -207,6 +214,79 @@ export class TransactionService {
 
     this.logger.warn(`Settlement retries reset for ${payhere_pay_id}`);
     return { payhere_pay_id };
+  }
+
+  /** Per-instance fallback for the callback throttle when Redis is down */
+  private lastDepositResetAt = 0;
+
+  /**
+   * True when the request carries the bot's callback secret, or no secret is
+   * configured (the bot can't send one yet). Constant-time compare.
+   */
+  static isBotCallbackAuthorized(header: string | undefined): boolean {
+    const secret = process.env.BITCOINDEEPA_CALLBACK_SECRET;
+    if (!secret) return true;
+    if (!header) return false;
+    const digest = (v: string) => createHash('sha256').update(v).digest();
+    return timingSafeEqual(digest(header), digest(secret));
+  }
+
+  /**
+   * The bot's deposit callback (POST /transaction/reset-retry-counts): the
+   * DCA wallet got sats, so payments that failed for low wallet balance are
+   * retried now. It only skips the backoff and allows at most one more
+   * attempt (an exhausted row gets one): it never moves funds, and calling
+   * it repeatedly can't keep a payment retrying, because a row only becomes
+   * LOW_BALANCE again after another real attempt. Rows attempted in the last
+   * 2 min are skipped (their send may be in flight), as are held,
+   * awaiting-approval and other failures. Throttled to one reset per 30s
+   * across instances, with a per-instance fallback if Redis is down.
+   */
+  async resetLowBalanceRetries(): Promise<{ reset: number }> {
+    const now = Date.now();
+    if (now - this.lastDepositResetAt < DEPOSIT_RESET_THROTTLE_SECONDS * 1000) {
+      return { reset: 0 };
+    }
+    if (
+      !(await this.redisService.setIfAbsent(
+        'dca:bot-deposit-reset',
+        DEPOSIT_RESET_THROTTLE_SECONDS,
+      ))
+    ) {
+      return { reset: 0 };
+    }
+    this.lastDepositResetAt = now;
+
+    const reset = await this.knexService
+      .knex('transaction')
+      .where({ status: 'SUCCESS', settled: false })
+      .whereNull('hold_reason')
+      .whereNull('bot_send_id')
+      .where('settlement_failure', 'LOW_BALANCE')
+      .where((qb) => {
+        void qb
+          .whereNull('last_retry_at')
+          .orWhere('last_retry_at', '<', new Date(now - SEND_IN_FLIGHT_MS));
+      })
+      .update({
+        retry_count: this.knexService.knex.raw('LEAST(retry_count, ?)', [
+          MAX_SETTLEMENT_ATTEMPTS - 1,
+        ]),
+        last_retry_at: null,
+        settlement_failure: null,
+      });
+    if (reset > 0) {
+      this.logger.warn(
+        `DCA wallet deposit: retrying ${reset} payment(s) that failed for low balance`,
+      );
+      await this.telegramLoggerService
+        .logAlert(
+          'Settlement',
+          `DCA wallet received sats: retrying ${reset} payout(s) that failed for low wallet balance.`,
+        )
+        .catch(() => undefined);
+    }
+    return { reset };
   }
 
   /**
@@ -1212,12 +1292,15 @@ export class TransactionService {
   }
 
   async getDCASummaryForUser(user_id: string): Promise<DcaSummary> {
-    const summary = await this.redisService.getOrSet(
-      CacheKeys.transaction.dcaSummary(user_id),
-      300,
-      () => this.computeDcaSummary(user_id),
-    );
-    return summary!;
+    const key = CacheKeys.transaction.dcaSummary(user_id);
+    const cached = await this.redisService.get<DcaSummary>(key);
+    if (cached) return cached;
+    const summary = await this.computeDcaSummary(user_id);
+    // A missing wallet balance is retried soon instead of sticking for 5 min
+    await this.redisService.set(key, summary, {
+      ttl: summary.balance_available ? 300 : 30,
+    });
+    return summary;
   }
 
   private async computeDcaSummary(user_id: string): Promise<DcaSummary> {
@@ -1290,6 +1373,7 @@ export class TransactionService {
   ): Promise<Omit<DcaSummary, 'dca' | 'currency'>> {
     let total_balance = 0;
     let total_lkr = '0.00';
+    let balance_available = false;
     if (this.bitcoinDeepaService.isConfigured()) {
       const balance = await this.bitcoinDeepaService.getUserBalance(
         parseInt(user_id, 10),
@@ -1297,6 +1381,7 @@ export class TransactionService {
       if (balance.success) {
         total_balance = balance.balance ?? 0;
         total_lkr = balance.balance_lkr ?? '0.00';
+        balance_available = true;
       }
     }
 
@@ -1310,6 +1395,7 @@ export class TransactionService {
     return {
       total_balance,
       total_lkr,
+      balance_available,
       '24_hr_change': change24h ?? 0,
       current_btc_price: rate
         ? { usd: rate.btcUsd, lkr: rate.btcLkr }

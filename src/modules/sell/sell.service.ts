@@ -747,14 +747,25 @@ export class SellService {
     }
 
     const unknown = 'outcome_unknown' in result && result.outcome_unknown;
+    // Above the bot's approval threshold: the refund waits for a human in
+    // Telegram. Sell has no approval polling, so a person follows it up.
+    const approvalId =
+      'awaiting_approval_id' in result
+        ? result.awaiting_approval_id
+        : undefined;
+    const outcome = approvalId
+      ? `awaiting bot approval (transaction ${approvalId})`
+      : unknown
+        ? 'outcome unknown'
+        : 'failed';
     await this.setStatus(this.knex, order.id, [SellStatus.REFUNDING], {
       status: SellStatus.NEEDS_REVIEW,
-      failure_reason: `Refund ${unknown ? 'outcome unknown' : 'failed'} (${result.message ?? ''}) after: ${reason}`,
+      failure_reason: `Refund ${outcome} (${result.message ?? ''}) after: ${reason}`,
     });
     await this.telegramLogger.logAlert(
       'Sell',
       `Sell order ${order.id}: payout failed (${reason}) and refunding ${order.sats} sats to #UID${order.user_id} ` +
-        `${unknown ? 'timed out' : `failed: ${result.message}`}. ` +
+        `${approvalId ? `is waiting for approval in the bot (transaction ${approvalId}) - approve it, then mark the order refunded` : unknown ? 'timed out' : `failed: ${result.message}`}. ` +
         `Check the bot ledger for memo sell-refund:${order.id}.`,
     );
     return true;

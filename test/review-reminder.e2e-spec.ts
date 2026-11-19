@@ -110,6 +110,13 @@ describe('Reminder of what waits for a human (e2e)', () => {
     await heldBuy('B1', '1 hour');
     // e.g. the process died during the 5th attempt: nothing alerted then
     await stoppedSettlement('P9', '1 hour');
+    // Waiting for approval in the bot: its own cron follows it
+    await payment({
+      payhere_pay_id: 'P7',
+      retry_count: 5,
+      last_retry_at: ago('1 hour'),
+      bot_send_id: 'pending-7',
+    });
 
     await reminder.remind();
     expect(reminders()).toHaveLength(1);

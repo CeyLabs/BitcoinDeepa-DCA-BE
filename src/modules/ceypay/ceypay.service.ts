@@ -127,10 +127,15 @@ export class CeyPayService {
   }
 
   /** 60s rate lock. amountUsdt has at most 8 decimals. */
-  getQuote(amountUsdt: string): Promise<CeyPayQuote> {
+  getQuote(
+    amountUsdt: string,
+    options?: { timeoutMs?: number },
+  ): Promise<CeyPayQuote> {
     return this.request(
       'GET',
       `/v1/aggregator/quote?amount_usdt=${encodeURIComponent(amountUsdt)}`,
+      undefined,
+      options?.timeoutMs,
     );
   }
 
@@ -215,6 +220,7 @@ export class CeyPayService {
     method: Method,
     path: string,
     body?: object,
+    timeoutMs = this.timeout,
   ): Promise<T> {
     if (!this.isConfigured()) {
       throw new CeyPayError('CeyPay is not configured', undefined, false);
@@ -239,7 +245,7 @@ export class CeyPayService {
             bodyString,
           ),
         },
-        timeout: this.timeout,
+        timeout: timeoutMs,
       });
       return response.data;
     } catch (error) {

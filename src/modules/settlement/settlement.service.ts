@@ -2,17 +2,22 @@ import { Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
-import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
+import {
+  BitcoinDeepaService,
+  type FundTransferResponse,
+} from '../bitcoindeepa/bitcoindeepa.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { PayHereService } from '../payhere/payhere.service';
 import { RedisService } from '../redis/redis.service';
 import { errorMessage } from '../../common/error-message';
 import {
+  MAX_SETTLEMENT_ATTEMPTS,
   sameAmount,
   type PurchaseKind,
 } from '../transaction/transaction.service';
 
-export const MAX_SETTLEMENT_ATTEMPTS = 5;
+// The bot expires an approval after 24h; past this, a send still not final is stuck
+const APPROVAL_OVERDUE_MS = 25 * 60 * 60_000;
 // PayHere lookup failures don't use attempts, so they need their own alert:
 // once a waiting payment is this old (or at once on 401/403), at most hourly.
 const LOOKUP_FAILURE_ALERT_AFTER_MS = 30 * 60_000;
@@ -30,6 +35,18 @@ interface UnsettledTransaction {
   retry_count: number;
   telegram_id: string;
   created_at: Date;
+  /** Why the last send didn't go through (UNKNOWN = may have gone, check the memo first) */
+  settlement_failure: string | null;
+}
+
+/** A send held for approval in Telegram (the bot answered 202) */
+interface AwaitingApprovalTransaction {
+  payhere_pay_id: string;
+  bot_send_id: string;
+  satoshis_purchased: number;
+  telegram_id: string;
+  /** When the send that got the 202 was made */
+  last_retry_at: Date | null;
 }
 
 @Injectable()
@@ -66,6 +83,7 @@ export class SettlementService {
             't.gross_amount',
             't.retry_count',
             't.created_at',
+            't.settlement_failure',
             'u.id as telegram_id',
           )
           .join('user as u', 't.user_id', 'u.id')
@@ -73,6 +91,8 @@ export class SettlementService {
           .where('t.settled', false)
           // Held one-time buys wait for a human (POST /transaction/release-hold)
           .whereNull('t.hold_reason')
+          // Sends awaiting approval are followed by pollAwaitingApprovals
+          .whereNull('t.bot_send_id')
           .whereNotNull('t.satoshis_purchased')
           .whereNotNull('t.btc_price_at_purchase')
           .where('t.retry_count', '<', MAX_SETTLEMENT_ATTEMPTS)
@@ -107,7 +127,10 @@ export class SettlementService {
     const currentRetryCount = retry_count + 1;
 
     // Atomically claim the row (FOR UPDATE SKIP LOCKED + retry_count check)
-    // so concurrent instances don't send the same transfer twice.
+    // so concurrent instances don't send the same transfer twice. The row is
+    // re-checked against everything that takes it out of the normal retry
+    // loop since the snapshot was read: a tick can run long (95s /send), and
+    // meanwhile another tick may have parked it for approval, or a human held it.
     const trx = await this.knexService.knex.transaction();
     try {
       const locked = await trx('transaction')
@@ -115,6 +138,8 @@ export class SettlementService {
         .where('settled', false)
         .where('status', 'SUCCESS')
         .where('retry_count', retry_count)
+        .whereNull('bot_send_id')
+        .whereNull('hold_reason')
         .forUpdate()
         .skipLocked()
         .first();
@@ -124,8 +149,15 @@ export class SettlementService {
         return;
       }
 
+      // settlement_failure is cleared while the attempt is in flight (the
+      // snapshot still has it for the memo check below), so the bot's deposit
+      // callback can't reset a row whose send is running
       await trx('transaction')
-        .update({ retry_count: currentRetryCount, last_retry_at: new Date() })
+        .update({
+          retry_count: currentRetryCount,
+          last_retry_at: new Date(),
+          settlement_failure: null,
+        })
         .where('payhere_pay_id', payhere_pay_id);
       await trx.commit();
     } catch (error) {
@@ -177,6 +209,8 @@ export class SettlementService {
         return;
       }
 
+      const memo = SettlementService.transferMemo(payhere_pay_id, kind);
+
       // The claim and the PayHere lookup took a while. A chargeback that
       // arrived meanwhile was told "it will not be settled": keep that true.
       const current = await this.knexService
@@ -194,9 +228,37 @@ export class SettlementService {
         current.settled ||
         current.hold_reason
       ) {
+        const now = `${current?.status ?? 'gone'}${current?.hold_reason ? ' (held)' : ''}`;
         this.logger.warn(
-          `Settlement of ${payhere_pay_id} skipped: it is ${current?.status ?? 'gone'}${current?.hold_reason ? ' (held)' : ''} now`,
+          `Settlement of ${payhere_pay_id} skipped: it is ${now} now`,
         );
+        // Nothing more is sent, but an earlier send with no answer may have
+        // gone through, and nothing looks at a charged-back payment again:
+        // find out now (markSettled says so if sats went out).
+        if (
+          current &&
+          !current.settled &&
+          transaction.settlement_failure === 'UNKNOWN'
+        ) {
+          const found = await this.bitcoinDeepaService.findTransferByMemo(
+            Number(telegram_id),
+            memo,
+          );
+          if (found) {
+            await this.markSettled(payhere_pay_id);
+          } else {
+            // Put back the marker the claim cleared
+            await this.knexService
+              .knex('transaction')
+              .update({ settlement_failure: 'UNKNOWN' })
+              .where('payhere_pay_id', payhere_pay_id)
+              .where('retry_count', currentRetryCount);
+            await this.telegramLogger.logAlert(
+              'Settlement',
+              `Settlement of ${payhere_pay_id} was skipped (it is ${now} now), but an earlier send of ${satoshis_purchased} sats to user ${telegram_id} got no answer and memo "${memo}" ${found === null ? "couldn't be looked up" : "isn't in their bot history"}. Check the bot before treating it as not sent.`,
+            );
+          }
+        }
         return;
       }
 
@@ -207,7 +269,24 @@ export class SettlementService {
         currentRetryCount,
       );
 
-      const memo = SettlementService.transferMemo(payhere_pay_id, kind);
+      // The last send may have gone through (timeout/5xx): look for its memo
+      // first. Not found (or history unreadable) means resend with the SAME
+      // memo - the bot answers "already completed" if it did go through.
+      if (transaction.settlement_failure === 'UNKNOWN') {
+        const found = await this.bitcoinDeepaService.findTransferByMemo(
+          Number(telegram_id),
+          memo,
+        );
+        if (found) {
+          await this.markSettled(payhere_pay_id);
+          this.logger.log(
+            `Settlement for ${payhere_pay_id} had gone through: found memo "${memo}" in the user's bot history`,
+          );
+          await this.telegramLogger.setMessageReaction(logMessage);
+          return;
+        }
+      }
+
       const result = await this.bitcoinDeepaService.transferFunds(
         satoshis_purchased,
         telegram_id,
@@ -215,18 +294,7 @@ export class SettlementService {
       );
 
       if (result.success || result.already_completed) {
-        const [after] = await this.knexService
-          .knex('transaction')
-          .update({ settled: true })
-          .where('payhere_pay_id', payhere_pay_id)
-          .returning<{ status: string }[]>('status');
-        if (after?.status === 'CHARGEBACK') {
-          // It landed during the transfer itself, too late to stop it. Its
-          // own alert said the payment would not be settled: correct that.
-          const alert = `CHARGEBACK on ${payhere_pay_id} arrived while it was being settled: ${satoshis_purchased} sats were sent to user ${telegram_id} - manual reversal needed.`;
-          this.logger.error(alert);
-          await this.telegramLogger.logAlert('Settlement', alert);
-        }
+        await this.markSettled(payhere_pay_id);
         this.logger.log(
           result.already_completed
             ? `Settlement for ${payhere_pay_id} was already completed in a previous attempt`
@@ -236,17 +304,30 @@ export class SettlementService {
         return;
       }
 
-      if (result.outcome_unknown) {
-        // The request may have gone through (e.g. timeout). Retrying could pay
-        // twice, so stop retrying and ask a human to check.
+      if (result.awaiting_approval_id) {
+        // Not a failed attempt: give it back and let pollAwaitingApprovals
+        // follow the approval. Safe from stale ticks: the claim skips rows
+        // with a bot_send_id. Guarded on our own attempt so a stale writer
+        // can't overwrite newer state.
         await this.knexService
           .knex('transaction')
-          .update({ retry_count: MAX_SETTLEMENT_ATTEMPTS })
-          .where('payhere_pay_id', payhere_pay_id);
-        const alert = `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) has an UNKNOWN outcome: ${result.message}. Retries stopped - check BitcoinDeepa before resetting.`;
-        this.logger.error(alert);
-        await this.telegramLogger.logAlert('Settlement', alert);
+          .update({
+            bot_send_id: result.awaiting_approval_id,
+            settlement_failure: null,
+            retry_count: retry_count,
+          })
+          .where('payhere_pay_id', payhere_pay_id)
+          .where('retry_count', currentRetryCount);
+        await this.telegramLogger.logAlert(
+          'Settlement',
+          `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) is waiting for approval in the bot (transaction ${result.awaiting_approval_id}). It settles once approved.`,
+        );
         return;
+      }
+
+      await this.recordFailure(payhere_pay_id, currentRetryCount, result);
+      if (result.failure === 'AUTH') {
+        await this.alertAuthFailure(result);
       }
 
       if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
@@ -271,6 +352,185 @@ export class SettlementService {
           )
           .catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * The sats are with the member. If a chargeback arrived while they were
+   * being sent (too late to stop it), its own alert said the payment would
+   * not be settled: correct that.
+   */
+  private async markSettled(payhere_pay_id: string): Promise<void> {
+    const [row] = await this.knexService
+      .knex('transaction')
+      .update({ settled: true, settlement_failure: null, bot_send_id: null })
+      .where('payhere_pay_id', payhere_pay_id)
+      .returning<
+        {
+          status: string;
+          satoshis_purchased: string | number;
+          user_id: string | null;
+        }[]
+      >(['status', 'satoshis_purchased', 'user_id']);
+    if (row?.status === 'CHARGEBACK') {
+      const alert = `CHARGEBACK on ${payhere_pay_id} arrived while it was being settled: ${row.satoshis_purchased} sats were sent to user ${row.user_id} - manual reversal needed.`;
+      this.logger.error(alert);
+      await this.telegramLogger.logAlert('Settlement', alert);
+    }
+  }
+
+  /**
+   * Remember why the send failed (LOW_BALANCE rows are retried by the bot's
+   * deposit callback). Only for our own attempt, so a stale writer can't
+   * overwrite a newer attempt's state.
+   */
+  private async recordFailure(
+    payhere_pay_id: string,
+    attempt: number,
+    result: FundTransferResponse,
+  ): Promise<void> {
+    await this.knexService
+      .knex('transaction')
+      .update({ settlement_failure: result.failure ?? 'REJECTED' })
+      .where('payhere_pay_id', payhere_pay_id)
+      .where('retry_count', attempt);
+  }
+
+  /**
+   * 401/403 from the bot is a key, wallet id, clock or IP problem: every
+   * payout fails until someone fixes the config, so say so at once (at most
+   * hourly).
+   */
+  private async alertAuthFailure(result: FundTransferResponse): Promise<void> {
+    if (
+      await this.redisService.setIfAbsent('dca:alert:bot-auth-failed', 60 * 60)
+    ) {
+      await this.telegramLogger
+        .logAlert(
+          'Settlement',
+          `The BitcoinDeepa bot rejected our signed request: ${result.message}. ` +
+            `Check BITCOINDEEPA_WALLET_ID, BITCOINDEEPA_SEND_PRIVATE_KEY_PEM (its public key must be configured on the bot), the server clock and the bot's IP allowlist. (Reported at most hourly.)`,
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Follow sends the bot held for approval in Telegram. Executed: settled.
+   * Rejected/expired (24h): nothing was sent - stop and ask a human, since
+   * resending would just ask for approval again. An id the bot doesn't know
+   * (404) stops too, as an unknown outcome: a reset first checks the user's
+   * bot history for the memo. One that can't be read past the bot's 24h
+   * expiry is reported (once a day) instead of being skipped silently.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async pollAwaitingApprovals() {
+    if (!this.bitcoinDeepaService.isConfigured()) return;
+
+    let rows: AwaitingApprovalTransaction[];
+    try {
+      rows = await this.knexService
+        .knex('transaction as t')
+        .select<
+          AwaitingApprovalTransaction[]
+        >('t.payhere_pay_id', 't.bot_send_id', 't.satoshis_purchased', 't.last_retry_at', 'u.id as telegram_id')
+        .join('user as u', 't.user_id', 'u.id')
+        .whereNotNull('t.bot_send_id')
+        .where('t.settled', false)
+        .where('t.status', 'SUCCESS');
+    } catch (error) {
+      this.logger.error(
+        `Error loading sends awaiting approval: ${errorMessage(error)}`,
+      );
+      return;
+    }
+
+    for (const row of rows) {
+      const status = await this.bitcoinDeepaService.getSendStatus(
+        row.bot_send_id,
+      );
+      const what = `${row.payhere_pay_id} (${row.satoshis_purchased} sats to user ${row.telegram_id})`;
+
+      if (status === 'NOT_FOUND') {
+        await this.stopAwaitingApproval(
+          row,
+          'UNKNOWN',
+          `Settlement of ${what}: the bot doesn't know send ${row.bot_send_id}. Retries stopped - check the bot, then POST /transaction/reset-retry-count/${row.payhere_pay_id} (a reset first looks for the memo in the user's bot history).`,
+        );
+        continue;
+      }
+      if (!status) {
+        await this.alertIfApprovalOverdue(row, what);
+        continue; // unreadable now: try next minute
+      }
+
+      if (status.status === 'executed') {
+        await this.markSettled(row.payhere_pay_id);
+        this.logger.log(
+          `Settled ${row.payhere_pay_id}: approved send ${row.bot_send_id} executed`,
+        );
+        continue;
+      }
+      if (status.status === 'rejected' || status.status === 'expired') {
+        await this.stopAwaitingApproval(
+          row,
+          'APPROVAL_REJECTED',
+          `Settlement of ${what}: the bot send ${row.bot_send_id} was ${status.status}, nothing was sent. Retries stopped - decide, then POST /transaction/reset-retry-count/${row.payhere_pay_id} to send again.`,
+        );
+        continue;
+      }
+      // pending / approved / in_flight: still going
+      await this.alertIfApprovalOverdue(row, what);
+    }
+  }
+
+  /**
+   * Leave the approval state and stop retrying. Alerts only when this
+   * instance made the change (another instance may have polled the same row).
+   */
+  private async stopAwaitingApproval(
+    row: AwaitingApprovalTransaction,
+    failure: 'APPROVAL_REJECTED' | 'UNKNOWN',
+    alert: string,
+  ): Promise<void> {
+    const updated = await this.knexService
+      .knex('transaction')
+      .update({
+        bot_send_id: null,
+        settlement_failure: failure,
+        retry_count: MAX_SETTLEMENT_ATTEMPTS,
+      })
+      .where('payhere_pay_id', row.payhere_pay_id)
+      .where('bot_send_id', row.bot_send_id)
+      .where('settled', false);
+    if (!updated) return;
+    this.logger.error(alert);
+    await this.telegramLogger
+      .logAlert('Settlement', alert)
+      .catch(() => undefined);
+  }
+
+  /** The bot expires approvals after 24h: still waiting after that means something is stuck. */
+  private async alertIfApprovalOverdue(
+    row: AwaitingApprovalTransaction,
+    what: string,
+  ): Promise<void> {
+    const sentAt = row.last_retry_at
+      ? new Date(row.last_retry_at).getTime()
+      : 0;
+    if (Date.now() - sentAt < APPROVAL_OVERDUE_MS) return;
+    if (
+      await this.redisService.setIfAbsent(
+        `dca:alert:approval-overdue:${row.payhere_pay_id}`,
+        24 * 60 * 60,
+      )
+    ) {
+      await this.telegramLogger
+        .logAlert(
+          'Settlement',
+          `Settlement of ${what} has waited over 25h for bot approval ${row.bot_send_id} and its status isn't final. Check it in the bot. (Reported once a day.)`,
+        )
+        .catch(() => undefined);
     }
   }
 
