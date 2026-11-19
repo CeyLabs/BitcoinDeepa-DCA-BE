@@ -128,6 +128,20 @@ export function sameAmount(a: string | number, b: string | number): boolean {
   return Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) < 0.005;
 }
 
+/**
+ * PayHere's amount ("1000.00") as a number. Parsed as a decimal, not with
+ * parseFloat, which stops at the first character it doesn't like
+ * ("1,000.00" would be 1). Null when it isn't an amount.
+ */
+export function parseAmount(value: string | number): number | null {
+  try {
+    const amount = new Big(String(value).replace(/,/g, '').trim());
+    return amount.gte(0) ? amount.toNumber() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Where a payment came from: exactly one of the two is set */
 type PaymentLink =
   | { kind: 'RECURRING'; payhere_sub_id: string; payhere_order_id: null }
@@ -317,6 +331,14 @@ export class TransactionService {
       throw new BadRequestException('Invalid payment or subscription id');
     }
 
+    const grossAmount = parseAmount(payhere_amount);
+    if (grossAmount === null) {
+      this.logger.error(
+        `Invalid amount for payment_id ${payment_id}: ${payhere_amount}`,
+      );
+      throw new BadRequestException('Invalid payment amount');
+    }
+
     const status = this.getPayHereStatusMapped(status_code);
     this.logger.log(
       `Processing PayHere ${oneTime ? 'one-time' : 'subscription'} notification: payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id ?? '-'}, status=${status}, amount=${payhere_amount} ${payhere_currency}`,
@@ -325,7 +347,7 @@ export class TransactionService {
     const bitcoinData = await this.priceIfNeeded(
       payment_id,
       status,
-      payhere_amount,
+      grossAmount,
       payhere_currency,
     );
 
@@ -398,7 +420,7 @@ export class TransactionService {
       const { becameSuccess } = await this.upsertPayment(trx, {
         payment_id,
         status,
-        gross_amount: parseFloat(payhere_amount),
+        gross_amount: grossAmount,
         bitcoinData,
         user_id: userId,
         link,
@@ -534,7 +556,7 @@ export class TransactionService {
   private async priceIfNeeded(
     payment_id: string,
     status: Status,
-    amount: string,
+    amount: number,
     currency: string,
   ): Promise<BitcoinData | null> {
     if (status !== 'SUCCESS') return null;
@@ -548,7 +570,7 @@ export class TransactionService {
     ) {
       return null;
     }
-    return this.fetchBitcoinDataForTransaction(parseFloat(amount), currency);
+    return this.fetchBitcoinDataForTransaction(amount, currency);
   }
 
   /**

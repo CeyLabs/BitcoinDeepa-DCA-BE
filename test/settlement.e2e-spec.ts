@@ -16,8 +16,23 @@ import { TransactionService } from '../src/modules/transaction/transaction.servi
 describe('Settlement (e2e)', () => {
   let ctx: TestContext;
   let settlement: SettlementService;
+  let orderId: string;
   const tx = () =>
     ctx.knex('transaction').where({ payhere_pay_id: 'P1' }).first();
+  /** PayHere reports a chargeback on P1 */
+  const chargeback = () =>
+    request(ctx.app.getHttpServer())
+      .post('/transaction/payhere-webhook')
+      .type('form')
+      .send(
+        payhereNotification({
+          order_id: orderId,
+          payment_id: 'P1',
+          subscription_id: 'S1',
+          status_code: '-3',
+        }),
+      )
+      .expect(200);
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -36,15 +51,13 @@ describe('Settlement (e2e)', () => {
       .set('Authorization', `Bearer ${ctx.tokenFor(USER)}`)
       .send({ package_id: PACKAGE_WEEKLY })
       .expect(201);
-    const order_id = new URL(res.body.link as string).searchParams.get(
-      'order_id',
-    )!;
+    orderId = new URL(res.body.link as string).searchParams.get('order_id')!;
     await request(ctx.app.getHttpServer())
       .post('/transaction/payhere-webhook')
       .type('form')
       .send(
         payhereNotification({
-          order_id,
+          order_id: orderId,
           payment_id: 'P1',
           subscription_id: 'S1',
         }),
@@ -344,6 +357,51 @@ describe('Settlement (e2e)', () => {
       .update({ status: 'CHARGEBACK' });
     await settlement.retryUnsettledTransactions();
     expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+  });
+
+  it("doesn't settle when a chargeback lands after the claim, before the transfer", async () => {
+    const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
+    // The claim is committed; the chargeback arrives during the PayHere lookup
+    ctx.payHerePayments.mockImplementationOnce(async () => {
+      await chargeback();
+      return [
+        {
+          payment_id: 'P1',
+          status: 'RECEIVED',
+          amount: '1000.00',
+          order_id: null,
+        },
+      ];
+    });
+
+    await settlement.retryUnsettledTransactions();
+    expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+    expect(await tx()).toMatchObject({ status: 'CHARGEBACK', settled: false });
+    // ...so what the chargeback alert promised holds
+    expect(alert).toHaveBeenCalledWith(
+      'PayHere webhook',
+      expect.stringContaining('It will not be settled'),
+    );
+    alert.mockRestore();
+  });
+
+  it('says so when a chargeback lands during the transfer itself', async () => {
+    const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
+    ctx.bitcoinDeepa.transferFunds.mockImplementationOnce(async () => {
+      await chargeback();
+      return { success: true };
+    });
+
+    await settlement.retryUnsettledTransactions();
+    // The sats went out: the record says so, and a human is told
+    expect(await tx()).toMatchObject({ status: 'CHARGEBACK', settled: true });
+    expect(alert).toHaveBeenCalledWith(
+      'Settlement',
+      expect.stringContaining(
+        `arrived while it was being settled: ${sats(980)} sats were sent`,
+      ),
+    );
+    alert.mockRestore();
   });
 
   it('does nothing when BitcoinDeepa is not configured', async () => {

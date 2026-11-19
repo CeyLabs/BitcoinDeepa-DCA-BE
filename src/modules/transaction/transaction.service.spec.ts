@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { TransactionService } from './transaction.service';
+import { parseAmount, TransactionService } from './transaction.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 
 const md5U = (s: string) =>
@@ -32,6 +32,22 @@ function signed(
     );
   return n;
 }
+
+describe('parseAmount', () => {
+  it.each([
+    ['1000.00', 1000],
+    ['1234.56', 1234.56],
+    // parseFloat would read this as 1
+    ['1,000.00', 1000],
+    ['0.00', 0],
+  ])('reads %s as %s', (value, amount) => {
+    expect(parseAmount(value)).toBe(amount);
+  });
+
+  it.each(['', 'abc', '10.5LKR', '-5.00', 'NaN'])('refuses %p', (value) => {
+    expect(parseAmount(value)).toBeNull();
+  });
+});
 
 describe('TransactionService (pure logic)', () => {
   // Only the pure methods are exercised here; DB-backed flows are e2e.

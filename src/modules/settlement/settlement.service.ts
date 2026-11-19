@@ -12,7 +12,7 @@ import {
   type PurchaseKind,
 } from '../transaction/transaction.service';
 
-const MAX_SETTLEMENT_ATTEMPTS = 5;
+export const MAX_SETTLEMENT_ATTEMPTS = 5;
 // PayHere lookup failures don't use attempts, so they need their own alert:
 // once a waiting payment is this old (or at once on 401/403), at most hourly.
 const LOOKUP_FAILURE_ALERT_AFTER_MS = 30 * 60_000;
@@ -177,6 +177,29 @@ export class SettlementService {
         return;
       }
 
+      // The claim and the PayHere lookup took a while. A chargeback that
+      // arrived meanwhile was told "it will not be settled": keep that true.
+      const current = await this.knexService
+        .knex('transaction')
+        .select('status', 'settled', 'hold_reason')
+        .where('payhere_pay_id', payhere_pay_id)
+        .first<{
+          status: string;
+          settled: boolean;
+          hold_reason: string | null;
+        }>();
+      if (
+        !current ||
+        current.status !== 'SUCCESS' ||
+        current.settled ||
+        current.hold_reason
+      ) {
+        this.logger.warn(
+          `Settlement of ${payhere_pay_id} skipped: it is ${current?.status ?? 'gone'}${current?.hold_reason ? ' (held)' : ''} now`,
+        );
+        return;
+      }
+
       const logMessage = await this.telegramLogger.logSettlement(
         payhere_pay_id,
         Number(satoshis_purchased),
@@ -192,10 +215,18 @@ export class SettlementService {
       );
 
       if (result.success || result.already_completed) {
-        await this.knexService
+        const [after] = await this.knexService
           .knex('transaction')
           .update({ settled: true })
-          .where('payhere_pay_id', payhere_pay_id);
+          .where('payhere_pay_id', payhere_pay_id)
+          .returning<{ status: string }[]>('status');
+        if (after?.status === 'CHARGEBACK') {
+          // It landed during the transfer itself, too late to stop it. Its
+          // own alert said the payment would not be settled: correct that.
+          const alert = `CHARGEBACK on ${payhere_pay_id} arrived while it was being settled: ${satoshis_purchased} sats were sent to user ${telegram_id} - manual reversal needed.`;
+          this.logger.error(alert);
+          await this.telegramLogger.logAlert('Settlement', alert);
+        }
         this.logger.log(
           result.already_completed
             ? `Settlement for ${payhere_pay_id} was already completed in a previous attempt`

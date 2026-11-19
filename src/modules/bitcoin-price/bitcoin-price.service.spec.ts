@@ -1,5 +1,9 @@
 import axios from 'axios';
-import { BitcoinPriceService, btcLkrRate } from './bitcoin-price.service';
+import {
+  BitcoinPriceService,
+  btcLkrRate,
+  satoshisFor,
+} from './bitcoin-price.service';
 import { RedisService } from '../redis/redis.service';
 import { CeyPayService } from '../ceypay/ceypay.service';
 import { CoinMarketCapService } from '../coinmarketcap/coinmarketcap.service';
@@ -11,6 +15,21 @@ describe('btcLkrRate', () => {
     expect(btcLkrRate(65_000, 330)).toBe(21_450_000);
     // 62,655.37 × 331.737 = 20,785,104.47769
     expect(btcLkrRate(62_655.37, 331.737)).toBe(20_785_104.47);
+  });
+});
+
+describe('satoshisFor', () => {
+  it('rounds down to whole sats', () => {
+    // 980 / 21,450,000 = 0.00004568764... BTC
+    expect(satoshisFor(980, 21_450_000)).toBe(4568);
+    expect(satoshisFor('980.00', '21450000.00')).toBe(4568);
+  });
+
+  it('is exact where float division comes out one sat short', () => {
+    // Exactly 600 sats; (128.7 / 21450000) * 1e8 is 599.9999999999999
+    expect(Math.floor((128.7 / 21_450_000) * 100_000_000)).toBe(599);
+    expect(satoshisFor(128.7, 21_450_000)).toBe(600);
+    expect(satoshisFor(47.19, 21_450_000)).toBe(220);
   });
 });
 
