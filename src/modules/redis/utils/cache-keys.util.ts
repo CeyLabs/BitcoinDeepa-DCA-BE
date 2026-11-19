@@ -18,8 +18,11 @@ export class CacheKeys {
 
   // Transaction-related cache keys
   static transaction = {
+    // /transaction/list. `history` (was `transactions`) since pages hold
+    // BUY and SELL items: a new build never serves a page cached in the
+    // old shape, and an old build never serves one in the new shape.
     list: (userId: string, page: number, limit: number): string =>
-      `${CacheKeys.PREFIX}:transactions:user:${userId}:page:${page}:limit:${limit}`,
+      `${CacheKeys.PREFIX}:history:user:${userId}:page:${page}:limit:${limit}`,
     latest: (userId: string): string =>
       `${CacheKeys.PREFIX}:transaction:latest:user:${userId}`,
     dcaSummary: (userId: string): string =>
@@ -55,7 +58,7 @@ export class CacheKeys {
   // Pattern generators for bulk operations
   static patterns = {
     userTransactionLists: (userId: string): string =>
-      `${CacheKeys.PREFIX}:transactions:user:${userId}:*`,
+      `${CacheKeys.PREFIX}:history:user:${userId}:*`,
     allBitcoinPrices: (): string => `${CacheKeys.PREFIX}:btc:*`,
   };
 }

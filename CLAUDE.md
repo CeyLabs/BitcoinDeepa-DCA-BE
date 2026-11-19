@@ -302,7 +302,10 @@ PORT=3000
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
 - `POST /transaction/reset-retry-count/:paymentId` - Re-enable settlement for one payment after checking it on BitcoinDeepa (internal, requires `x-admin-key`)
 - `POST /transaction/release-hold/:paymentId` - Let settlement pay a held one-time buy after a human checked it (internal, requires `x-admin-key`; 404 unless held and unsettled)
-- `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
+- `GET /transaction/list?page=&limit=` - The member's history, purchases and sales together, newest first (`created_at DESC, id DESC`; paging is across both). Returns `{ transactions, total_count, total_pages, current_page, has_more }`. Each item has a `type` (authenticated):
+  - `BUY`: the `transaction` row with its package columns (as before), plus `type: 'BUY'`
+  - `SELL`: `{ type: 'SELL', created_at, sell_order }`, where `sell_order` is the same view the `/sell/orders` endpoints return. No transaction fields (`payhere_pay_id`, `status`, `satoshis_purchased`...). `QUOTED` and `EXPIRED` orders are left out (nothing was sold)
+  - Cached per member (`dca:history:user:<id>:*`, 120s); cleared on payment webhooks, on sale confirm and on every sell status change. Clients should treat an item with no `type` as `BUY`
 - `GET /transaction/bot-history?limit=&offset=` - The user's bot transfers (from the bot, paged by its count). Each row gets `purchase_settlement: true` when it is the transfer that settled one of the user's own SUCCESS payments (incoming, memo `... (Ref: <payment id>)`, amount = its `satoshis_purchased`; a successful transfer only once the payment is `settled`), so the app shows that purchase once
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 
