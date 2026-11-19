@@ -54,9 +54,10 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Connection monitoring and keep-alive mechanisms
 
 8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
-   - One price everywhere: `getBtcLkrRate()` = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`) × CeyPay's USDT/LKR (`getQuote('1')`), rounded down to cents. Redis cache: BTC/USD 30s, USDT/LKR 5 min (each CeyPay fetch is a quote row in its `aggregator_fx_quote`, and the rate only moves every ~10 min). Fetches time out after 3s and a failure is remembered for 10s, so an outage costs one slow call per window. Returns null (never throws) when either is down; callers answer 503 or leave the payment for the backfill cron
+   - One price everywhere: `getBtcLkrRate()` = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`) × CeyPay's USDT/LKR (`getQuote('1')`), rounded down to cents. Redis cache: BTC/USD 30s, USDT/LKR 5 min (each CeyPay fetch is a quote row in its `aggregator_fx_quote`, and the rate only moves every ~10 min). Fetches time out after 3s and a failure is remembered for 10s, so an outage costs one slow call per window. Returns null (never throws) when either is down; quote/price endpoints answer 503, and a payment is priced from the rate log below or, without a recent logged rate, left for the backfill cron
    - Automatic satoshi calculation for buys and DCA payments (`calculateSatoshis`, LKR only)
-   - **Rate log** (`exchange_rate_log`): a 1-min cron (`recordExchangeRate`, one instance per minute via a Redis claim) appends the live rate as the single `is_active` row and deactivates the previous one; nothing is written while the price is down. `calculateSatoshis` falls back to the active row when the live price is unavailable and the row is at most `EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS` old (default 300, 0 = off), so a payment made during a short outage is priced at once instead of waiting for the backfill cron. Set `is_active = false` by hand to take a bad rate out of use. Quotes, sell and displayed prices (`getBtcLkrRate`) never use it
+   - **Rate log** (`exchange_rate_log`): a 1-min cron (`recordExchangeRate`, one instance per minute via a Redis claim) appends the live rate as the single `is_active` row and deactivates the previous one; nothing is written while the price is down, and it doesn't run (no rate API calls) when `ENABLE_BITCOIN_TRACKING=false`. `calculateSatoshis` falls back to the active row when the live price is unavailable and the row is at most `EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS` old (default 180, max 900, 0 = off; empty or invalid = the default), so a payment made during a short outage is priced at once instead of waiting for the backfill cron. Set `is_active = false` by hand to take a bad rate out of use. Quotes, sell and displayed prices (`getBtcLkrRate`) never use it
+   - Which price a payment got: `calculateSatoshis` returns `source` (`live` | `log`) and `priced_at`. `transaction.coingecko_timestamp` stores `priced_at` - the time of the payment for a live price, the logged row's `created_at` for a logged one - and the "Bitcoin buy calculation for <payment id>" log line names the `exchange_rate_log` row (warn level when it was the log)
    - CoinMarketCap (`COINMARKETCAP_API_KEY`) is display only: the wallet's `24_hr_change` (`getBitcoin24HrChange()`, cached `BTC_PRICE_CACHE_TTL`, 0 when unavailable). Never use it for a price
 
 9. **Didit KYC Module** (`src/modules/didit/`)
@@ -196,7 +197,7 @@ PAYHERE_ENV=sandbox  # or live
 ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
 COINMARKETCAP_API_KEY=your_cmc_api_key  # wallet 24h change only (display)
 BTC_PRICE_CACHE_TTL=300  # 24h change cache in seconds (default: 300)
-EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS=300  # Optional: max age of the logged rate used when the live price is down (0 = never)
+EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS=180  # Optional: max age of the logged rate used when the live price is down (default 180, max 900, 0 = never)
 
 # Fee Configuration
 PAYHERE_FEE_BASIS_POINTS=100  # Payment processor fee (1 bp = 0.01%)

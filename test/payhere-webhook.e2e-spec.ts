@@ -5,11 +5,13 @@ import {
   payhereNotification,
   sats,
   TestContext,
+  BTC_USD,
   USER,
   OTHER_USER,
   PACKAGE_WEEKLY,
   PACKAGE_MONTHLY,
 } from './support/test-app';
+import { CacheKeys } from '../src/modules/redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-logger.service';
 import { TransactionService } from '../src/modules/transaction/transaction.service';
 
@@ -567,10 +569,11 @@ describe('PayHere webhook (e2e)', () => {
       const price = ctx.app.get(BitcoinPriceService);
       // The cron logged a rate a minute ago: 64,000 × 330 = 21,120,000
       await price.recordExchangeRate();
+      const loggedAt = new Date(Date.now() - 60_000);
       await ctx.knex('exchange_rate_log').update({
         btc_usd: 64_000,
         btc_lkr: 21_120_000,
-        created_at: new Date(Date.now() - 60_000),
+        created_at: loggedAt,
       });
 
       const spy = jest.spyOn(price, 'getBtcUsd').mockResolvedValue(null);
@@ -581,12 +584,34 @@ describe('PayHere webhook (e2e)', () => {
           subscription_id: 'S1',
         }).expect(200);
       } finally {
-        spy.mockResolvedValue(65_000);
+        spy.mockResolvedValue(BTC_USD);
       }
       const tx = await row('transaction', { payhere_pay_id: 'P1' });
       expect(Number(tx.btc_price_at_purchase)).toBe(21_120_000);
       // 980 LKR net / 21,120,000
       expect(Number(tx.satoshis_purchased)).toBe(4640);
+      // The row shows it wasn't a live price: its price timestamp is the
+      // logged rate's (a minute before the payment), not the payment's
+      expect(new Date(tx.coingecko_timestamp).getTime()).toBe(
+        loggedAt.getTime(),
+      );
+      expect(new Date(tx.created_at).getTime()).toBeGreaterThan(
+        loggedAt.getTime() + 30_000,
+      );
+    });
+
+    it('a live price is stamped with the time of the payment', async () => {
+      const { order_id } = await newOrder();
+      const before = Date.now();
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+      }).expect(200);
+      const tx = await row('transaction', { payhere_pay_id: 'P1' });
+      expect(new Date(tx.coingecko_timestamp).getTime()).toBeGreaterThanOrEqual(
+        before - 1000,
+      );
     });
 
     it('keeps one active rate, and a deactivated rate is not used', async () => {
@@ -596,11 +621,15 @@ describe('PayHere webhook (e2e)', () => {
       );
       const price = ctx.app.get(BitcoinPriceService);
       await price.recordExchangeRate();
+      // Another instance's tick in the same minute: the claim is taken, so
+      // nothing is recorded
+      await price.recordExchangeRate();
+      expect(await ctx.knex('exchange_rate_log').select('id')).toHaveLength(1);
       // Release the once-a-minute claim
       const { RedisService } = await import(
         '../src/modules/redis/redis.service'
       );
-      await ctx.app.get(RedisService).delByPattern('dca:rate-log:*');
+      await ctx.app.get(RedisService).del(CacheKeys.bitcoin.rateLogClaim());
       await price.recordExchangeRate();
       const rows = await ctx
         .knex('exchange_rate_log')
@@ -621,7 +650,7 @@ describe('PayHere webhook (e2e)', () => {
           subscription_id: 'S1',
         }).expect(200);
       } finally {
-        spy.mockResolvedValue(65_000);
+        spy.mockResolvedValue(BTC_USD);
       }
       expect(await row('transaction', { payhere_pay_id: 'P1' })).toMatchObject({
         status: 'SUCCESS',
@@ -648,7 +677,7 @@ describe('PayHere webhook (e2e)', () => {
           subscription_id: 'S1',
         }).expect(200);
       } finally {
-        spy.mockResolvedValue(65_000);
+        spy.mockResolvedValue(BTC_USD);
       }
       expect(await row('transaction', { payhere_pay_id: 'P1' })).toMatchObject({
         status: 'SUCCESS',

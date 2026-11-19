@@ -244,10 +244,13 @@ class EnvironmentVariables {
   BUY_LINKS_PER_HOUR?: number;
 
   // How old a logged BTC/LKR rate may be and still price a payment when the
-  // live price is down (0 = never use it)
+  // live price is down (0 = never use it). Capped (15 min, see
+  // MAX_FALLBACK_MAX_AGE_SECONDS): the payment is settled automatically, so a
+  // typo must not price it at an hours-old rate.
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(900)
   EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS?: number;
 
   // Sell flow (CeyPay aggregator off-ramp). Off unless SELL_ENABLED=true:

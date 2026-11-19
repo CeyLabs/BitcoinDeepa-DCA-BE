@@ -1,7 +1,10 @@
 import axios from 'axios';
 import {
   BitcoinPriceService,
+  DEFAULT_FALLBACK_MAX_AGE_SECONDS,
+  MAX_FALLBACK_MAX_AGE_SECONDS,
   btcLkrRate,
+  fallbackMaxAgeSeconds,
   satoshisFor,
 } from './bitcoin-price.service';
 import { KnexService } from '../knex/knex.service';
@@ -84,6 +87,7 @@ describe('BitcoinPriceService', () => {
     query.where.mockClear();
     query.first.mockClear();
     delete process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS;
+    delete process.env.ENABLE_BITCOIN_TRACKING;
   });
   afterAll(() => get.mockRestore());
 
@@ -107,6 +111,8 @@ describe('BitcoinPriceService', () => {
       satoshis: 4568,
       btc_price: 21_450_000,
       currency: 'LKR',
+      source: 'live',
+      priced_at: expect.any(Date),
     });
   });
 
@@ -140,10 +146,13 @@ describe('BitcoinPriceService', () => {
   });
 
   describe('exchange rate log', () => {
+    const loggedAt = new Date('2026-11-19T10:00:00.000Z');
     const logged = {
+      id: '7',
       btc_usd: '64000.00000000',
       usdt_lkr: '330.00000000',
       btc_lkr: '21120000.00',
+      created_at: loggedAt,
       age_seconds: 42,
     };
 
@@ -171,6 +180,15 @@ describe('BitcoinPriceService', () => {
       expect(update).not.toHaveBeenCalled();
     });
 
+    it('records nothing while Bitcoin tracking is off', async () => {
+      process.env.ENABLE_BITCOIN_TRACKING = 'false';
+      await service.recordExchangeRate();
+      // No price fetches either: the cron must not call the rate APIs
+      expect(get).not.toHaveBeenCalled();
+      expect(ceyPay.getQuote).not.toHaveBeenCalled();
+      expect(insert).not.toHaveBeenCalled();
+    });
+
     it('a failed insert does not throw (it runs in a cron)', async () => {
       insert.mockRejectedValue(new Error('db down'));
       await expect(service.recordExchangeRate()).resolves.toBeUndefined();
@@ -180,17 +198,21 @@ describe('BitcoinPriceService', () => {
       get.mockRejectedValue(new Error('down'));
       latest = logged;
       // 980 / 21,120,000 = 0.00004640151... BTC
+      // The caller is told it was the logged rate, which row, and its time
       await expect(service.calculateSatoshis(980, 'LKR')).resolves.toEqual({
         satoshis: 4640,
         btc_price: 21_120_000,
         currency: 'LKR',
+        source: 'log',
+        priced_at: loggedAt,
+        rate_log_id: '7',
       });
-      // Only the active row, within the max age (default 5 min)
+      // Only the active row, within the max age (default 3 min)
       expect(query.where).toHaveBeenCalledWith('is_active', true);
       expect(query.where).toHaveBeenCalledWith(
         'created_at',
         '>=',
-        expect.objectContaining({ bindings: [300] }),
+        expect.objectContaining({ bindings: [180] }),
       );
     });
 
@@ -198,7 +220,7 @@ describe('BitcoinPriceService', () => {
       latest = logged;
       await expect(
         service.calculateSatoshis(980, 'LKR'),
-      ).resolves.toMatchObject({ btc_price: 21_450_000 });
+      ).resolves.toMatchObject({ btc_price: 21_450_000, source: 'live' });
       expect(query.first).not.toHaveBeenCalled();
     });
 
@@ -215,6 +237,28 @@ describe('BitcoinPriceService', () => {
 
       process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS = '0';
       await expect(service.calculateSatoshis(980, 'LKR')).resolves.toBeNull();
+    });
+
+    it.each([
+      ['empty (an unset line in .env)', ''],
+      ['blank', '  '],
+      ['not a number', 'abc'],
+      ['negative', '-1'],
+      ['not a whole number', '90.5'],
+      ['above the 15 min cap (a typo for 300)', '30000'],
+    ])('a max age that is %s means the default, not off', (_, value) => {
+      process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS = value;
+      expect(fallbackMaxAgeSeconds()).toBe(DEFAULT_FALLBACK_MAX_AGE_SECONDS);
+    });
+
+    it('accepts a max age up to the cap', () => {
+      expect(DEFAULT_FALLBACK_MAX_AGE_SECONDS).toBe(180);
+      process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS = String(
+        MAX_FALLBACK_MAX_AGE_SECONDS,
+      );
+      expect(fallbackMaxAgeSeconds()).toBe(900);
+      process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS = ' 120 ';
+      expect(fallbackMaxAgeSeconds()).toBe(120);
     });
 
     it('quotes and displayed prices never use the log', async () => {

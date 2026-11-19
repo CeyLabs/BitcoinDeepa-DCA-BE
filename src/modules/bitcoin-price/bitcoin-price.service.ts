@@ -24,6 +24,29 @@ export interface BtcLkrRate {
   usdtLkr: number;
 }
 
+/** A rate read back from exchange_rate_log. */
+export interface LoggedBtcLkrRate extends BtcLkrRate {
+  /** exchange_rate_log.id */
+  id: string;
+  /** When it was recorded (the row's created_at) */
+  loggedAt: Date;
+}
+
+/** Where a payment's price came from: the live feed or exchange_rate_log */
+export type PriceSource = 'live' | 'log';
+
+export interface SatoshiCalculation {
+  satoshis: number;
+  btc_price: number;
+  currency: string;
+  /** 'log' = the live price was down, priced from exchange_rate_log */
+  source: PriceSource;
+  /** When the price was taken: now (live) or the logged row's created_at */
+  priced_at: Date;
+  /** The exchange_rate_log row used, when source is 'log' */
+  rate_log_id?: string;
+}
+
 /** fx.ceyloncash.com/currency/BTC */
 interface CeylonCashBtcResponse {
   usd_price?: number;
@@ -48,16 +71,31 @@ const CHANGE_24H_CACHE_TTL_SECONDS = parseInt(
 const SATOSHIS_PER_BTC = 100_000_000;
 /** One instance records the rate per minute (the claim outlives a late tick) */
 const RATE_LOG_CLAIM_TTL_SECONDS = 50;
-/** Default for EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS */
-const DEFAULT_FALLBACK_MAX_AGE_SECONDS = 300;
+/**
+ * Default for EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS. A row is written every
+ * minute, so this covers two missed ticks; anything longer is a real outage
+ * and the payment waits for the backfill cron.
+ */
+export const DEFAULT_FALLBACK_MAX_AGE_SECONDS = 180;
+/**
+ * The most EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS can be (validateEnv rejects
+ * more): a payment priced from the log is settled automatically, so a typo
+ * must not price it at an hours-old rate.
+ */
+export const MAX_FALLBACK_MAX_AGE_SECONDS = 900;
 
 /**
  * How old a logged rate may be and still price a payment when the live price
- * is unavailable (EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS, 0 = never).
+ * is unavailable (EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS, 0 = never). Unset,
+ * empty or out of range = the default.
  */
 export const fallbackMaxAgeSeconds = (): number => {
-  const value = Number(process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS);
-  return Number.isInteger(value) && value >= 0
+  const raw = process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS?.trim();
+  if (!raw) return DEFAULT_FALLBACK_MAX_AGE_SECONDS;
+  const value = Number(raw);
+  return Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_FALLBACK_MAX_AGE_SECONDS
     ? value
     : DEFAULT_FALLBACK_MAX_AGE_SECONDS;
 };
@@ -132,23 +170,34 @@ export class BitcoinPriceService {
   /**
    * Sats for a buy/DCA payment. Priced live; when the live price is
    * unavailable, from the latest exchange_rate_log row if it is recent enough
-   * (see getRecentLoggedRate). Null when there is neither.
+   * (see getRecentLoggedRate). Null when there is neither. `source` and
+   * `priced_at` say which it was, so the caller can record it.
    */
   async calculateSatoshis(
     amount: number,
     currency: string,
-  ): Promise<{ satoshis: number; btc_price: number; currency: string } | null> {
-    let priceData = await this.getBitcoinPrice(currency);
-    if (!priceData && currency.toUpperCase() === 'LKR') {
-      const logged = await this.getRecentLoggedRate();
-      if (logged) priceData = { btc_price: logged.btcLkr, currency: 'LKR' };
+  ): Promise<SatoshiCalculation | null> {
+    const live = await this.getBitcoinPrice(currency);
+    if (live) {
+      return {
+        satoshis: satoshisFor(amount, live.btc_price),
+        btc_price: live.btc_price,
+        currency: live.currency,
+        source: 'live',
+        priced_at: new Date(),
+      };
     }
-    if (!priceData) return null;
+    if (currency.toUpperCase() !== 'LKR') return null;
 
+    const logged = await this.getRecentLoggedRate();
+    if (!logged) return null;
     return {
-      satoshis: satoshisFor(amount, priceData.btc_price),
-      btc_price: priceData.btc_price,
-      currency: priceData.currency,
+      satoshis: satoshisFor(amount, logged.btcLkr),
+      btc_price: logged.btcLkr,
+      currency: 'LKR',
+      source: 'log',
+      priced_at: logged.loggedAt,
+      rate_log_id: logged.id,
     };
   }
 
@@ -157,10 +206,13 @@ export class BitcoinPriceService {
    * (the previous one is deactivated), once a minute across instances.
    * Nothing is written while a rate is unavailable, so the active row's age
    * says how long the outage has lasted. (The rate can be up to the cache
-   * TTLs older than its created_at: 30s for BTC/USD.)
+   * TTLs older than its created_at: 30s for BTC/USD.) Like the backfill
+   * cron, it does nothing while ENABLE_BITCOIN_TRACKING is off: no payment is
+   * priced then, so there is nothing to fetch rates for.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async recordExchangeRate(): Promise<void> {
+    if (process.env.ENABLE_BITCOIN_TRACKING === 'false') return;
     try {
       const claimed = await this.redisService.setIfAbsent(
         CacheKeys.bitcoin.rateLogClaim(),
@@ -196,16 +248,18 @@ export class BitcoinPriceService {
    * that has already been made while the live price is down - quotes and
    * displayed prices stay live. Null when there is none. Never throws.
    */
-  async getRecentLoggedRate(): Promise<BtcLkrRate | null> {
+  async getRecentLoggedRate(): Promise<LoggedBtcLkrRate | null> {
     const maxAge = fallbackMaxAgeSeconds();
     if (maxAge === 0) return null;
     try {
       const row = await this.knexService
         .knex('exchange_rate_log')
         .select(
+          'id',
           'btc_usd',
           'usdt_lkr',
           'btc_lkr',
+          'created_at',
           this.knexService.knex.raw(
             'extract(epoch from now() - created_at)::int as age_seconds',
           ),
@@ -219,16 +273,20 @@ export class BitcoinPriceService {
           ]),
         )
         .first<{
+          id: string;
           btc_usd: string;
           usdt_lkr: string;
           btc_lkr: string;
+          created_at: Date;
           age_seconds: number;
         }>();
       if (!row) return null;
       this.logger.warn(
-        `Live BTC/LKR unavailable: using the rate logged ${row.age_seconds}s ago (${row.btc_lkr} LKR/BTC)`,
+        `Live BTC/LKR unavailable: using exchange_rate_log #${row.id}, logged ${row.age_seconds}s ago (${row.btc_lkr} LKR/BTC)`,
       );
       return {
+        id: String(row.id),
+        loggedAt: new Date(row.created_at),
         btcLkr: Number(row.btc_lkr),
         btcUsd: Number(row.btc_usd),
         usdtLkr: Number(row.usdt_lkr),
