@@ -54,7 +54,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Connection monitoring and keep-alive mechanisms
 
 8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
-   - One price everywhere: `getBtcLkrRate()` = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`) × CeyPay's USDT/LKR (`getQuote('1')`), rounded down to cents. Each rate is cached 30s in Redis. Returns null (never throws) when either is down; callers answer 503 or leave the payment for the backfill cron
+   - One price everywhere: `getBtcLkrRate()` = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`) × CeyPay's USDT/LKR (`getQuote('1')`), rounded down to cents. Redis cache: BTC/USD 30s, USDT/LKR 5 min (each CeyPay fetch is a quote row in its `aggregator_fx_quote`, and the rate only moves every ~10 min). Fetches time out after 3s and a failure is remembered for 10s, so an outage costs one slow call per window. Returns null (never throws) when either is down; callers answer 503 or leave the payment for the backfill cron
    - Automatic satoshi calculation for buys and DCA payments (`calculateSatoshis`, LKR only)
    - CoinMarketCap (`COINMARKETCAP_API_KEY`) is display only: the wallet's `24_hr_change` (`getBitcoin24HrChange()`, cached `BTC_PRICE_CACHE_TTL`, 0 when unavailable). Never use it for a price
 
