@@ -555,4 +555,131 @@ describe('One-time buy (e2e)', () => {
       });
     });
   });
+
+  describe('bot history', () => {
+    const botRow = (
+      id: number,
+      memo: string | undefined,
+      amount: number,
+      extra: { direction?: string; success?: boolean } = {},
+    ) => ({
+      id,
+      time: '2026-11-19T12:00:00Z',
+      direction: extra.direction ?? 'incoming',
+      from_id: 1,
+      to_id: Number(USER),
+      type: 'transfer',
+      amount,
+      amount_lkr: '200.00',
+      memo,
+      success: extra.success ?? true,
+    });
+    const satsOf = async (payhere_pay_id: string) =>
+      Number((await tx(payhere_pay_id)).satoshis_purchased);
+    const settle = (...ids: string[]) =>
+      ctx
+        .knex('transaction')
+        .whereIn('payhere_pay_id', ids)
+        .update({ settled: true });
+    const memo = SettlementService.transferMemo;
+
+    it("marks only the transfers that settled the user's own successful purchases", async () => {
+      // P1, P2: plan charges; B1..B4: one-time buys
+      const res = await http()
+        .post('/subscription/payhere-link')
+        .set(auth())
+        .send({ package_id: PACKAGE_WEEKLY })
+        .expect(201);
+      const subOrder = new URL(res.body.link as string).searchParams.get(
+        'order_id',
+      )!;
+      for (const payment_id of ['P1', 'P2']) {
+        await notify({
+          order_id: subOrder,
+          payment_id,
+          subscription_id: 'S1',
+        }).expect(200);
+      }
+      for (const payment_id of ['B1', 'B2', 'B3', 'B4']) {
+        const buy = await newBuy(1000);
+        await notify({
+          order_id: buy.order_id,
+          payment_id,
+          payhere_amount: buy.amount,
+        }).expect(200);
+      }
+      await settle('P1', 'P2', 'B1', 'B2', 'B3');
+      await ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'B2' })
+        .update({ status: 'CHARGEBACK' });
+      await ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'B3' })
+        .update({ user_id: OTHER_USER });
+      // B4 stays unsettled: a send whose outcome is unknown
+
+      const [p1, p2, b1, b2, b3, b4] = await Promise.all(
+        ['P1', 'P2', 'B1', 'B2', 'B3', 'B4'].map(satsOf),
+      );
+      const rows = [
+        botRow(1, memo('P1'), p1),
+        botRow(2, `Weekly DCA plan (Ref: P2)`, p2), // older memo format
+        botRow(3, memo('B1', 'ONE_TIME'), b1),
+        botRow(4, memo('B2', 'ONE_TIME'), b2), // charged back
+        botRow(5, memo('B3', 'ONE_TIME'), b3), // someone else's payment
+        botRow(6, `lunch (Ref: B1)`, b1 + 1), // own ref, wrong amount
+        botRow(7, memo('B1', 'ONE_TIME'), b1, { direction: 'outgoing' }),
+        botRow(8, memo('B4', 'ONE_TIME'), b4), // arrived, not marked settled
+        botRow(9, memo('B4', 'ONE_TIME'), b4, { success: false }), // failed try
+        botRow(10, 'lunch', 1000),
+        botRow(11, undefined, 1000),
+      ];
+      ctx.bitcoinDeepa.getUserTransactions.mockResolvedValueOnce({
+        success: true,
+        count: rows.length,
+        limit: 50,
+        offset: 0,
+        transactions: rows,
+      });
+
+      const history = await http()
+        .get('/transaction/bot-history?limit=50&offset=0')
+        .set(auth())
+        .expect(200);
+      expect(history.body.count).toBe(rows.length);
+      expect(
+        history.body.transactions.map(
+          (t: { id: number; purchase_settlement: boolean }) => [
+            t.id,
+            t.purchase_settlement,
+          ],
+        ),
+      ).toEqual([
+        [1, true],
+        [2, true],
+        [3, true],
+        [4, false],
+        [5, false],
+        [6, false],
+        [7, false],
+        [8, false],
+        [9, true],
+        [10, false],
+        [11, false],
+      ]);
+    });
+
+    it('passes a bot failure through unchanged', async () => {
+      ctx.bitcoinDeepa.getUserTransactions.mockResolvedValueOnce({
+        success: false,
+        message: 'bot down',
+      });
+      const res = await http()
+        .get('/transaction/bot-history')
+        .set(auth())
+        .expect(200);
+      expect(res.body).toEqual({ success: false, message: 'bot down' });
+    });
+  });
 });

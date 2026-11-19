@@ -170,11 +170,21 @@ export class TransactionController {
     const limitNum = parseIntParam(limit, 100, 1, 250);
     const offsetNum = parseIntParam(offset, 0, 0, Number.MAX_SAFE_INTEGER);
 
-    return this.bitcoinDeepaService.getUserTransactions(
+    const history = await this.bitcoinDeepaService.getUserTransactions(
       Number(user.id),
       limitNum,
       offsetNum,
     );
+    if (!history.success || !Array.isArray(history.transactions)) {
+      return history;
+    }
+    return {
+      ...history,
+      transactions: await this.transactionService.markPurchaseSettlements(
+        user.id,
+        history.transactions,
+      ),
+    };
   }
 
   @Get('dca-summary')
