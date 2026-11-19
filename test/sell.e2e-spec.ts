@@ -15,6 +15,7 @@ import {
   verifiedBankAccount,
 } from './support/bank-account-helpers';
 import { SellSettlementService } from '../src/modules/sell/sell-settlement.service';
+import { SellService } from '../src/modules/sell/sell.service';
 import { CeyPayError } from '../src/modules/ceypay/ceypay.service';
 import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-logger.service';
 
@@ -425,6 +426,258 @@ describe('Sell flow (e2e)', () => {
       });
       expect(ctx.ceyPay.createOfframp).toHaveBeenCalledTimes(5);
       expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+    });
+
+    describe('a refusal after an attempt that got no answer', () => {
+      const pastBackoff = (id: string) =>
+        ctx
+          .knex('sell_order')
+          .where({ id })
+          .update({ last_retry_at: new Date(Date.now() - 10 * 60_000) });
+
+      it.each([
+        [
+          'the quote call',
+          () =>
+            ctx.ceyPay.getQuote.mockRejectedValueOnce(
+              new CeyPayError('Invalid signature', 401, false),
+            ),
+        ],
+        [
+          'the off-ramp call',
+          () =>
+            ctx.ceyPay.createOfframp.mockRejectedValueOnce(
+              new CeyPayError('Insufficient float balance', 422, false),
+            ),
+        ],
+      ])(
+        'is not refunded when %s refuses: the first payout may exist',
+        async (_, refuseRetry) => {
+          // Attempt 1: the off-ramp request went out, no answer came back
+          ctx.ceyPay.createOfframp.mockRejectedValueOnce(
+            new CeyPayError('timeout', undefined, true),
+          );
+          const q = await quote();
+          await asUser(ctx, USER)
+            .post(`/sell/orders/${q.id}/confirm`)
+            .expect(200);
+          expect((await order(q.id)).status).toBe('SATS_COLLECTED');
+
+          refuseRetry();
+          await pastBackoff(q.id);
+          await settlement.retryPayouts();
+
+          expect(await order(q.id)).toMatchObject({
+            status: 'NEEDS_REVIEW',
+            refunded: false,
+          });
+          expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+          expect(logAlert).toHaveBeenCalledWith(
+            'Sell',
+            expect.stringContaining(
+              `were NOT refunded: check CeyPay for externalRef ${q.id}`,
+            ),
+          );
+        },
+      );
+
+      it('is not refunded when the bank account was un-verified meanwhile', async () => {
+        ctx.ceyPay.createOfframp.mockRejectedValueOnce(
+          new CeyPayError('timeout', undefined, true),
+        );
+        const q = await quote();
+        await asUser(ctx, USER)
+          .post(`/sell/orders/${q.id}/confirm`)
+          .expect(200);
+        await ctx
+          .knex('user_bank_account')
+          .where({ id: bankId })
+          .update({ status: 'REJECTED' });
+
+        await pastBackoff(q.id);
+        await settlement.retryPayouts();
+        expect((await order(q.id)).status).toBe('NEEDS_REVIEW');
+        expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      });
+
+      it('is still refunded when no off-ramp request was ever sent', async () => {
+        const q = await quote();
+        // Attempt 1 never got past the quote (CeyPay down): nothing to dedupe
+        ctx.ceyPay.getQuote.mockRejectedValueOnce(
+          new CeyPayError('down', 503, true),
+        );
+        await asUser(ctx, USER)
+          .post(`/sell/orders/${q.id}/confirm`)
+          .expect(200);
+        expect(await order(q.id)).toMatchObject({
+          status: 'SATS_COLLECTED',
+          fx_lock_id: null,
+        });
+        expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
+
+        ctx.ceyPay.createOfframp.mockRejectedValueOnce(
+          new CeyPayError('Insufficient float balance', 422, false),
+        );
+        await pastBackoff(q.id);
+        await settlement.retryPayouts();
+        expect(await order(q.id)).toMatchObject({
+          status: 'REFUNDED',
+          refunded: true,
+        });
+        expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('hands a collected order with no attempts left to a human', async () => {
+      // The process died during the 5th attempt: nothing parked the order
+      const stuck = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: stuck.id })
+        .update({
+          status: 'SATS_COLLECTED',
+          retry_count: 5,
+          last_retry_at: ctx.knex.raw("now() - interval '6 minutes'"),
+          updated_at: ctx.knex.raw("now() - interval '6 minutes'"),
+        });
+      // The 5th attempt of this one is still running
+      const running = await quote();
+      await ctx.knex('sell_order').where({ id: running.id }).update({
+        status: 'SATS_COLLECTED',
+        retry_count: 5,
+        last_retry_at: ctx.knex.fn.now(),
+      });
+      // This one is waiting out the backoff before its last attempt
+      const waiting = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: waiting.id })
+        .update({
+          status: 'SATS_COLLECTED',
+          retry_count: 4,
+          last_retry_at: ctx.knex.raw("now() - interval '6 minutes'"),
+          updated_at: ctx.knex.raw("now() - interval '6 minutes'"),
+        });
+
+      await settlement.retryPayouts();
+      expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
+      await settlement.recoverStuckOrders();
+
+      expect(await order(stuck.id)).toMatchObject({
+        status: 'NEEDS_REVIEW',
+        failure_reason: 'No payout after 5 attempts',
+      });
+      expect(logAlert).toHaveBeenCalledWith(
+        'Sell',
+        expect.stringContaining(`check CeyPay for externalRef ${stuck.id}`),
+      );
+      expect(logAlert).not.toHaveBeenCalledWith(
+        'Sell',
+        expect.stringContaining(running.id),
+      );
+      expect((await order(running.id)).status).toBe('SATS_COLLECTED');
+      expect((await order(waiting.id)).status).toBe('SATS_COLLECTED');
+    });
+
+    it('the retry cron leaves a just-collected order to confirm', async () => {
+      const q = await quote();
+      // setStatus is private: reached here to act between two of its updates
+      const sell = ctx.app.get<
+        SellService,
+        {
+          setStatus: (
+            ...args: unknown[]
+          ) => Promise<{ status: string } | undefined>;
+        }
+      >(SellService);
+      const setStatus = sell.setStatus.bind(sell);
+      let sentByCron: number | undefined;
+      const spy = jest
+        .spyOn(sell, 'setStatus')
+        .mockImplementation(async (...args) => {
+          const row: { status: string } | undefined = await setStatus(...args);
+          if (row?.status === 'SATS_COLLECTED') {
+            // The cron fires right after the collect is committed, before
+            // confirm has sent its payout request
+            await settlement.retryPayouts();
+            sentByCron = ctx.ceyPay.createOfframp.mock.calls.length;
+          }
+          return row;
+        });
+      try {
+        await asUser(ctx, USER)
+          .post(`/sell/orders/${q.id}/confirm`)
+          .expect(200);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(sentByCron).toBe(0);
+      expect(ctx.ceyPay.createOfframp).toHaveBeenCalledTimes(1);
+      // confirm's own attempt is the first one
+      expect(await order(q.id)).toMatchObject({
+        status: 'PAYOUT_PENDING',
+        retry_count: 1,
+      });
+    });
+
+    it('two retries of the same order send one payout request', async () => {
+      const q = await quote();
+      await ctx
+        .knex('sell_order')
+        .where({ id: q.id })
+        .update({
+          status: 'SATS_COLLECTED',
+          retry_count: 1,
+          last_retry_at: new Date(Date.now() - 10 * 60_000),
+        });
+      const sell = ctx.app.get(SellService);
+      // Two instances that both read the order as due
+      await Promise.all([sell.createPayout(q.id), sell.createPayout(q.id)]);
+      await sell.createPayout(q.id);
+
+      expect(ctx.ceyPay.createOfframp).toHaveBeenCalledTimes(1);
+      expect(await order(q.id)).toMatchObject({
+        status: 'PAYOUT_PENDING',
+        retry_count: 2,
+      });
+    });
+
+    it("a new quote while confirming the old one doesn't deadlock", async () => {
+      const q = await quote();
+      const account = await ctx
+        .knex('user_bank_account')
+        .where({ id: bankId })
+        .first();
+      // What quote() does, step by step: expire the old quote (locks its
+      // row), then insert the new one (FK share lock on the member's row).
+      const trx = await ctx.knex.transaction();
+      try {
+        await trx('sell_order')
+          .where({ id: q.id })
+          .update({ status: 'EXPIRED' });
+        // confirm now locks the member, then waits for the order row
+        const confirming = asUser(ctx, USER)
+          .post(`/sell/orders/${q.id}/confirm`)
+          .then((res) => res);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const copy = (await order(q.id)) as Record<string, unknown>;
+        delete copy.id;
+        delete copy.created_at;
+        delete copy.updated_at;
+        await trx('sell_order').insert({
+          ...copy,
+          user_bank_account_id: account.id,
+          status: 'QUOTED',
+        });
+        await trx.commit();
+
+        // The old quote is gone: nothing was moved
+        expect((await confirming).status).toBe(410);
+      } finally {
+        if (!trx.isCompleted()) await trx.rollback();
+      }
+      expect(ctx.bitcoinDeepa.collectFunds).not.toHaveBeenCalled();
     });
 
     it('a failed bank transfer refunds the sats', async () => {

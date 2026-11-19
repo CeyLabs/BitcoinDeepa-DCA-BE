@@ -3,7 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
 import { CeyPayService } from '../ceypay/ceypay.service';
 import { errorMessage } from '../../common/error-message';
-import { MAX_PAYOUT_ATTEMPTS, SellOrderRow, SellService } from './sell.service';
+import { payoutAttemptDue, SellOrderRow, SellService } from './sell.service';
 import { SellStatus } from './sell.constants';
 
 /** Payouts with no webhook after this long are checked with CeyPay */
@@ -50,14 +50,7 @@ export class SellSettlementService {
         .select('id')
         .where('status', SellStatus.SATS_COLLECTED)
         .whereNull('ceypay_payment_id')
-        .where('retry_count', '<', MAX_PAYOUT_ATTEMPTS)
-        .where((qb) => {
-          void qb
-            .whereNull('last_retry_at')
-            .orWhereRaw(
-              "last_retry_at + (power(2, retry_count) * interval '1 minute') <= now()",
-            );
-        })
+        .where(payoutAttemptDue)
         .orderBy('created_at')
         .limit(20);
       for (const { id } of rows) {
