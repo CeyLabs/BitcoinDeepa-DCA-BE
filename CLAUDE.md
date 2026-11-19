@@ -25,8 +25,9 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - **Each login links the wallet**: right after verifying, the credential goes once to the bot's `/api/v1/init` (`P2pService.init`), then is dropped (never stored). A bot outage doesn't block login (`walletLinked: false`)
    - **`ConditionalAuthGuard`**: `Authorization: Bearer` first (a session token, or a legacy 7-day JWT until they expire); when present it decides alone (no fallback to the cookie). Otherwise the session cookie (`__Host-sid` in production, `sid` elsewhere: HttpOnly, Secure in production, SameSite=Lax, Path=/, no Domain); cookie-authenticated non-GET/HEAD/OPTIONS requests need an `Origin` from `APP_URL` (CSRF). `ENABLE_AUTH=false` (mock user) is refused in production by env validation
    - No proxy: the app calls this API directly with credentials; `APP_URL` origins get credentialed CORS (like `ADMIN_APP_URL`). Production shares a site (`app.`/`api.bitcoindeepa.com`), so the `SameSite=Lax` cookie is sent. Dev/staging on two sites (vercel.app + railway.app): `APP_COOKIE_SAME_SITE=none` makes it `SameSite=None; Secure` (refused in production; Safari and the iOS Telegram WebView block it, the Mini App's Bearer isn't affected). The OIDC callback is `BASE_URL/auth/telegram/callback` (register it in BotFather) and returns to `APP_URL` + `return_to`. `TRUST_PROXY` (hops or proxy IPs) makes `req.ip` the real client
-   - `AuthRateLimitGuard`: 20/min per IP per route (Redis fixed window, fails open without Redis) on `start`, `callback` and `miniapp` only - never `/auth/me` or logout
-   - Legacy `POST /auth/telegram` and `POST /auth/telegram-oidc` still mint 7-day JWTs until `LEGACY_JWT_ISSUE=false`, then answer 410. Remove them, the legacy JWT path in the guard and `JWT_SECRET` 7 days after that flip
+   - `AuthRateLimiter` (Redis fixed window, fails open without Redis) on the login routes only - never `/auth/me` or logout: `start`/`callback` 20/min per IP (over the limit redirects to `?login_error=rate_limited`), `miniapp` 120/min per IP (mobile CGNAT) and 10/min per Telegram user (counted after initData is verified). `TRUST_PROXY` is required in production, or every client shares the proxy's IP
+   - Login waits for the bot's `/init` at most 3 s (`LOGIN_INIT_TIMEOUT_MS`), then goes on with `walletLinked: false`. A web login revokes the browser's previous session cookie
+   - Legacy `POST /auth/telegram` and `POST /auth/telegram-oidc` still mint 7-day JWTs until `LEGACY_JWT_ISSUE=false`, then answer 410. A legacy JWT is `sessionKind: 'legacy'`: it can read, but `SessionRequiredGuard` (on `/p2p/*` and `POST /sell/orders/:id/pay`) refuses it with 403 `relogin_required`, since it can't be revoked and never needed to spend before. Remove them, the legacy JWT path in the guard and `JWT_SECRET` 7 days after that flip
    - `@CurrentUser()` decorator for extracting user context
 
 2. **User Module** (`src/modules/user/`)
@@ -112,7 +113,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - **Routes:** `GET /p2p/me` (balance, limits), `POST /p2p/resolve { to }` (our DB, not the bot: a Bitcoin Deepa @username → `{ telegram_id, username, name (masked "Nimal S.", from `kyc_full_name` or the Telegram name), avatar_seed }`; 404 `recipient_not_found`, 400 `invalid_username` / `cannot_send_to_self`; no Telegram credential needed), `POST /p2p/send { to_telegram_id, amount, memo?, idempotency_key }` (200 completed/failed, 202 awaiting_confirmation/processing/in_flight), `GET /p2p/transfers/:id` (`p2p-<hex>`)
    - **Who:** the session user (`@CurrentUser()`), sent as `X-BDB-User: <telegram id>`. No Telegram credential after login and no login-age limit: our session decides. If the P2P key leaks it can pay from any linked user's wallet up to the bot's `daily_limit` (passkeys are planned on the bot): keep it in the secret store, separate from the send key, one per environment. The `ENABLE_AUTH=false` mock user can't use P2P
    - **Signing:** `P2pBotClient` with `BITCOINDEEPA_P2P_PRIVATE_KEY_PEM` (its public key = the bot's `api.p2p.service_public_key`; env validation refuses the send key here). `/api/v1/init`: `BDB-P2P-ED25519-V1` with `sha256(credential)` and the `X-Telegram-Init-Data`/`X-Telegram-ID-Token` header. Everything else: `BDB-P2P-ED25519-V2` with the Telegram ID on line 7 and `X-BDB-User`, no Telegram header (`bot-signer.ts`, shared with the send API). The bot rejects V1 on `/p2p/*`, so the bot and this backend deploy together. Bodies are built from the documented fields only (the bot rejects unknown fields)
-   - **Errors:** the bot's `403 login_required` (user not linked) → our `401 relogin_required` (the app logs in again, which links them). A 401 on an X-BDB-User call, `bad_service_signature`, `forbidden` or a plain-text 403 is our config → 502 `p2p_unavailable` + hourly alert. On init, the bot refusing the credential is 403 `credential_rejected`. The bot's other `{code, message}` 4xx pass through (messages are user-facing). No answer/5xx on send → 502 `outcome_unknown` (retry with the same key is safe); on reads → 503
+   - **Errors:** the bot's `403 login_required` (user not linked) → our `403 relogin_required` (not 401: our session is fine; the app logs in again, which links them). 401 is only ever our own session. A 401 on an X-BDB-User call, `bad_service_signature`, `forbidden` or a plain-text 403 is our config → 502 `p2p_unavailable` + hourly alert. On init, the bot refusing the credential is 403 `credential_rejected`. The bot's other `{code, message}` 4xx pass through (messages are user-facing). No answer/5xx on send → 502 `outcome_unknown` (retry with the same key is safe); on reads → 503
 
 ### Database Schema
 
@@ -194,7 +195,7 @@ APP_URL=https://app.example.com  # user app origin (credentialed CORS, cookie Or
 APP_COOKIE_SAME_SITE=  # dev/staging only: 'none' when the app and API are on different sites
 TELEGRAM_OIDC_CLIENT_ID=8219648988  # bot ID; required in production
 TELEGRAM_OIDC_CLIENT_SECRET=...  # BotFather > Login Widget; required in production
-TRUST_PROXY=2  # proxy hops (or IPs/CIDRs) in front of us, for req.ip
+TRUST_PROXY=1  # proxy hops (or IPs/CIDRs) in front of us, for req.ip; required in production
 LEGACY_JWT_ISSUE=true  # false = legacy JWT logins answer 410
 JWT_SECRET=your_jwt_secret_key  # Required until the legacy JWT path is removed
 ADMIN_API_KEY=your_admin_key  # Required for internal endpoints (x-admin-key header)
@@ -306,7 +307,7 @@ PORT=3000
 - `GET /sell/price` - Live BTC/LKR buying rate, fee, `minSats` and `maxSats` (estimate only)
 - `POST /sell/quote` - `{ sats }` → `QUOTED` order (KYC + verified bank account)
 - `POST /sell/orders/:id/confirm` - Ask the user to pay the sats (collect request); `COLLECTING` until they approve, then the CeyPay payout (KYC + verified bank account; 410 if expired)
-- `POST /sell/orders/:id/pay` - Pay a `COLLECTING` sale from the app (P2P on; 401 `relogin_required` like `/p2p/send`; 410 after the deadline)
+- `POST /sell/orders/:id/pay` - Pay a `COLLECTING` sale from the app (P2P on; a real session, not a legacy JWT; 403 `relogin_required` like `/p2p/send`; 410 after the deadline)
 - `POST /sell/orders/:id/cancel` - Cancel a sale not paid yet
 - `GET /sell/orders`, `GET /sell/orders/:id` - User's sell orders
 - `POST /sell/ceypay-webhook` - CeyPay off-ramp result (public, ED25519-signed)

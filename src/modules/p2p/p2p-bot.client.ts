@@ -77,6 +77,8 @@ export class P2pBotClient {
     path: string,
     caller: P2pCaller,
     body?: Record<string, unknown>,
+    /** Overrides the default (BITCOINDEEPA_TIMEOUT; 60 s for /send) */
+    timeoutMs?: number,
   ): Promise<P2pBotResponse> {
     if (!this.key) throw new Error('P2P API is not configured');
     const raw = body ? JSON.stringify(body) : '';
@@ -121,7 +123,8 @@ export class P2pBotClient {
       transformRequest: [(data: unknown) => data],
       validateStatus: () => true,
       headers: { 'Content-Type': 'application/json', ...who, ...signed },
-      timeout: path.endsWith('/send') ? SEND_TIMEOUT_MS : this.timeout,
+      timeout:
+        timeoutMs ?? (path.endsWith('/send') ? SEND_TIMEOUT_MS : this.timeout),
     });
     return { status: response.status, body: response.data };
   }

@@ -45,6 +45,12 @@ const describeBody = (data: Record<string, unknown>, body: unknown): string =>
 /** Reads may be retried freely; a spend with no answer may have gone through */
 type P2pPurpose = 'read' | 'spend';
 
+/**
+ * Login waits for the bot's /init at most this long: a slow bot mustn't hold
+ * up every Mini App launch (login goes on with walletLinked: false).
+ */
+export const LOGIN_INIT_TIMEOUT_MS = 3_000;
+
 /** A Telegram login credential: only POST /api/v1/init carries one */
 export type P2pLoginCredential = Extract<P2pCaller, { value: string }>;
 
@@ -56,7 +62,7 @@ const asObject = (body: unknown): Record<string, unknown> =>
  * login is checked once, at login (init, which links the user on the bot for
  * a year); after that our session names the user (X-BDB-User, signed V2 with
  * the P2P key) and we pass the bot's answer through (its messages are written
- * for users). A user the bot hasn't linked (403 login_required) gets our 401
+ * for users). A user the bot hasn't linked (403 login_required) gets our 403
  * relogin_required: logging in again links them. What isn't the user's to
  * fix - our signature, IP allowlist, a bot outage - is mapped:
  * - 401 bad_service_signature / 403 forbidden / plain-text 403 → 502
@@ -100,6 +106,7 @@ export class P2pService {
       credential,
       'read',
       dto.referral_code ? { referral_code: dto.referral_code } : {},
+      LOGIN_INIT_TIMEOUT_MS,
     );
     if (result.body.created === true) {
       await this.redis.del(CacheKeys.transaction.dcaSummary(userId));
@@ -202,6 +209,7 @@ export class P2pService {
     caller: P2pCaller,
     purpose: P2pPurpose,
     body?: Record<string, unknown>,
+    timeoutMs?: number,
   ): Promise<P2pResult> {
     if (!this.bot.isConfigured()) {
       throw new ServiceUnavailableException({
@@ -211,7 +219,13 @@ export class P2pService {
     }
     let response: P2pBotResponse;
     try {
-      response = await this.bot.request(method, path, caller, body);
+      response = await this.bot.request(
+        method,
+        path,
+        caller,
+        body,
+        ...((timeoutMs === undefined ? [] : [timeoutMs]) as [] | [number]),
+      );
     } catch (error) {
       this.logger.error(
         `P2P ${method} ${path}: no answer from the bot (${errorMessage(error)})`,
@@ -232,14 +246,15 @@ export class P2pService {
     if (status >= 200 && status < 300) return { status, body: data };
 
     // Not linked on the bot (never logged in through init, or the year ran
-    // out): logging in again links them. 401 so the app re-logs in.
+    // out): logging in again links them. 403, not 401: our session is fine,
+    // and the app treats a 401 as signed out.
     if (status === 403 && data.code === 'login_required') {
       throw new HttpException(
         {
           code: 'relogin_required',
           message: 'Please log in again to use your wallet.',
         },
-        HttpStatus.UNAUTHORIZED,
+        HttpStatus.FORBIDDEN,
       );
     }
 

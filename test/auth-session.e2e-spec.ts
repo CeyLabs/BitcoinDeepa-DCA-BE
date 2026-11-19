@@ -8,7 +8,8 @@ import {
 } from './support/test-app';
 import { AuthService } from '../src/modules/auth/auth.service';
 import type { TelegramOidcClaims } from '../src/modules/auth/auth.service';
-import { AUTH_RATE_LIMIT_PER_MINUTE } from '../src/modules/auth/auth-rate-limit.guard';
+import { AUTH_RATE_LIMITS } from '../src/modules/auth/auth-rate-limiter';
+import { LOGIN_INIT_TIMEOUT_MS } from '../src/modules/p2p/p2p.service';
 import { SessionService } from '../src/modules/auth/session.service';
 
 const APP = 'https://app.example.test';
@@ -85,13 +86,15 @@ describe('User sessions (e2e)', () => {
 
   describe('Mini App: initData exchanged once at launch', () => {
     it('creates a session, links the wallet on the bot with that initData, and the token works', async () => {
-      const initData = signedInitData();
+      // Not a fixture user, so this login registers them
+      const NEW_USER = '100000777';
+      const initData = signedInitData(NEW_USER);
       const res = await http()
         .post('/auth/telegram/miniapp')
         .send({ initData, referral_code: 'PROMO2024' })
         .expect(200);
       expect(res.body).toMatchObject({
-        user: { telegram_id: USER },
+        user: { telegram_id: NEW_USER },
         isRegistered: false,
         walletLinked: true,
         canMessage: false,
@@ -103,17 +106,29 @@ describe('User sessions (e2e)', () => {
         '/api/v1/init',
         { kind: 'initData', value: initData },
         { referral_code: 'PROMO2024' },
+        LOGIN_INIT_TIMEOUT_MS,
       );
 
       const auth = { Authorization: `Bearer ${res.body.token}` };
       const me = await http().get('/auth/me').set(auth).expect(200);
       expect(me.body).toMatchObject({
-        user: { telegram_id: USER },
+        user: { telegram_id: NEW_USER },
         session: { kind: 'miniapp' },
       });
       await http().get('/user/me').set(auth).expect(200);
 
-      const row = await ctx.knex('user_session').first();
+      // A returning user is registered
+      const again = await http()
+        .post('/auth/telegram/miniapp')
+        .send({ initData })
+        .expect(200);
+      expect(again.body.isRegistered).toBe(true);
+
+      const row = await ctx
+        .knex('user_session')
+        .where({ user_id: NEW_USER })
+        .orderBy('created_at')
+        .first();
       expect(row.kind).toBe('miniapp');
       // only the hash is stored
       expect(Buffer.from(row.token_hash).toString('base64url')).not.toBe(
@@ -143,20 +158,19 @@ describe('User sessions (e2e)', () => {
         .expect(200);
     });
 
-    it(`rate-limits the exchange (${AUTH_RATE_LIMIT_PER_MINUTE}/min per IP) but never /auth/me`, async () => {
-      const { token } = await miniAppLogin();
-      for (let i = 1; i < AUTH_RATE_LIMIT_PER_MINUTE; i++) {
-        await http()
-          .post('/auth/telegram/miniapp')
-          .send({ initData: 'x' })
-          .expect(401);
+    it(`rate-limits each Telegram user (${AUTH_RATE_LIMITS.miniappUser}/min), not a shared IP, and never /auth/me`, async () => {
+      let token = '';
+      for (let i = 0; i < AUTH_RATE_LIMITS.miniappUser; i++) {
+        token = (await miniAppLogin()).token;
       }
       const limited = await http()
         .post('/auth/telegram/miniapp')
         .send({ initData: signedInitData() })
         .expect(429);
       expect(limited.body.code).toBe('rate_limited');
-      for (let i = 0; i < AUTH_RATE_LIMIT_PER_MINUTE + 5; i++) {
+      // Same IP, another user: still fine
+      await miniAppLogin('100000777');
+      for (let i = 0; i < 30; i++) {
         await http()
           .get('/auth/me')
           .set('Authorization', `Bearer ${token}`)
@@ -259,6 +273,7 @@ describe('User sessions (e2e)', () => {
         '/api/v1/init',
         { kind: 'idToken', value: 'tg.id.token' },
         { referral_code: 'PROMO2024' },
+        LOGIN_INIT_TIMEOUT_MS,
       );
 
       const sid = cookieFrom(res, 'sid');
@@ -325,6 +340,30 @@ describe('User sessions (e2e)', () => {
       );
       expect(cookieFrom(noId, 'sid')).toBeUndefined();
       expect(ctx.p2pBot.request).not.toHaveBeenCalled();
+    });
+
+    it('a rate-limited start goes back to the login page, not a JSON 429', async () => {
+      for (let i = 0; i < AUTH_RATE_LIMITS.start; i++) await startLogin();
+      const res = await http().get('/auth/telegram/start').expect(302);
+      expect(res.headers.location).toBe(`${APP}/?login_error=rate_limited`);
+    });
+
+    it("logging in again ends the browser's previous session", async () => {
+      const first = await startLogin();
+      mockTelegram();
+      const one = await http()
+        .get('/auth/telegram/callback')
+        .query({ code: 'c', state: first.url.searchParams.get('state') })
+        .set('Cookie', first.attempt!)
+        .expect(302);
+      const oldSid = cookieFrom(one, 'sid')!;
+      const second = await startLogin();
+      await http()
+        .get('/auth/telegram/callback')
+        .query({ code: 'c', state: second.url.searchParams.get('state') })
+        .set('Cookie', [second.attempt!, oldSid])
+        .expect(302);
+      await http().get('/auth/me').set('Cookie', oldSid).expect(401);
     });
 
     it('never returns to another site', async () => {
@@ -404,7 +443,8 @@ describe('User sessions (e2e)', () => {
         .post('/auth/logout-all')
         .set('Authorization', `Bearer ${a.token}`)
         .expect(200);
-      expect(res.body.revoked).toBe(3);
+      // two Mini App logins + the web session + resetData's fixture session
+      expect(res.body.revoked).toBe(4);
       await http()
         .get('/auth/me')
         .set('Authorization', `Bearer ${b.token}`)
@@ -423,10 +463,27 @@ describe('User sessions (e2e)', () => {
         .expect(401);
     });
 
+    it('legacy JWTs can read but never move sats (403 relogin_required)', async () => {
+      const legacy = { Authorization: `Bearer ${ctx.legacyTokenFor(USER)}` };
+      await http().get('/user/me').set(legacy).expect(200);
+      const me = await http().get('/p2p/me').set(legacy).expect(403);
+      expect(me.body.code).toBe('relogin_required');
+      await http()
+        .post('/p2p/send')
+        .set(legacy)
+        .send({
+          to_telegram_id: 100000002,
+          amount: 1000,
+          idempotency_key: 'a1b2c3d4-e5f6',
+        })
+        .expect(403);
+      expect(ctx.p2pBot.request).not.toHaveBeenCalled();
+    });
+
     it('legacy JWTs still work; legacy logins answer 410 once LEGACY_JWT_ISSUE=false', async () => {
       await http()
         .get('/auth/me')
-        .set('Authorization', `Bearer ${ctx.tokenFor(USER)}`)
+        .set('Authorization', `Bearer ${ctx.legacyTokenFor(USER)}`)
         .expect(200);
       process.env.LEGACY_JWT_ISSUE = 'false';
       await http()
@@ -439,7 +496,7 @@ describe('User sessions (e2e)', () => {
         .expect(410);
       await http()
         .get('/auth/me')
-        .set('Authorization', `Bearer ${ctx.tokenFor(USER)}`)
+        .set('Authorization', `Bearer ${ctx.legacyTokenFor(USER)}`)
         .expect(200);
     });
   });

@@ -26,7 +26,7 @@ import {
   ConditionalAuthGuard,
   type RequestWithUser,
 } from './conditional-auth.guard';
-import { AuthRateLimit, AuthRateLimitGuard } from './auth-rate-limit.guard';
+import { AuthRateLimiter, AuthRateLimitedError } from './auth-rate-limiter';
 import {
   LOGIN_ATTEMPT_TTL_MS,
   LoginError,
@@ -79,19 +79,20 @@ export class AuthController {
     private readonly sessions: SessionService,
     private readonly oidc: TelegramOidcService,
     private readonly p2p: P2pService,
+    private readonly rateLimiter: AuthRateLimiter,
   ) {}
 
   // ---- Web: Log In with Telegram (OIDC redirect + PKCE) ----
 
   @Get('telegram/start')
-  @UseGuards(AuthRateLimitGuard)
-  @AuthRateLimit('start')
   async telegramStart(
     @Query('return_to') returnTo: unknown,
     @Query('ref') ref: unknown,
+    @Req() req: Request,
     @Res() res: Response,
   ): Promise<void> {
     try {
+      await this.rateLimiter.hit('start', clientIp(req));
       const { attemptId, url } = await this.oidc.start({
         returnTo,
         referralCode: ref,
@@ -108,8 +109,6 @@ export class AuthController {
   }
 
   @Get('telegram/callback')
-  @UseGuards(AuthRateLimitGuard)
-  @AuthRateLimit('callback')
   async telegramCallback(
     @Query('code') code: unknown,
     @Query('state') state: unknown,
@@ -120,6 +119,7 @@ export class AuthController {
     const attemptId = readCookie(req, attemptCookieName());
     res.clearCookie(attemptCookieName(), cookieOptions());
     try {
+      await this.rateLimiter.hit('callback', clientIp(req));
       const login = await this.oidc.callback({ attemptId, code, state, error });
       const { claims } = login;
       const telegramId = claims.id;
@@ -135,6 +135,11 @@ export class AuthController {
         { kind: 'idToken', value: login.idToken },
         login.referralCode,
       );
+
+      // This browser's previous session (logging in again, maybe as another
+      // account) ends here instead of idling out
+      const previous = readCookie(req, sessionCookieName());
+      if (previous) await this.sessions.revokeToken(previous);
 
       const session = await this.sessions.create(telegramId, 'web', {
         userAgent: req.header('user-agent'),
@@ -155,15 +160,15 @@ export class AuthController {
   // ---- Mini App: initData exchanged once at launch ----
 
   @Post('telegram/miniapp')
-  @UseGuards(AuthRateLimitGuard)
-  @AuthRateLimit('miniapp')
   @HttpCode(HttpStatus.OK)
   async telegramMiniApp(
     @Body() body: TelegramMiniAppLoginDto,
     @Req() req: Request,
   ) {
+    await this.rateLimiter.hit('miniapp', clientIp(req));
     const userData = this.verifiedMiniAppUser(body.initData);
     const telegramId = userData.id.toString();
+    await this.rateLimiter.hit('miniappUser', telegramId);
     const isRegistered = await this.userService.userExists(telegramId);
 
     await this.userService.upsertTelegramUser({
@@ -329,8 +334,15 @@ export class AuthController {
   }
 
   private loginFailed(res: Response, error: unknown): void {
-    const code = error instanceof LoginError ? error.code : 'exchange_failed';
-    if (!(error instanceof LoginError)) {
+    const code =
+      error instanceof LoginError
+        ? error.code
+        : error instanceof AuthRateLimitedError
+          ? 'rate_limited'
+          : 'exchange_failed';
+    if (
+      !(error instanceof LoginError || error instanceof AuthRateLimitedError)
+    ) {
       this.logger.error(`Web login failed: ${errorMessage(error)}`);
     }
     res.redirect(
@@ -368,3 +380,5 @@ export class AuthController {
     };
   }
 }
+
+const clientIp = (req: Request): string => req.ip ?? 'unknown';

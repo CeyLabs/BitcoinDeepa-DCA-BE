@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
+import { SessionRequiredGuard } from '../auth/session-required.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { P2pEnabledGuard } from '../../common/p2p-enabled';
@@ -21,11 +22,12 @@ import { TransferIdPipe } from './transfer-id.pipe';
 /**
  * Send sats from the user's own bot wallet to another bot user (relayed to
  * the bot's /api/v1/p2p). Our session names the user; no Telegram credential
- * is needed after login. 401 relogin_required means the bot hasn't linked the
- * user (log in again), then retry with the same idempotency_key.
+ * is needed after login. 403 relogin_required means the bot hasn't linked the
+ * user, or this is a legacy JWT (log in again), then retry with the same
+ * idempotency_key. 401 is only ever our own session.
  */
 @Controller('p2p')
-@UseGuards(P2pEnabledGuard, ConditionalAuthGuard)
+@UseGuards(P2pEnabledGuard, ConditionalAuthGuard, SessionRequiredGuard)
 export class P2pController {
   constructor(private readonly p2p: P2pService) {}
 

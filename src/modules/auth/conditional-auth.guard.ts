@@ -14,6 +14,7 @@ import { appOrigins, readCookie, sessionCookieName } from './cookies';
 import { errorMessage } from '../../common/error-message';
 
 export interface RequestWithUser extends Request {
+  /** sessionKind 'legacy' = a pre-session 7-day JWT (SessionRequiredGuard) */
   user: JwtPayload & { sessionId?: string; sessionKind?: string };
 }
 
@@ -85,7 +86,7 @@ export class ConditionalAuthGuard implements CanActivate {
     // Legacy 7-day JWT (issued before sessions); removed once they expired
     try {
       const { id, username } = this.jwtService.verify<JwtPayload>(token);
-      return { id, username };
+      return { id, username, sessionKind: 'legacy' };
     } catch (error) {
       this.logger.debug(`Legacy JWT rejected: ${errorMessage(error)}`);
       return null;

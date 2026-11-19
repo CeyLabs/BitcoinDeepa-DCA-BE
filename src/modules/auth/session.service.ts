@@ -147,6 +147,15 @@ export class SessionService {
       .update({ revoked_at: new Date() });
   }
 
+  /** End the session a token names, if any (a browser logging in again) */
+  async revokeToken(token: string): Promise<void> {
+    if (!looksLikeSessionToken(token)) return;
+    await this.knex('user_session')
+      .where({ token_hash: hashToken(token) })
+      .whereNull('revoked_at')
+      .update({ revoked_at: new Date() });
+  }
+
   /** Every session of the user (all devices); returns how many */
   async revokeAllForUser(userId: string): Promise<number> {
     return this.knex('user_session')

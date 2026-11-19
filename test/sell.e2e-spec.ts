@@ -715,7 +715,7 @@ describe('Sell flow (e2e)', () => {
           );
         });
 
-        it('a user the bot has not linked gets 401 relogin_required', async () => {
+        it('a user the bot has not linked gets 403 relogin_required', async () => {
           const { q } = await confirmPending();
           ctx.p2pBot.request.mockResolvedValue({
             status: 403,
@@ -723,7 +723,7 @@ describe('Sell flow (e2e)', () => {
           });
           const res = await asUser(ctx, USER)
             .post(`/sell/orders/${q.id}/pay`)
-            .expect(401);
+            .expect(403);
           expect(res.body.code).toBe('relogin_required');
         });
 

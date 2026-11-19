@@ -5,6 +5,7 @@ import { AuthService } from './auth.service';
 import { ConditionalAuthGuard } from './conditional-auth.guard';
 import { AdminKeyGuard } from './admin-key.guard';
 import { SessionService } from './session.service';
+import { SessionRequiredGuard } from './session-required.guard';
 import { UserModule } from '../user/user.module';
 
 /**
@@ -24,13 +25,20 @@ import { UserModule } from '../user/user.module';
     }),
     forwardRef(() => UserModule),
   ],
-  providers: [AuthService, ConditionalAuthGuard, AdminKeyGuard, SessionService],
+  providers: [
+    AuthService,
+    ConditionalAuthGuard,
+    AdminKeyGuard,
+    SessionService,
+    SessionRequiredGuard,
+  ],
   exports: [
     AuthService,
     ConditionalAuthGuard,
     AdminKeyGuard,
     JwtModule,
     SessionService,
+    SessionRequiredGuard,
   ],
 })
 export class AuthModule {}

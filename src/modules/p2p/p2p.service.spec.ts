@@ -1,6 +1,6 @@
 import { HttpException } from '@nestjs/common';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
-import { P2pService } from './p2p.service';
+import { LOGIN_INIT_TIMEOUT_MS, P2pService } from './p2p.service';
 import type { P2pBotClient } from './p2p-bot.client';
 import type { RedisService } from '../redis/redis.service';
 import type { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
@@ -169,13 +169,13 @@ describe('P2pService', () => {
     },
   );
 
-  it('a user the bot has not linked (403 login_required) becomes our 401 relogin_required', async () => {
+  it('a user the bot has not linked (403 login_required) becomes our 403 relogin_required (not a sign-out 401)', async () => {
     bot.request.mockResolvedValue({
       status: 403,
       body: { code: 'login_required', message: 'Log in first.' },
     });
     expect(await errorOf(send())).toMatchObject({
-      status: 401,
+      status: 403,
       body: { code: 'relogin_required' },
     });
     expect(telegramLogger.logAlert).not.toHaveBeenCalled();
@@ -276,6 +276,7 @@ describe('P2pService', () => {
       '/api/v1/init',
       credential,
       { referral_code: 'PROMO2024' },
+      LOGIN_INIT_TIMEOUT_MS,
     );
     expect(redis.del).toHaveBeenCalledWith(
       CacheKeys.transaction.dcaSummary('42'),

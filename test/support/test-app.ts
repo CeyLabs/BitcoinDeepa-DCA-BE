@@ -21,6 +21,7 @@ import { R2StorageService } from '../../src/modules/storage/r2-storage.service';
 import { CoinMarketCapService } from '../../src/modules/coinmarketcap/coinmarketcap.service';
 import { P2pBotClient } from '../../src/modules/p2p/p2p-bot.client';
 import { TelegramLoggerService } from '../../src/modules/telegram-logger/telegram-logger.service';
+import { hashToken } from '../../src/modules/auth/session.service';
 
 /**
  * Fixed market data so satoshi amounts are deterministic: Ceylon Cash BTC/USD
@@ -40,6 +41,11 @@ export const PACKAGE_WEEKLY = '00000000-0000-0000-0000-000000000001';
 export const PACKAGE_MONTHLY = '00000000-0000-0000-0000-000000000004';
 export const USER = '100000001';
 export const OTHER_USER = '100000002';
+
+/** Fixture users get a real session in resetData; this is its fixed token */
+export const sessionTokenFor = (userId: string): string =>
+  createHash('sha256').update(`test-session:${userId}`).digest('base64url');
+const FIXTURE_USERS = [USER, OTHER_USER];
 
 export interface TestContext {
   app: INestApplication;
@@ -80,7 +86,13 @@ export interface TestContext {
   /** PayHere's payment lookup used by settlement (see below) */
   payHerePayments: jest.SpyInstance;
   payHereOrderPayments: jest.SpyInstance;
+  /**
+   * A Bearer token for the user: the fixture users' real session (from
+   * resetData), any other id a legacy 7-day JWT (no wallet routes)
+   */
   tokenFor: (userId: string) => string;
+  /** A legacy 7-day JWT (pre-session), for legacy-path tests */
+  legacyTokenFor: (userId: string) => string;
   close: () => Promise<void>;
 }
 
@@ -227,7 +239,12 @@ export async function createTestApp(): Promise<TestContext> {
     payHereCancel,
     payHerePayments,
     payHereOrderPayments,
-    tokenFor: (userId) => jwt.sign({ id: userId, username: `u${userId}` }),
+    tokenFor: (userId) =>
+      FIXTURE_USERS.includes(userId)
+        ? sessionTokenFor(userId)
+        : jwt.sign({ id: userId, username: `u${userId}` }),
+    legacyTokenFor: (userId) =>
+      jwt.sign({ id: userId, username: `u${userId}` }),
     close: () => app.close(),
   };
 }
@@ -278,6 +295,16 @@ export async function resetData(ctx: TestContext): Promise<void> {
       kyc_status: 'NOT_STARTED',
     },
   ]);
+  const day = 24 * 60 * 60 * 1000;
+  await knex('user_session').insert(
+    FIXTURE_USERS.map((id) => ({
+      user_id: id,
+      token_hash: hashToken(sessionTokenFor(id)),
+      kind: 'miniapp',
+      idle_expires_at: new Date(Date.now() + day),
+      absolute_expires_at: new Date(Date.now() + 7 * day),
+    })),
+  );
   await app.get(RedisService).delByPattern('dca:*');
   jest.clearAllMocks();
   resetSellMocks(ctx);

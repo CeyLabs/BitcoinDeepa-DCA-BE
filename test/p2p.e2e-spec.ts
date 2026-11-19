@@ -107,7 +107,7 @@ describe('P2P sends (e2e)', () => {
     );
   });
 
-  it('a user the bot has not linked gets 401 relogin_required (log in again)', async () => {
+  it('a user the bot has not linked gets 403 relogin_required (log in again)', async () => {
     ctx.p2pBot.request.mockResolvedValue({
       status: 403,
       body: { code: 'login_required', message: 'Log in first.' },
@@ -116,7 +116,7 @@ describe('P2P sends (e2e)', () => {
       .post('/p2p/send')
       .set(auth())
       .send(sendBody)
-      .expect(401);
+      .expect(403);
     expect(res.body.code).toBe('relogin_required');
   });
 

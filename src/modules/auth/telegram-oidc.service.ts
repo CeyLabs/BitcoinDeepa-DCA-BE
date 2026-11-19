@@ -23,7 +23,8 @@ export type LoginErrorCode =
   | 'cancelled'
   | 'bad_state'
   | 'attempt_expired'
-  | 'exchange_failed';
+  | 'exchange_failed'
+  | 'rate_limited';
 
 export class LoginError extends Error {
   constructor(readonly code: LoginErrorCode) {

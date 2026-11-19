@@ -171,10 +171,12 @@ class EnvironmentVariables {
   TELEGRAM_OIDC_SCOPE?: string;
 
   // Express "trust proxy": hops in front of us (Railway's edge), so req.ip is
-  // the real client for rate limits. A number
-  // of hops, or a comma-separated list of proxy IPs/CIDRs. Unset = trust none.
-  @IsOptional()
+  // the real client for the login rate limits. A number of hops, or a
+  // comma-separated list of proxy IPs/CIDRs. Required in production: unset,
+  // every client looks like the proxy and shares one limit.
+  @ValidateIf(isProduction)
   @IsString()
+  @IsNotEmpty()
   TRUST_PROXY?: string;
 
   @ValidateIf(isProduction)

@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
+import { SessionRequiredGuard } from '../auth/session-required.guard';
 import { KycVerifiedGuard } from '../auth/kyc-verified.guard';
 import { RequireKyc } from '../auth/require-kyc.decorator';
 import { CurrentUser } from '../auth/user.decorator';
@@ -88,7 +89,7 @@ export class SellController {
    * without this.
    */
   @Post('orders/:id/pay')
-  @UseGuards(P2pEnabledGuard, ConditionalAuthGuard)
+  @UseGuards(P2pEnabledGuard, ConditionalAuthGuard, SessionRequiredGuard)
   @HttpCode(HttpStatus.OK)
   pay(
     @CurrentUser() user: JwtPayload,

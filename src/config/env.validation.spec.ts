@@ -32,6 +32,7 @@ const prodSecrets = {
   APP_URL: 'https://app.example.com',
   TELEGRAM_OIDC_CLIENT_ID: '8219648988',
   TELEGRAM_OIDC_CLIENT_SECRET: 'oidc-secret',
+  TRUST_PROXY: '1',
 };
 
 describe('validateEnv', () => {
@@ -97,11 +98,12 @@ describe('validateEnv', () => {
     }
   });
 
-  it('requires the app URL and Log In with Telegram in production', () => {
+  it('requires the app URL, Log In with Telegram and TRUST_PROXY in production', () => {
     for (const name of [
       'APP_URL',
       'TELEGRAM_OIDC_CLIENT_ID',
       'TELEGRAM_OIDC_CLIENT_SECRET',
+      'TRUST_PROXY',
     ]) {
       expect(() =>
         validateEnv({
