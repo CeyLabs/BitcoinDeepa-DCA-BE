@@ -1,12 +1,18 @@
 #!/bin/bash
 
-# BitcoinDeepa Fund Transfer Test Script
-# Usage: ./test-fund-transfer.sh <amount_in_sats> <telegram_id> <memo>
+# BitcoinDeepa Fund Transfer Test Script (Ed25519-signed, see the bot's
+# dca-backend-integration.md §3)
+# Usage: ./test-fund-transfer.sh <amount_in_sats> <telegram_id> [memo]
 # Example: ./test-fund-transfer.sh 3653 7551840633 "Test transfer"
+#
+# Needs BITCOINDEEPA_API_URL, BITCOINDEEPA_WALLET_ID and the private key, either
+# BITCOINDEEPA_SEND_PRIVATE_KEY_FILE (path to the PEM) or
+# BITCOINDEEPA_SEND_PRIVATE_KEY_PEM (PEM text, multi-line or with literal \n).
+# DRY_RUN=1 prints the signed request without sending it.
+# Requires OpenSSL 3+ (pkeyutl -rawin for Ed25519).
 
-set -e
+set -euo pipefail
 
-# Check arguments
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 <amount_in_sats> <telegram_id> [memo]"
     echo "Example: $0 3653 7551840633 'Test transfer'"
@@ -17,92 +23,86 @@ AMOUNT=$1
 TELEGRAM_ID=$2
 MEMO="${3:-Test DCA transfer}"
 
-# Load environment variables from .env file
+# Load .env (set -a keeps quoted multi-line values intact)
 if [ -f .env ]; then
-    export $(cat .env | grep -v '^#' | grep -v '^$' | xargs)
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
 fi
 
-# Check required environment variables
-if [ -z "$BITCOINDEEPA_API_URL" ]; then
-    echo "Error: BITCOINDEEPA_API_URL not set"
-    exit 1
+: "${BITCOINDEEPA_API_URL:?BITCOINDEEPA_API_URL not set}"
+: "${BITCOINDEEPA_WALLET_ID:?BITCOINDEEPA_WALLET_ID not set}"
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+KEY_FILE="${BITCOINDEEPA_SEND_PRIVATE_KEY_FILE:-}"
+if [ -z "$KEY_FILE" ]; then
+    : "${BITCOINDEEPA_SEND_PRIVATE_KEY_PEM:?Set BITCOINDEEPA_SEND_PRIVATE_KEY_FILE or BITCOINDEEPA_SEND_PRIVATE_KEY_PEM}"
+    KEY_FILE="$TMP_DIR/key.pem"
+    printf '%b\n' "${BITCOINDEEPA_SEND_PRIVATE_KEY_PEM}" > "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
 fi
 
-if [ -z "$BITCOINDEEPA_HMAC_SECRET" ]; then
-    echo "Error: BITCOINDEEPA_HMAC_SECRET not set"
-    exit 1
-fi
-
-API_URL="$BITCOINDEEPA_API_URL"
-HMAC_SECRET="$BITCOINDEEPA_HMAC_SECRET"
 ENDPOINT="/api/v1/send"
-HTTP_METHOD="POST"
+METHOD="POST"
 TIMESTAMP=$(date +%s)
+NONCE=$(openssl rand -hex 16)
 
-# Build request body
-REQUEST_BODY=$(cat <<EOF
-{"amount":${AMOUNT},"to":"${TELEGRAM_ID}","memo":"${MEMO}"}
-EOF
-)
+# Serialize once: these exact bytes are hashed, signed and sent
+REQUEST_BODY=$(printf '{"amount":%s,"to":"%s","memo":"%s"}' "$AMOUNT" "$TELEGRAM_ID" "$MEMO")
+BODY_HASH=$(printf '%s' "$REQUEST_BODY" | openssl dgst -sha256 -r | cut -d' ' -f1)
+
+# BDB-SEND-ED25519-V1 \n METHOD \n PATH \n QUERY (empty) \n TS \n NONCE \n sha256hex(body)
+printf 'BDB-SEND-ED25519-V1\n%s\n%s\n\n%s\n%s\n%s' \
+    "$METHOD" "$ENDPOINT" "$TIMESTAMP" "$NONCE" "$BODY_HASH" > "$TMP_DIR/message"
+SIGNATURE=$(openssl pkeyutl -sign -inkey "$KEY_FILE" -rawin -in "$TMP_DIR/message" | openssl base64 -A)
 
 echo "========================================="
 echo "BitcoinDeepa Fund Transfer Test"
 echo "========================================="
-echo "API URL:     ${API_URL}${ENDPOINT}"
-echo "Amount:      ${AMOUNT} satoshis"
-echo "To User:     ${TELEGRAM_ID}"
-echo "Memo:        ${MEMO}"
-echo "Timestamp:   ${TIMESTAMP}"
+echo "API URL:      ${BITCOINDEEPA_API_URL}${ENDPOINT}"
+echo "Wallet ID:    ${BITCOINDEEPA_WALLET_ID}"
+echo "Amount:       ${AMOUNT} satoshis"
+echo "To User:      ${TELEGRAM_ID}"
+echo "Memo:         ${MEMO}"
+echo "Timestamp:    ${TIMESTAMP}"
+echo "Nonce:        ${NONCE}"
 echo "Request Body: ${REQUEST_BODY}"
+echo "Signature:    ${SIGNATURE}"
 echo "========================================="
 
-# Generate HMAC signature
-# Message format: METHOD + PATH + TIMESTAMP + BODY
-MESSAGE="${HTTP_METHOD}${ENDPOINT}${TIMESTAMP}${REQUEST_BODY}"
-SIGNATURE=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$HMAC_SECRET" | sed 's/^.* //')
+if [ "${DRY_RUN:-}" = "1" ]; then
+    echo "DRY_RUN=1: not sent"
+    exit 0
+fi
 
-echo "HMAC Message: ${MESSAGE}"
-echo "HMAC Signature: ${SIGNATURE}"
-echo "========================================="
-echo ""
-
-# Make API request
 echo "Sending request..."
-echo ""
-
-RESPONSE=$(curl -X POST "${API_URL}${ENDPOINT}" \
+RESPONSE=$(curl -s -X POST "${BITCOINDEEPA_API_URL}${ENDPOINT}" \
     -H "Content-Type: application/json" \
-    -H "X-HMAC-Signature: ${SIGNATURE}" \
+    -H "X-Wallet-ID: ${BITCOINDEEPA_WALLET_ID}" \
     -H "X-Timestamp: ${TIMESTAMP}" \
-    -d "${REQUEST_BODY}" \
-    -w "\nHTTP_STATUS_CODE:%{http_code}" \
-    -s)
+    -H "X-Nonce: ${NONCE}" \
+    -H "X-Signature: ${SIGNATURE}" \
+    --data-binary "${REQUEST_BODY}" \
+    --max-time 100 \
+    -w "\nHTTP_STATUS_CODE:%{http_code}")
 
-# Extract HTTP status code
 HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_STATUS_CODE" | cut -d':' -f2)
 BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS_CODE/d')
 
 echo "========================================="
-echo "Response:"
-echo "========================================="
 echo "HTTP Status: ${HTTP_CODE}"
-echo "Body: ${BODY}"
+if command -v jq &> /dev/null; then
+    echo "$BODY" | jq '.' 2>/dev/null || echo "$BODY"
+else
+    echo "$BODY"
+fi
 echo "========================================="
 
-# Pretty print JSON if jq is available
-if command -v jq &> /dev/null; then
-    echo ""
-    echo "Formatted Response:"
-    echo "$BODY" | jq '.' 2>/dev/null || echo "$BODY"
-fi
-
-# Check if successful
-if [ "$HTTP_CODE" = "200" ]; then
-    echo ""
-    echo "✅ Transfer successful!"
-    exit 0
-else
-    echo ""
-    echo "❌ Transfer failed with status ${HTTP_CODE}"
-    exit 1
-fi
+case "$HTTP_CODE" in
+    200) echo "✅ Transfer successful"; exit 0 ;;
+    202) echo "⏳ Accepted, not done yet (awaiting approval or invoice routing)"; exit 0 ;;
+    *)   echo "❌ Transfer failed with status ${HTTP_CODE}"; exit 1 ;;
+esac

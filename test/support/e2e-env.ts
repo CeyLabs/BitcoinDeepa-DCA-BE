@@ -86,7 +86,6 @@ Object.assign(process.env, {
   PAYHERE_FEE_BASIS_POINTS: '100',
   BITCOINDEEPA_FEE_BASIS_POINTS: '100',
   BITCOINDEEPA_API_URL: '',
-  BITCOINDEEPA_HMAC_SECRET: '',
   DIDIT_API_KEY: 'test-didit-key',
   DIDIT_WORKFLOW_ID: 'test-workflow',
   DIDIT_WEBHOOK_SECRET: 'test-didit-secret',
