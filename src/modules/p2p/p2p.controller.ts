@@ -46,11 +46,10 @@ export class P2pController {
   @HttpCode(HttpStatus.OK)
   async resolve(
     @CurrentUser() user: JwtPayload,
-    @Headers('x-telegram-init-data') initData: string | undefined,
     @Body() dto: P2pResolveDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return reply(res, await this.p2p.resolveRecipient(user.id, initData, dto));
+    return reply(res, await this.p2p.resolveRecipient(user.id, dto));
   }
 
   /** 200 when final (completed/failed), 202 while it's still going */

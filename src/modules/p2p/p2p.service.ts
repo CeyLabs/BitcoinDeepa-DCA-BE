@@ -16,6 +16,13 @@ import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { errorMessage } from '../../common/error-message';
+import { UserService } from '../user/user.service';
+import {
+  maskDisplayName,
+  normalizeUsername,
+  USERNAME_PATTERN,
+  USERNAME_RULE,
+} from '../user/username';
 
 const P2P_PATH = '/api/v1/p2p';
 /** Creates the user's bot wallet; not under /p2p but signed the same way */
@@ -59,6 +66,7 @@ export class P2pService {
     private readonly credentials: P2pCredentialService,
     private readonly redis: RedisService,
     private readonly telegramLogger: TelegramLoggerService,
+    private readonly users: UserService,
   ) {}
 
   async me(userId: string, initData?: string): Promise<P2pResult> {
@@ -113,19 +121,51 @@ export class P2pService {
     return result;
   }
 
+  /**
+   * Finds a member by their Bitcoin Deepa @username in our DB (not the bot,
+   * and not Telegram usernames). The send then goes to their Telegram id,
+   * which is our user id. 404 recipient_not_found, 400 invalid_username /
+   * cannot_send_to_self.
+   */
   async resolveRecipient(
     userId: string,
-    initData: string | undefined,
     dto: P2pResolveDto,
   ): Promise<P2pResult> {
-    const { credential } = await this.credentials.resolve(
-      userId,
-      initData,
-      'read',
-    );
-    return this.call('POST', `${P2P_PATH}/resolve`, credential, 'read', {
-      to: dto.to,
-    });
+    const username = normalizeUsername(dto.to) as string;
+    if (!USERNAME_PATTERN.test(username)) {
+      throw new HttpException(
+        { code: 'invalid_username', message: USERNAME_RULE },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const user = await this.users.getUserByUsername(username);
+    if (!user) {
+      throw new HttpException(
+        {
+          code: 'recipient_not_found',
+          message: `No one has @${username} on Bitcoin Deepa`,
+        },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    if (user.id === userId) {
+      throw new HttpException(
+        { code: 'cannot_send_to_self', message: "That's your own username" },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    return {
+      status: HttpStatus.OK,
+      body: {
+        telegram_id: Number(user.id),
+        username,
+        name: maskDisplayName(
+          user.kyc_full_name ||
+            [user.first_name, user.last_name].filter(Boolean).join(' '),
+        ),
+        avatar_seed: user.avatar_seed ?? null,
+      },
+    };
   }
 
   async send(

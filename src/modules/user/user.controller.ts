@@ -6,6 +6,7 @@ import {
   Get,
   Param,
   Patch,
+  Query,
   UsePipes,
   ValidationPipe,
   HttpException,
@@ -17,6 +18,7 @@ import { JwtPayload } from '../auth/auth.service';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { SetAvatarDto } from './dto/set-avatar.dto';
+import { ClaimUsernameDto, UsernameQueryDto } from './dto/claim-username.dto';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { DiditService } from '../didit/didit.service';
 import { KycStatus } from './enums/kyc-status.enum';
@@ -75,6 +77,27 @@ export class UserController {
   async setAvatar(@CurrentUser() user: JwtPayload, @Body() body: SetAvatarDto) {
     await this.userService.getUserOrThrow(user.id);
     await this.userService.setAvatarSeed(user.id, body.seed);
+    return this.getMe(user);
+  }
+
+  /** Whether a username can be claimed, and if not why (for the hint while typing) */
+  @Get('username/availability')
+  @UseGuards(ConditionalAuthGuard)
+  async usernameAvailability(@Query() query: UsernameQueryDto) {
+    const reason = await this.userService.usernameUnavailableReason(
+      query.username,
+    );
+    return { username: query.username, available: !reason, reason };
+  }
+
+  /** Claim the user's Bitcoin Deepa @username (once, permanent). Returns the profile like GET /user/me. */
+  @Post('username')
+  @UseGuards(ConditionalAuthGuard)
+  async claimUsername(
+    @CurrentUser() user: JwtPayload,
+    @Body() body: ClaimUsernameDto,
+  ) {
+    await this.userService.claimUsername(user.id, body.username);
     return this.getMe(user);
   }
 

@@ -14,7 +14,7 @@ import {
 // a 400, and unknown fields with invalid_json, so only these are forwarded.
 
 export class P2pResolveDto {
-  /** @username, username or a numeric Telegram ID */
+  /** A Bitcoin Deepa @username ("@" optional, any case) */
   @IsString()
   @Length(1, 64)
   to!: string;

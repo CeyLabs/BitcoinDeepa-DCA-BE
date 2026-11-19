@@ -1394,6 +1394,45 @@ export class TransactionService {
   private static readonly SETTLEMENT_REF = /\(Ref: ([^)]+)\)$/;
 
   /**
+   * Adds the other party's Bitcoin Deepa @username and avatar seed to each
+   * bot-history row (null when they haven't claimed one or aren't a member),
+   * so the app labels transfers with our usernames, not Telegram's.
+   */
+  async markCounterparties<
+    T extends { direction: string; from_id: number; to_id: number },
+  >(
+    rows: T[],
+  ): Promise<
+    (T & {
+      counterparty_username: string | null;
+      counterparty_avatar_seed: string | null;
+    })[]
+  > {
+    const other = (row: T) =>
+      String(row.direction === 'outgoing' ? row.to_id : row.from_id);
+    const ids = [...new Set(rows.map(other))];
+    const members =
+      ids.length === 0
+        ? []
+        : await this.knexService
+            .knex('user')
+            .whereIn('id', ids)
+            .whereNotNull('username')
+            .select<
+              { id: string; username: string; avatar_seed: string | null }[]
+            >('id', 'username', 'avatar_seed');
+    const byId = new Map(members.map((m) => [m.id, m]));
+    return rows.map((row) => {
+      const m = byId.get(other(row));
+      return {
+        ...row,
+        counterparty_username: m?.username ?? null,
+        counterparty_avatar_seed: m?.avatar_seed ?? null,
+      };
+    });
+  }
+
+  /**
    * Marks the bot-history rows that are a sale's payment (the user's approved
    * collect request), so the app shows that sale once. Matched against the
    * user's own sell orders whose sats left their wallet, by

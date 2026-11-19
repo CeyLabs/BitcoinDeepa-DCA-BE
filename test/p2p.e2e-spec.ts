@@ -183,10 +183,10 @@ describe('P2P sends (e2e)', () => {
       body: { code: 'recipient_not_found', message: 'No such user.' },
     });
     const notFound = await http()
-      .post('/p2p/resolve')
+      .post('/p2p/send')
       .set(auth())
       .set('X-Telegram-Init-Data', initData())
-      .send({ to: '@nobody' })
+      .send(sendBody)
       .expect(404);
     expect(notFound.body).toEqual({
       code: 'recipient_not_found',

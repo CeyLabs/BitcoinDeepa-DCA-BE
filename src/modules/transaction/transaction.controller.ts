@@ -180,11 +180,13 @@ export class TransactionController {
     }
     return {
       ...history,
-      transactions: await this.transactionService.markSalePayments(
-        user.id,
-        await this.transactionService.markPurchaseSettlements(
+      transactions: await this.transactionService.markCounterparties(
+        await this.transactionService.markSalePayments(
           user.id,
-          history.transactions,
+          await this.transactionService.markPurchaseSettlements(
+            user.id,
+            history.transactions,
+          ),
         ),
       ),
     };
