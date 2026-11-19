@@ -555,4 +555,97 @@ describe('One-time buy (e2e)', () => {
       });
     });
   });
+
+  describe('bot history', () => {
+    const botRow = (id: number, memo: string, direction = 'incoming') => ({
+      id,
+      time: '2026-11-19T12:00:00Z',
+      direction,
+      from_id: 1,
+      to_id: Number(USER),
+      type: 'transfer',
+      amount: 1000,
+      amount_lkr: '200.00',
+      memo,
+      success: true,
+    });
+
+    it("marks only the transfers that settled the user's own successful purchases", async () => {
+      const own = await newBuy(1000);
+      await notify({
+        order_id: own.order_id,
+        payment_id: 'B1',
+        payhere_amount: own.amount,
+      }).expect(200);
+      const back = await newBuy(1000);
+      await notify({
+        order_id: back.order_id,
+        payment_id: 'B2',
+        payhere_amount: back.amount,
+      }).expect(200);
+      await ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'B2' })
+        .update({ status: 'CHARGEBACK' });
+      // someone else's payment
+      const other = await newBuy(1000);
+      await notify({
+        order_id: other.order_id,
+        payment_id: 'B3',
+        payhere_amount: other.amount,
+      }).expect(200);
+      await ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'B3' })
+        .update({ user_id: OTHER_USER });
+
+      ctx.bitcoinDeepa.getUserTransactions.mockResolvedValueOnce({
+        success: true,
+        count: 6,
+        limit: 50,
+        offset: 0,
+        transactions: [
+          botRow(1, 'One-time BTC purchase (Ref: B1)'),
+          botRow(2, 'One-time BTC purchase (Ref: B2)'), // charged back
+          botRow(3, 'DCA purchase (Ref: B3)'), // someone else's payment
+          botRow(4, 'One-time BTC purchase (Ref: B1)', 'outgoing'),
+          botRow(5, 'lunch'),
+          { ...botRow(6, ''), memo: undefined },
+        ],
+      });
+
+      const res = await http()
+        .get('/transaction/bot-history?limit=50&offset=0')
+        .set(auth())
+        .expect(200);
+      expect(res.body.count).toBe(6);
+      expect(
+        res.body.transactions.map(
+          (t: { id: number; purchase_settlement: boolean }) => [
+            t.id,
+            t.purchase_settlement,
+          ],
+        ),
+      ).toEqual([
+        [1, true],
+        [2, false],
+        [3, false],
+        [4, false],
+        [5, false],
+        [6, false],
+      ]);
+    });
+
+    it('passes a bot failure through unchanged', async () => {
+      ctx.bitcoinDeepa.getUserTransactions.mockResolvedValueOnce({
+        success: false,
+        message: 'bot down',
+      });
+      const res = await http()
+        .get('/transaction/bot-history')
+        .set(auth())
+        .expect(200);
+      expect(res.body).toEqual({ success: false, message: 'bot down' });
+    });
+  });
 });

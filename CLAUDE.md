@@ -289,6 +289,7 @@ PORT=3000
 - `POST /transaction/reset-retry-count/:paymentId` - Re-enable settlement for one payment after checking it on BitcoinDeepa (internal, requires `x-admin-key`)
 - `POST /transaction/release-hold/:paymentId` - Let settlement pay a held one-time buy after a human checked it (internal, requires `x-admin-key`; 404 unless held and unsettled)
 - `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
+- `GET /transaction/bot-history?limit=&offset=` - The user's bot transfers (from the bot, paged by its count). Each row gets `purchase_settlement: true` when it is the transfer that settled one of the user's own SUCCESS payments (incoming, memo `... (Ref: <payment id>)`), so the app shows that purchase once
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 
 ## Development Guidelines

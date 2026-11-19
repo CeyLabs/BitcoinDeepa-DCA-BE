@@ -1246,6 +1246,40 @@ export class TransactionService {
     };
   }
 
+  /**
+   * Marks the bot-history rows that are a purchase's settlement transfer
+   * (memo "... (Ref: <payment id>)"), so the app shows that purchase once.
+   * Only the user's own SUCCESS payments count: memos are free text (a P2P
+   * sender can copy the format), and a charged-back purchase's row reads as
+   * not credited, so its transfer stays the record that the sats arrived.
+   */
+  async markPurchaseSettlements<T extends { direction: string; memo?: string }>(
+    userId: string,
+    rows: T[],
+  ): Promise<(T & { purchase_settlement: boolean })[]> {
+    const refOf = (row: T) =>
+      row.direction === 'incoming'
+        ? TransactionService.SETTLEMENT_REF.exec(row.memo ?? '')?.[1]
+        : undefined;
+    const refs = [...new Set(rows.map(refOf).filter((r): r is string => !!r))];
+    const settled = new Set<string>();
+    if (refs.length > 0) {
+      const found = await this.knexService
+        .knex('transaction')
+        .where('user_id', userId)
+        .where('status', 'SUCCESS')
+        .whereIn('payhere_pay_id', refs)
+        .pluck<string[]>('payhere_pay_id');
+      found.forEach((id) => settled.add(id));
+    }
+    return rows.map((row) => {
+      const ref = refOf(row);
+      return { ...row, purchase_settlement: !!ref && settled.has(ref) };
+    });
+  }
+
+  private static readonly SETTLEMENT_REF = /\(Ref: ([^)]+)\)$/;
+
   async getLatestTransactionForUser(
     user_id: string,
   ): Promise<Record<string, unknown> | null> {
