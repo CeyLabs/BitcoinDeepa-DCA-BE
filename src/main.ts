@@ -4,6 +4,7 @@ import { configureApp } from './app.setup';
 import { DatabaseSystemLogger } from './modules/knex/database-system-logger.service';
 import { randomUUID, webcrypto } from 'crypto';
 import { runMigrationsOnStartup } from './utils/run-migrations';
+import { installExternalApiLogging } from './common/dev-logging';
 
 // Polyfill global.crypto if not available (older Node runtimes). Falls back
 // to Node's real WebCrypto implementation rather than an empty object —
@@ -33,6 +34,10 @@ async function bootstrap() {
 
   // Use the custom logger for the application
   app.useLogger(databaseLogger);
+
+  // NODE_ENV=development only: log every external API call (request and
+  // response, secrets redacted) before crons or requests start making them
+  installExternalApiLogging(databaseLogger);
 
   configureApp(app);
 

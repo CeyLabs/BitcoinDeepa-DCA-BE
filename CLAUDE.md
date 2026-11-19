@@ -357,6 +357,7 @@ try {
 
 ### Shared helpers (use these instead of re-writing the pattern)
 - Logging: `private readonly logger = new Logger(MyService.name)`. `DatabaseSystemLogger` (set via `app.useLogger`) already writes log/warn/error to the `log` table; `debug`/`verbose` stay console-only. Don't inject `DatabaseLoggerService` in features.
+- Development logging (`src/common/dev-logging.ts`, `NODE_ENV=development` only): every call through the default axios instance or global `fetch` (CeyPay, BitcoinDeepa bot, PayHere, Ceylon Cash, CoinMarketCap, Telegram, Didit) is logged with its request and response under context `ExternalAPI` (2xx INFO, 4xx WARN, 5xx/no response ERROR). Headers are never logged; secret-looking keys, query params and Telegram's bot token are redacted; bodies are cut at 4,000 chars; these lines skip the DB `log` table. On Railway the logger writes JSON lines (`level` info/debug/warn/error, all on stdout) so the log view shows badges and filters (`@level:error`, `@context:SettlementService`, `@api:CeyPay`, `@status:500`). `LOG_FORMAT=json|pretty` overrides. Use axios's default instance or `fetch` for new external calls so they're covered.
 - Errors: `errorMessage(error)` from `src/common/error-message.ts`.
 - Caching: `redisService.getOrSet(key, ttlSeconds, loader)` (null results aren't cached).
 - Telegram ops log: `telegramLoggerService.trackAction(action, user, fn)` posts the action, runs `fn`, and reacts on success.
