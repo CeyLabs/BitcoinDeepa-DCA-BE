@@ -76,7 +76,10 @@ export class P2pController {
 }
 
 /** Keep the bot's status code (200 vs 202 matters to the app) */
-function reply(res: Response, result: P2pResult): Record<string, unknown> {
+export function reply(
+  res: Response,
+  result: P2pResult,
+): Record<string, unknown> {
   res.status(result.status);
   return result.body;
 }
