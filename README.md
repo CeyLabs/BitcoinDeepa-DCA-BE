@@ -77,7 +77,8 @@ docker compose down -v
 ### 5. Database Setup
 
 ```bash
-# Run migrations
+# Run migrations (locally; deployed production apps migrate themselves on startup,
+# see RUN_MIGRATIONS_ON_STARTUP in .env.template)
 pnpm migrate
 
 # Seed the database with initial data
