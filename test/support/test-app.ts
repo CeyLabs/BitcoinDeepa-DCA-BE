@@ -125,6 +125,9 @@ export async function createTestApp(): Promise<TestContext> {
       fetchBitcoinData: jest
         .fn()
         .mockResolvedValue({ price: BTC_USD, percent_change_24h: 1.5 }),
+      fetchBitcoinDataResult: jest.fn().mockResolvedValue({
+        data: { price: BTC_USD, percent_change_24h: 1.5 },
+      }),
     })
     .overrideProvider(BitcoinDeepaService)
     .useValue(bitcoinDeepa)

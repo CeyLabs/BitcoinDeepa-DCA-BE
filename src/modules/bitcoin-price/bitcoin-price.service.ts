@@ -60,7 +60,13 @@ export const BTC_USD_CACHE_TTL_SECONDS = 30;
  */
 export const USDT_LKR_CACHE_TTL_SECONDS = 300;
 /** After a failed fetch, answer "unavailable" from cache for this long */
-const FAILURE_CACHE_TTL_SECONDS = 10;
+export const FAILURE_CACHE_TTL_SECONDS = 10;
+/**
+ * The 24h change is display only and is read on every wallet load, so a
+ * CoinMarketCap failure that won't fix itself soon (bad key, rate limit) is
+ * remembered for longer. A transient one (timeout, 5xx) keeps the short TTL.
+ */
+export const CHANGE_24H_PERSISTENT_FAILURE_TTL_SECONDS = 5 * 60;
 /** Price lookups sit on request paths: fail fast instead of hanging */
 const PRICE_FETCH_TIMEOUT_MS = 3000;
 /** CoinMarketCap 24h change (display only) */
@@ -304,13 +310,22 @@ export class BitcoinPriceService {
    * Null when unavailable.
    */
   async getBitcoin24HrChange(): Promise<number | null> {
-    const data = await this.redisService.getOrSet(
+    let persistent = false;
+    const data = await this.cached(
       CacheKeys.bitcoin.cmc24hChange(),
       CHANGE_24H_CACHE_TTL_SECONDS,
       async () => {
-        const btc = await this.coinMarketCap.fetchBitcoinData();
-        return btc ? { change: btc.percent_change_24h } : null;
+        const result = await this.coinMarketCap.fetchBitcoinDataResult();
+        if ('data' in result) {
+          return { change: result.data.percent_change_24h };
+        }
+        persistent = result.failure === 'PERSISTENT';
+        return null;
       },
+      () =>
+        persistent
+          ? CHANGE_24H_PERSISTENT_FAILURE_TTL_SECONDS
+          : FAILURE_CACHE_TTL_SECONDS,
     );
     return data?.change ?? null;
   }
@@ -380,19 +395,25 @@ export class BitcoinPriceService {
   }
 
   /**
-   * getOrSet that also remembers a failure for FAILURE_CACHE_TTL_SECONDS, so
-   * an outage costs one slow call per window instead of one per request.
+   * getOrSet that also remembers a failure (FAILURE_CACHE_TTL_SECONDS by
+   * default), so an outage costs one slow call per window instead of one per
+   * request - and one error log instead of one per request.
    */
   private async cached<T>(
     key: string,
     ttlSeconds: number,
     loader: () => Promise<T | null>,
+    failureTtlSeconds: number | (() => number) = FAILURE_CACHE_TTL_SECONDS,
   ): Promise<T | null> {
     if (await this.redisService.get<boolean>(failureKey(key))) return null;
     const value = await this.redisService.getOrSet(key, ttlSeconds, loader);
     if (value === null) {
       await this.redisService.set(failureKey(key), true, {
-        ttl: FAILURE_CACHE_TTL_SECONDS,
+        // a function: the TTL can depend on why the loader failed
+        ttl:
+          typeof failureTtlSeconds === 'function'
+            ? failureTtlSeconds()
+            : failureTtlSeconds,
       });
     }
     return value;
