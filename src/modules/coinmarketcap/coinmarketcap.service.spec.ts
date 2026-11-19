@@ -1,4 +1,5 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
+import { Logger } from '@nestjs/common';
 import { CoinMarketCapService } from './coinmarketcap.service';
 
 const get = jest.spyOn(axios, 'get');
@@ -54,5 +55,75 @@ describe('CoinMarketCapService.fetchBitcoinData', () => {
   it('returns null when the request fails', async () => {
     get.mockRejectedValue(new Error('ECONNRESET'));
     await expect(service.fetchBitcoinData()).resolves.toBeNull();
+  });
+
+  it('logs a failure as one line, never the error object', async () => {
+    const error = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    get.mockRejectedValue(
+      Object.assign(new AxiosError('Request failed with status code 401'), {
+        response: { status: 401, data: {} },
+      }),
+    );
+    await expect(service.fetchBitcoinData()).resolves.toBeNull();
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0]).toHaveLength(1); // a message, no object
+    expect(error.mock.calls[0][0]).toBe(
+      'CoinMarketCap request failed (HTTP 401): Request failed with status code 401 - check COINMARKETCAP_API_KEY',
+    );
+    error.mockRestore();
+  });
+
+  describe('failure kinds (how long callers wait before retrying)', () => {
+    const httpError = (status: number) =>
+      Object.assign(new AxiosError('Request failed'), {
+        response: { status, data: {} },
+      });
+    let error: jest.SpyInstance;
+    beforeEach(() => {
+      error = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+    });
+    afterEach(() => error.mockRestore());
+
+    it.each([401, 403, 429])(
+      '%i is PERSISTENT (key, plan, rate limit)',
+      async (status) => {
+        get.mockRejectedValue(httpError(status));
+        await expect(service.fetchBitcoinDataResult()).resolves.toEqual({
+          failure: 'PERSISTENT',
+        });
+      },
+    );
+
+    it('an API error code in the body is PERSISTENT', async () => {
+      get.mockResolvedValue(ok({ price: 1 }, 1002));
+      await expect(service.fetchBitcoinDataResult()).resolves.toEqual({
+        failure: 'PERSISTENT',
+      });
+    });
+
+    it.each([
+      ['a 5xx', () => get.mockRejectedValue(httpError(503))],
+      [
+        'a timeout',
+        () => get.mockRejectedValue(new AxiosError('timeout', 'ECONNABORTED')),
+      ],
+      ['a bad payload', () => get.mockResolvedValue(ok({ price: 0 }))],
+    ])('%s is TRANSIENT', async (_, arrange) => {
+      arrange();
+      await expect(service.fetchBitcoinDataResult()).resolves.toEqual({
+        failure: 'TRANSIENT',
+      });
+    });
+
+    it('returns the data on success', async () => {
+      get.mockResolvedValue(ok({ price: 65000, percent_change_24h: 1.2 }));
+      await expect(service.fetchBitcoinDataResult()).resolves.toEqual({
+        data: { price: 65000, percent_change_24h: 1.2 },
+      });
+    });
   });
 });

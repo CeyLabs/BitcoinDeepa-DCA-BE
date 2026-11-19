@@ -5,6 +5,8 @@ import {
   MAX_FALLBACK_MAX_AGE_SECONDS,
   btcLkrRate,
   fallbackMaxAgeSeconds,
+  CHANGE_24H_PERSISTENT_FAILURE_TTL_SECONDS,
+  FAILURE_CACHE_TTL_SECONDS,
   satoshisFor,
 } from './bitcoin-price.service';
 import { KnexService } from '../knex/knex.service';
@@ -41,7 +43,10 @@ describe('BitcoinPriceService', () => {
   // No REDIS_URL in unit tests, so RedisService is a pass-through (no cache).
   const redis = new RedisService();
   const ceyPay = { getQuote: jest.fn() };
-  const cmc = { fetchBitcoinData: jest.fn() };
+  const cmc = {
+    fetchBitcoinData: jest.fn(),
+    fetchBitcoinDataResult: jest.fn(),
+  };
   // exchange_rate_log: `latest` is what the "recent row" query finds
   let latest: Record<string, unknown> | undefined;
   const insert = jest.fn();
@@ -75,9 +80,9 @@ describe('BitcoinPriceService', () => {
     get.mockResolvedValue({ data: { usd_price: 65000 } });
     ceyPay.getQuote.mockResolvedValue({ rateUsdtLkr: 330 });
     cmc.fetchBitcoinData.mockReset();
-    cmc.fetchBitcoinData.mockResolvedValue({
-      price: 99_999,
-      percent_change_24h: 2,
+    cmc.fetchBitcoinDataResult.mockReset();
+    cmc.fetchBitcoinDataResult.mockResolvedValue({
+      data: { price: 99_999, percent_change_24h: 2 },
     });
     latest = undefined;
     insert.mockReset();
@@ -103,6 +108,7 @@ describe('BitcoinPriceService', () => {
     expect(get.mock.calls[0][1]).toEqual({ timeout: 3000 });
     // CoinMarketCap's price is never used
     expect(cmc.fetchBitcoinData).not.toHaveBeenCalled();
+    expect(cmc.fetchBitcoinDataResult).not.toHaveBeenCalled();
   });
 
   it('calculates satoshis in LKR, rounding down', async () => {
@@ -292,7 +298,51 @@ describe('BitcoinPriceService', () => {
   });
 
   it('24h change is null when CoinMarketCap is unavailable', async () => {
-    cmc.fetchBitcoinData.mockResolvedValue(null);
+    cmc.fetchBitcoinDataResult.mockResolvedValue({ failure: 'TRANSIENT' });
     await expect(service.getBitcoin24HrChange()).resolves.toBeNull();
+  });
+
+  describe('how long a 24h-change failure is remembered', () => {
+    // A Redis stand-in that records what is cached, and for how long
+    const fakeRedis = {
+      get: jest.fn().mockResolvedValue(null),
+      getOrSet: jest.fn(
+        (_key: string, _ttl: number, loader: () => Promise<unknown>) =>
+          loader(),
+      ),
+      set: jest.fn().mockResolvedValue(undefined),
+      del: jest.fn(),
+    };
+    const withFakeRedis = new BitcoinPriceService(
+      fakeRedis as unknown as RedisService,
+      ceyPay as unknown as CeyPayService,
+      cmc as unknown as CoinMarketCapService,
+      { knex } as unknown as KnexService,
+    );
+    const failureTtl = () =>
+      (fakeRedis.set.mock.calls.at(-1) as [string, boolean, { ttl: number }])[2]
+        .ttl;
+
+    beforeEach(() => fakeRedis.set.mockClear());
+
+    it("5 min for a failure that won't fix itself (bad key, rate limit)", async () => {
+      cmc.fetchBitcoinDataResult.mockResolvedValue({ failure: 'PERSISTENT' });
+      await withFakeRedis.getBitcoin24HrChange();
+      expect(fakeRedis.set.mock.calls.at(-1)?.[0]).toMatch(/:failed$/);
+      expect(failureTtl()).toBe(CHANGE_24H_PERSISTENT_FAILURE_TTL_SECONDS);
+      expect(CHANGE_24H_PERSISTENT_FAILURE_TTL_SECONDS).toBe(300);
+    });
+
+    it('the short TTL for a transient one (timeout, 5xx)', async () => {
+      cmc.fetchBitcoinDataResult.mockResolvedValue({ failure: 'TRANSIENT' });
+      await withFakeRedis.getBitcoin24HrChange();
+      expect(failureTtl()).toBe(FAILURE_CACHE_TTL_SECONDS);
+      expect(FAILURE_CACHE_TTL_SECONDS).toBe(10);
+    });
+
+    it('nothing is remembered on success', async () => {
+      await withFakeRedis.getBitcoin24HrChange();
+      expect(fakeRedis.set).not.toHaveBeenCalled();
+    });
   });
 });
