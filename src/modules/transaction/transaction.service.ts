@@ -24,6 +24,12 @@ import {
   buyLimits,
   paidOneTimeLkr,
 } from '../../common/buy-limits';
+import { NOT_IN_HISTORY_SELL_STATUSES } from '../sell/sell.constants';
+import {
+  toSellOrderView,
+  type SellOrderRow,
+  type SellOrderView,
+} from '../sell/sell.service';
 
 export type PayHereNotificationParams = PayHereNotificationDto;
 
@@ -99,8 +105,17 @@ export interface DcaSummary {
   };
 }
 
+/**
+ * One row of the member's history, newest first: a purchase (the
+ * `transaction` row with its plan) or a sale (`sell_order`, as the sell
+ * endpoints show it).
+ */
+export type HistoryItem =
+  | (Transaction & { type: 'BUY' })
+  | { type: 'SELL'; created_at: Date; sell_order: SellOrderView };
+
 export interface PaginatedTransactions {
-  transactions: Transaction[];
+  transactions: HistoryItem[];
   total_count: number;
   total_pages: number;
   current_page: number;
@@ -154,7 +169,7 @@ type PaymentLink =
   | { kind: 'RECURRING'; payhere_sub_id: string; payhere_order_id: null }
   | { kind: 'ONE_TIME'; payhere_sub_id: null; payhere_order_id: string };
 
-interface PayHereOrderRow {
+interface BuyOrderRow {
   order_id: string;
   user_id: string;
   package_id: string | null;
@@ -372,7 +387,7 @@ export class TransactionService {
       if (sub) return sub.user_id;
     }
     const order = await this.knexService
-      .knex<{ order_id: string; user_id: string }>('payhere_order')
+      .knex<{ order_id: string; user_id: string }>('buy_order')
       .select('user_id')
       .where('order_id', order_id)
       .first();
@@ -450,7 +465,7 @@ export class TransactionService {
     try {
       let link: PaymentLink;
       let subscription: Subscription | null = null;
-      let order: PayHereOrderRow | null = null;
+      let order: BuyOrderRow | null = null;
 
       if (oneTime) {
         order = await this.resolveOneTimeOrder(trx, data);
@@ -589,7 +604,7 @@ export class TransactionService {
    */
   private async oneTimeHoldReason(
     trx: Knex.Transaction,
-    order: PayHereOrderRow,
+    order: BuyOrderRow,
     payment_id: string,
   ): Promise<string | null> {
     const reasons: string[] = [];
@@ -661,8 +676,8 @@ export class TransactionService {
   private async resolveOneTimeOrder(
     trx: Knex.Transaction,
     { order_id, payhere_amount, payhere_currency }: PayHereNotificationParams,
-  ): Promise<PayHereOrderRow> {
-    const order = await trx<PayHereOrderRow>('payhere_order')
+  ): Promise<BuyOrderRow> {
+    const order = await trx<BuyOrderRow>('buy_order')
       .where('order_id', order_id)
       .first();
     if (!order) {
@@ -802,7 +817,7 @@ export class TransactionService {
    * Find the subscription for this notification, or create it on first sight.
    *
    * Only signed fields decide who owns a subscription: order_id is covered by
-   * the md5sig, and the user/package come from the payhere_order row we stored
+   * the md5sig, and the user/package come from the buy_order row we stored
    * when generating the checkout link. custom_1/custom_2 are NOT used - the
    * checkout hash doesn't cover them, so a payer can edit them (e.g. to give
    * an un-KYC'd account a subscription).
@@ -833,11 +848,11 @@ export class TransactionService {
         // first notification binds one - but subscription_id isn't signed, so
         // an attacker could replay their own signed notification (for an
         // order they made) against a victim's subscription and lock it to the
-        // wrong order. Every order since binding has a payhere_order row, so
+        // wrong order. Every order since binding has a buy_order row, so
         // it must belong to this subscription's user. Old orders have no row
         // and only arrive as genuine renewals.
         const order = await trx<{ user_id: string; kind: PurchaseKind }>(
-          'payhere_order',
+          'buy_order',
         )
           .select('user_id', 'kind')
           .where('order_id', order_id)
@@ -859,7 +874,7 @@ export class TransactionService {
       return { subscription: existing, created: false };
     }
 
-    const order = await trx<PayHereOrderRow>('payhere_order')
+    const order = await trx<BuyOrderRow>('buy_order')
       .where('order_id', order_id)
       .first();
     if (!order) {
@@ -1234,22 +1249,81 @@ export class TransactionService {
     page: number,
     limit: number,
   ): Promise<PaginatedTransactions> {
-    const [countResult] = await this.knexService
-      .knex('transaction')
-      .where('user_id', user_id)
-      .count<{ count: string }[]>('* as count');
+    const knex = this.knexService.knex;
+    // Purchases and sales as one list, so a page is cut across both
+    const feed = () =>
+      knex.from(
+        knex('transaction')
+          .select(
+            knex.raw("'BUY' as type"),
+            'payhere_pay_id as id',
+            'created_at',
+          )
+          .where('user_id', user_id)
+          .unionAll(
+            knex('sell_order')
+              .select(
+                knex.raw("'SELL' as type"),
+                knex.raw('id::text as id'),
+                'created_at',
+              )
+              .where('user_id', user_id)
+              .whereNotIn('status', NOT_IN_HISTORY_SELL_STATUSES),
+          )
+          .as('feed'),
+      );
 
+    const [countResult] = await feed().count<{ count: string }[]>('* as count');
     const totalCount = Number(countResult.count);
     const totalPages = Math.ceil(totalCount / limit);
 
-    // Joined with package info so callers get the LKR amount and plan name
-    // (null for one-time buys - see kind)
-    const transactions = await this.transactionsWithPackage()
-      .select('t.*', ...PACKAGE_COLUMNS)
-      .where('t.user_id', user_id)
-      .orderBy('t.created_at', 'desc')
+    const pageRows = await feed()
+      .select<{ type: 'BUY' | 'SELL'; id: string }[]>('type', 'id')
+      .orderBy([
+        { column: 'created_at', order: 'desc' },
+        { column: 'id', order: 'desc' },
+      ])
       .limit(limit)
       .offset((page - 1) * limit);
+    const idsOf = (type: 'BUY' | 'SELL') =>
+      pageRows.filter((r) => r.type === type).map((r) => r.id);
+
+    // Joined with package info so callers get the LKR amount and plan name
+    // (null for one-time buys - see kind)
+    const buyIds = idsOf('BUY');
+    const buys: Transaction[] =
+      buyIds.length === 0
+        ? []
+        : ((await this.transactionsWithPackage()
+            .select('t.*', ...PACKAGE_COLUMNS)
+            .where('t.user_id', user_id)
+            .whereIn('t.payhere_pay_id', buyIds)) as Transaction[]);
+    const sellIds = idsOf('SELL');
+    const sells =
+      sellIds.length === 0
+        ? []
+        : await knex<SellOrderRow>('sell_order')
+            .where('user_id', user_id)
+            .whereIn('id', sellIds);
+
+    const buyById = new Map(buys.map((b) => [b.payhere_pay_id, b]));
+    const sellById = new Map(sells.map((s) => [s.id, s]));
+    const transactions: HistoryItem[] = [];
+    for (const { type, id } of pageRows) {
+      if (type === 'BUY') {
+        const buy = buyById.get(id);
+        if (buy) transactions.push({ type: 'BUY', ...buy });
+        continue;
+      }
+      const sell = sellById.get(id);
+      if (sell) {
+        transactions.push({
+          type: 'SELL',
+          created_at: sell.created_at,
+          sell_order: toSellOrderView(sell),
+        });
+      }
+    }
 
     return {
       transactions,
@@ -1436,7 +1510,7 @@ export class TransactionService {
       .knex('transaction as t')
       .leftJoin('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
       .leftJoin('package as p', 's.package_id', 'p.id')
-      .leftJoin('payhere_order as o', 't.payhere_order_id', 'o.order_id');
+      .leftJoin('buy_order as o', 't.payhere_order_id', 'o.order_id');
   }
 
   /** Wallet balance (BitcoinDeepa) + BTC price and 24h change. Never throws. */

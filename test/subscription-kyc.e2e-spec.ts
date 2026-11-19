@@ -371,7 +371,7 @@ describe('Auth, KYC, subscriptions and read endpoints (e2e)', () => {
       );
       expect(
         await ctx
-          .knex('payhere_order')
+          .knex('buy_order')
           .where({ order_id: p.get('order_id')! })
           .first(),
       ).toMatchObject({ user_id: USER });

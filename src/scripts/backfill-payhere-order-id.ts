@@ -71,7 +71,7 @@ async function main() {
       const taken = await db('subscription')
         .where('payhere_order_id', orderId)
         .first<{ payhere_sub_id: string } | undefined>('payhere_sub_id');
-      const order = await db('payhere_order')
+      const order = await db('buy_order')
         .where('order_id', orderId)
         .first<{ user_id: string } | undefined>('user_id');
       if (taken || (order && order.user_id !== row.user_id)) {
