@@ -53,6 +53,7 @@ describe('Admin transactions list (e2e)', () => {
         return {
           payhere_pay_id: `P${String(n).padStart(2, '0')}`,
           payhere_sub_id: n % 2 ? 'S2' : 'S1',
+          user_id: n % 2 ? OTHER_USER : USER,
           status: n % 5 === 0 ? 'FAILED' : 'SUCCESS',
           gross_amount: 1000,
           created_at: new Date(base + n * 3_600_000),
@@ -104,6 +105,36 @@ describe('Admin transactions list (e2e)', () => {
     expect(day1.items.map((t) => t.id)).not.toContain('P19');
     expect(day2.items.map((t) => t.id)).toContain('P19');
     expect(day1.total + day2.total).toBe(25);
+  });
+
+  it('shows one-time buys without a plan and filters by kind', async () => {
+    await ctx.knex('payhere_order').insert({
+      order_id: 'O1',
+      user_id: USER,
+      kind: 'ONE_TIME',
+      amount: 2500,
+      currency: 'LKR',
+      expires_at: new Date(Date.now() + 30 * 60_000),
+    });
+    await ctx.knex('transaction').insert({
+      payhere_pay_id: 'B1',
+      kind: 'ONE_TIME',
+      user_id: USER,
+      payhere_order_id: 'O1',
+      status: 'SUCCESS',
+      gross_amount: 2500,
+    });
+
+    const oneTime = await ok('?kind=ONE_TIME');
+    expect(oneTime.total).toBe(1);
+    expect(oneTime.items[0]).toMatchObject({
+      id: 'B1',
+      kind: 'ONE_TIME',
+      packageName: null,
+      user: { id: USER, name: 'Test User' },
+    });
+    expect((await ok('?kind=RECURRING')).total).toBe(25);
+    expect((await ok(`?q=${USER}`)).total).toBe(13);
   });
 
   it('searches by payment id, member id and name', async () => {

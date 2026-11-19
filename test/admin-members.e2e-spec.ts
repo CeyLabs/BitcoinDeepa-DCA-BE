@@ -83,6 +83,7 @@ describe('Admin members list (e2e)', () => {
     ) => ({
       payhere_pay_id: id,
       payhere_sub_id: sub,
+      user_id: sub === 'S1' ? USER : OTHER_USER,
       status,
       gross_amount: gross,
       satoshis_purchased: sats,

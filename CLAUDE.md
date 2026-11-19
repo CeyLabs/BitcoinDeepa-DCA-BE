@@ -95,20 +95,29 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - **CeyPay client** (`src/modules/ceypay/`): aggregator API, `x-api-key` (key id) + `x-timestamp` (ms) + `x-signature` = hex HMAC-SHA256 with key `sha256hex(secret)` over `ts + METHOD + path?query + body`. `CeyPayError.outcomeUnknown` = no response/5xx/429
    - **R2** (`src/modules/storage/`): private bucket; statements are only ever reached through 5-minute presigned URLs (bucket CORS must allow PUT from the TMA origin)
 
+13. **Buy Module** (`src/modules/buy/`) - one-time BTC buys: one PayHere checkout (no recurrence) for a custom whole-LKR amount
+   - `POST /buy/payhere-link` stores a `payhere_order` with `kind = ONE_TIME`, `amount`, `currency` (no package) and returns a one-off checkout link (no `recurrence`/`duration`). KYC + complete profile required; allowed alongside an active subscription
+   - **Limits** (`src/common/buy-limits.ts`): `BUY_MIN_LKR` (100), `BUY_MAX_LKR` (100,000) per buy, `BUY_DAILY_MAX_LKR` (250,000) per member over a rolling 24h = paid ONE_TIME PENDING/SUCCESS/CHARGEBACK payments **plus unpaid checkouts that haven't expired** (reserved). Each checkout expires after `BUY_ORDER_TTL_MINUTES` (30); PayHere has no link expiry, so this is ours. `BUY_LINKS_PER_HOUR` (10) checkouts per member per hour, else 429 (counted from `payhere_order`)
+   - **Holds:** PayHere can't stop a checkout being paid late or twice, so when a one-time payment becomes SUCCESS the webhook re-checks: paid twice, paid after `expires_at` + 10 min, or the member's 24h total over the limit → `transaction.hold_reason` is set and a Telegram alert goes out. The member's `user` row is locked first (`FOR NO KEY UPDATE`), so two payments arriving together can't both skip these checks. Settlement skips held rows; `POST /transaction/release-hold/:paymentId` (`x-admin-key`) releases one (or refund it in PayHere). The order view shows `held: true`
+   - Same fees as subscriptions (`src/common/buy-fees.ts`, used by the webhook too). The webhook, pricing, backfill and settlement are shared: a notification **without `subscription_id`** goes to `handleOneTimeNotification`, which requires a ONE_TIME order and the signed amount/currency to equal the order's; a ONE_TIME order with a `subscription_id` (payer added recurrence) is rejected and alerted; it is never cancelled automatically (`subscription_id` isn't signed, so it could be someone else's) - a human checks it in PayHere and cancels/refunds
+   - Settlement confirms one-time payments with PayHere's Retrieval API (`getPaymentsByOrderId`, `GET /merchant/v1/payment/search?order_id=`); memo `One-time BTC purchase (Ref: <payment_id>)`
+
 ### Database Schema
 
 **Tables:**
 - `package`: Subscription packages (UUID PK, name, frequency, amount, currency)
 - `user`: User profiles (Telegram ID as PK, personal info, address, KYC status and verification data)
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
-- `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
+- `transaction`: Payment records (PayHere pay ID as PK, `kind` RECURRING/ONE_TIME, `user_id` (owner - read paths, settlement and admin use this, not the subscription), subscription ID (recurring only), `payhere_order_id` (one-time only), status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
+- `payhere_order`: Every checkout we start (order_id → user; `kind`; package for RECURRING, amount + currency for ONE_TIME)
 - `user_bank_account`: Payout bank accounts (status PENDING_REVIEW/VERIFIED/REJECTED, statement R2 key, name-match score, reviewer, CeyPay bank id). `user.ceypay_user_id` links the user to CeyPay
 - `sell_order`: Sell orders (sats, gross LKR, fee LKR, BTC/LKR rate, promised LKR, CeyPay quote/payment ids, bank ref, status, retries)
 
 **Relationships:**
 - Users → Subscriptions (1:many)
 - Packages → Subscriptions (1:many)
-- Subscriptions → Transactions (1:many)
+- Subscriptions → Transactions (1:many, recurring)
+- Users → Transactions (1:many, `transaction.user_id`)
 
 ## Development Workflow
 
@@ -198,6 +207,13 @@ DIDIT_BASE_URL=https://verification.didit.me  # Didit API base URL (v3 sessions 
 DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Required in production; optional in dev
 DIDIT_CALLBACK_BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
 
+# One-time buys (optional; defaults shown)
+BUY_MIN_LKR=100
+BUY_MAX_LKR=100000
+BUY_DAILY_MAX_LKR=250000
+BUY_ORDER_TTL_MINUTES=30
+BUY_LINKS_PER_HOUR=10
+
 # Sell flow (required in production)
 BITCOINDEEPA_SELL_FEE_BASIS_POINTS=100  # taken off the LKR amount
 SELL_QUOTE_TTL_SECONDS=60
@@ -247,7 +263,7 @@ PORT=3000
 - `GET /admin/me` - Current admin (admin session cookie)
 - `GET /admin/analytics/summary` - Users, KYC, subscriptions and settled SUCCESS-payment totals (LKR, fees, sats), plus `unsettled` (SUCCESS payments whose sats weren't sent: count, LKR, sats)
 - `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily settled LKR, payment count, unsettled LKR and new users (Asia/Colombo days)
-- `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&from=&to=&q=` - Paginated transactions, newest first, with member and plan. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
+- `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&kind=RECURRING|ONE_TIME&from=&to=&q=` - Paginated transactions, newest first, with member, plan (null for one-time buys) and `kind`. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
 - `GET /admin/members?page=&pageSize=&kyc=&subscription=active|none&q=` - Paginated members, newest first, with active plan, settled SUCCESS-payment totals (LKR, sats) and unsettled LKR. `q` matches Telegram id, name, email or phone
 
 ### Bank accounts
@@ -265,9 +281,15 @@ PORT=3000
 - `POST /sell/ceypay-webhook` - CeyPay off-ramp result (public, ED25519-signed)
 - Admin: `GET /admin/bank-reviews?status=&page=&pageSize=&q=` (default PENDING_REVIEW, oldest first), `GET /admin/bank-reviews/pending-count`, `GET /admin/bank-reviews/:id/statement` (5-min link), `POST /admin/bank-reviews/:id/approve`, `POST /admin/bank-reviews/:id/reject { reason }`
 
+### Buy (one-time)
+- `GET /buy/price` - Live BTC/LKR, fee basis points and buy limits (estimate only)
+- `POST /buy/payhere-link` - `{ amount_lkr }` (whole LKR) → `{ link, order_id }` (KYC required)
+- `GET /buy/orders/:orderId` - The user's one-time order: `AWAITING_PAYMENT` or the payment status, sats, settled
+
 ### Transactions
 - `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
 - `POST /transaction/reset-retry-count/:paymentId` - Re-enable settlement for one payment after checking it on BitcoinDeepa (internal, requires `x-admin-key`)
+- `POST /transaction/release-hold/:paymentId` - Let settlement pay a held one-time buy after a human checked it (internal, requires `x-admin-key`; 404 unless held and unsettled)
 - `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 

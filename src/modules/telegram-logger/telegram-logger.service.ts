@@ -30,9 +30,10 @@ export class TelegramLoggerService {
     amount: string,
     telegramId: string,
     status: string,
+    oneTime = false,
   ): Promise<TgMessage | null> {
     const message =
-      `Action: <b>New Transaction</b>\n` +
+      `Action: <b>${oneTime ? 'New One-time Buy #BUY' : 'New Transaction'}</b>\n` +
       `User ID: <b>#UID${telegramId}</b>\n` +
       `Transaction ID: <b>#TRX${payhereId}</b>\n` +
       `Amount: <b>${amount} LKR</b>\n` +

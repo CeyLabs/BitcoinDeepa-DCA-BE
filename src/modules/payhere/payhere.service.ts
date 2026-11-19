@@ -5,7 +5,8 @@ import { errorMessage } from '../../common/error-message';
 
 export interface IGetLinkParams {
   user_id: string;
-  package_id: string;
+  /** Recurring checkouts only; informational (custom_2) */
+  package_id?: string;
   order_id: string;
   amount: string;
   currency: string;
@@ -17,9 +18,15 @@ export interface IGetLinkParams {
   city: string;
   country: string;
   items: string;
-  recurrence: '1 Month' | '1 Week';
-  duration: 'Forever';
+  /** Both set = a recurring (subscription) checkout; both unset = one-off */
+  recurrence?: '1 Month' | '1 Week';
+  duration?: 'Forever';
   type: string;
+  /**
+   * Added to return_url/cancel_url so the app knows which checkout the payer
+   * came back from (PayHere appends nothing). UX only: never trusted.
+   */
+  return_query?: Record<string, string>;
 }
 
 interface CancelSubscriptionResponse {
@@ -37,11 +44,28 @@ export interface SubscriptionPayment {
   order_id: string | null;
 }
 
+/** A payment as PayHere's Retrieval API lists it */
+export type OrderPayment = SubscriptionPayment;
+
 // Every PayHere API call is bounded: settlement handles payments one after
 // another, so a hung request would stall every payout behind it.
 const PAYHERE_API_TIMEOUT_MS = 10000;
 // Refresh the OAuth token this long before PayHere says it expires
 const TOKEN_EXPIRY_MARGIN_MS = 60_000;
+
+/** `url` with `query` added; `url` unchanged when it isn't a valid URL. */
+function withQuery(url: string, query?: Record<string, string>): string {
+  if (!query) return url;
+  try {
+    const u = new URL(url);
+    for (const [key, value] of Object.entries(query)) {
+      u.searchParams.set(key, value);
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 function md5String(input: string): string {
   try {
@@ -79,9 +103,10 @@ export class PayHereService {
     recurrence,
     duration,
     type = 'checkout',
+    return_query,
   }: IGetLinkParams): string {
     this.logger.log(
-      `Generating PayHere payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}, package: ${package_id}`,
+      `Generating PayHere ${recurrence ? 'recurring' : 'one-off'} payment link for order: ${order_id}, amount: ${amount} ${currency}, user: ${user_id}${package_id ? `, package: ${package_id}` : ''}`,
     );
     const hashedSecret = md5String(
       String(process.env.PAYHERE_MERCHANT_SECRET),
@@ -101,8 +126,14 @@ export class PayHereService {
 
     const params: Record<string, string> = {
       merchant_id: String(process.env.PAYHERE_MERCHANT_ID),
-      return_url: String(process.env.PAYHERE_RETURN_URL),
-      cancel_url: String(process.env.PAYHERE_CANCEL_URL),
+      return_url: withQuery(
+        String(process.env.PAYHERE_RETURN_URL),
+        return_query,
+      ),
+      cancel_url: withQuery(
+        String(process.env.PAYHERE_CANCEL_URL),
+        return_query,
+      ),
       notify_url: String(process.env.PAYHERE_NOTIFY_URL),
       first_name,
       last_name,
@@ -114,15 +145,20 @@ export class PayHereService {
       order_id,
       items,
       currency,
-      recurrence,
-      duration,
       amount: amountFormatted,
       hash,
       // Informational only (shown in the PayHere dashboard). The webhook never
       // trusts these - they aren't covered by the hash and can be edited.
       custom_1: user_id,
-      custom_2: package_id,
     };
+    // Not covered by the hash either, so a one-off checkout just leaves them
+    // out. (A payer adding them would create a subscription whose order is
+    // ONE_TIME - the webhook refuses that.)
+    if (recurrence && duration) {
+      params.recurrence = recurrence;
+      params.duration = duration;
+    }
+    if (package_id) params.custom_2 = package_id;
 
     const link = `${this.getBaseUrl()}/pay/${type}?${new URLSearchParams(params).toString()}`;
     this.logger.log(
@@ -268,6 +304,64 @@ export class PayHereService {
     if (response.data.status !== 1) {
       throw new Error(
         `PayHere payment lookup for subscription ${payhere_sub_id} failed: ${response.data.msg}`,
+      );
+    }
+
+    return (response.data.data ?? []).map((p) => ({
+      payment_id: String(p.payment_id),
+      status: p.status,
+      amount:
+        p.amount === undefined || p.amount === null ? null : String(p.amount),
+      order_id: p.order_id ?? null,
+    }));
+  }
+
+  /**
+   * Payments PayHere took for a checkout order_id (Retrieval API). The
+   * one-off counterpart of getSubscriptionPayments, used the same way: only a
+   * payment_id listed here as RECEIVED is paid out.
+   * https://support.payhere.lk/api-&-mobile-sdk/retrieval-api
+   */
+  async getPaymentsByOrderId(order_id: string): Promise<OrderPayment[]> {
+    const accessToken = await this.getAccessToken();
+    const url = `${this.getBaseUrl()}/merchant/v1/payment/search`;
+    const response: {
+      data: {
+        status: number;
+        msg: string;
+        data?:
+          | {
+              payment_id: number | string;
+              order_id?: string;
+              status: string;
+              amount?: number | string;
+            }[]
+          | null;
+      };
+    } = await axios
+      .get(url, {
+        params: { order_id },
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: PAYHERE_API_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        this.forgetTokenIfRejected(error);
+        throw error;
+      });
+
+    // -1 "No payments found" is a real answer (not paid yet, or forged).
+    // -1 is also used for errors (e.g. "Access denied for the domain"), and
+    // reading those as "no payments" would make real payments look forged -
+    // so only that exact message counts as empty.
+    if (
+      response.data.status === -1 &&
+      /no payments found/i.test(response.data.msg ?? '')
+    ) {
+      return [];
+    }
+    if (response.data.status !== 1) {
+      throw new Error(
+        `PayHere payment lookup for order ${order_id} failed: ${response.data.msg}`,
       );
     }
 

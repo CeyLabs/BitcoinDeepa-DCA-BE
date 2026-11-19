@@ -73,6 +73,7 @@ export class TransactionController {
         body.payhere_amount,
         owner ?? 'unknown',
         this.transactionService.getPayHereStatusMapped(body.status_code),
+        !body.subscription_id,
       );
 
       await this.transactionService.handlePayHereNotification(body);
@@ -95,6 +96,13 @@ export class TransactionController {
   @UseGuards(AdminKeyGuard)
   async resetRetryCount(@Param('paymentId') paymentId: string) {
     return this.transactionService.resetRetryCount(paymentId);
+  }
+
+  /** Let settlement pay a held one-time buy, after a human checked it. */
+  @Post('release-hold/:paymentId')
+  @UseGuards(AdminKeyGuard)
+  async releaseHold(@Param('paymentId') paymentId: string) {
+    return this.transactionService.releaseHold(paymentId);
   }
 
   @Get('list')

@@ -7,6 +7,10 @@ import { TelegramLoggerService } from '../telegram-logger/telegram-logger.servic
 import { PayHereService } from '../payhere/payhere.service';
 import { RedisService } from '../redis/redis.service';
 import { errorMessage } from '../../common/error-message';
+import {
+  sameAmount,
+  type PurchaseKind,
+} from '../transaction/transaction.service';
 
 const MAX_SETTLEMENT_ATTEMPTS = 5;
 // PayHere lookup failures don't use attempts, so they need their own alert:
@@ -17,7 +21,11 @@ const LOOKUP_FAILURE_ALERT_INTERVAL_MS = 60 * 60_000;
 interface UnsettledTransaction {
   payhere_pay_id: string;
   gross_amount: string | number | null;
-  payhere_sub_id: string;
+  kind: PurchaseKind;
+  /** Recurring charges */
+  payhere_sub_id: string | null;
+  /** One-time buys */
+  payhere_order_id: string | null;
   satoshis_purchased: number;
   retry_count: number;
   telegram_id: string;
@@ -51,17 +59,20 @@ export class SettlementService {
           .knex('transaction as t')
           .select(
             't.payhere_pay_id',
+            't.kind',
             't.payhere_sub_id',
+            't.payhere_order_id',
             't.satoshis_purchased',
             't.gross_amount',
             't.retry_count',
             't.created_at',
             'u.id as telegram_id',
           )
-          .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
-          .join('user as u', 's.user_id', 'u.id')
+          .join('user as u', 't.user_id', 'u.id')
           .where('t.status', 'SUCCESS')
           .where('t.settled', false)
+          // Held one-time buys wait for a human (POST /transaction/release-hold)
+          .whereNull('t.hold_reason')
           .whereNotNull('t.satoshis_purchased')
           .whereNotNull('t.btc_price_at_purchase')
           .where('t.retry_count', '<', MAX_SETTLEMENT_ATTEMPTS)
@@ -86,8 +97,9 @@ export class SettlementService {
   private async tryTransactionSettlement(transaction: UnsettledTransaction) {
     const {
       payhere_pay_id,
+      kind,
       payhere_sub_id,
-      gross_amount,
+      payhere_order_id,
       telegram_id,
       satoshis_purchased,
       retry_count = 0,
@@ -128,11 +140,7 @@ export class SettlementService {
 
     let confirmed: boolean;
     try {
-      confirmed = await this.isConfirmedByPayHere(
-        payhere_pay_id,
-        payhere_sub_id,
-        gross_amount,
-      );
+      confirmed = await this.isConfirmedByPayHere(transaction);
     } catch (error) {
       // PayHere's API failing says nothing about this payment, so it must not
       // use up settlement attempts (an outage would otherwise flag every
@@ -152,7 +160,10 @@ export class SettlementService {
 
     try {
       if (!confirmed) {
-        const message = `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for subscription ${payhere_sub_id}`;
+        const message =
+          kind === 'ONE_TIME'
+            ? `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for order ${payhere_order_id}`
+            : `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for subscription ${payhere_sub_id}`;
         if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
           const alert = `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) stopped: ${message}. Possibly a forged/replayed notification - check the PayHere dashboard.`;
           this.logger.error(alert);
@@ -173,7 +184,7 @@ export class SettlementService {
         currentRetryCount,
       );
 
-      const memo = SettlementService.transferMemo(payhere_pay_id);
+      const memo = SettlementService.transferMemo(payhere_pay_id, kind);
       const result = await this.bitcoinDeepaService.transferFunds(
         satoshis_purchased,
         telegram_id,
@@ -258,7 +269,7 @@ export class SettlementService {
     this.lastLookupFailureAlertAt = Date.now();
 
     const reason = credentialsProblem
-      ? `PayHere rejected our credentials (HTTP ${status}) - check PAYHERE_APP_ID/PAYHERE_APP_SECRET, the app's Subscription Manager permission and PAYHERE_ENV`
+      ? `PayHere rejected our credentials (HTTP ${status}) - check PAYHERE_APP_ID/PAYHERE_APP_SECRET, the app's API permissions (Subscription Manager / Retrieval) and PAYHERE_ENV`
       : `PayHere payment lookups are still failing after ${Math.round(waitedMs / 60_000)} min`;
     await this.telegramLogger
       .logAlert(
@@ -279,13 +290,19 @@ export class SettlementService {
    * out (at most daily): if that happens for normal payments, the amount
    * check isn't running (e.g. PayHere names the field differently).
    */
-  private async isConfirmedByPayHere(
-    payhere_pay_id: string,
-    payhere_sub_id: string,
-    gross_amount: string | number | null,
-  ): Promise<boolean> {
+  private async isConfirmedByPayHere({
+    payhere_pay_id,
+    kind,
+    payhere_sub_id,
+    payhere_order_id,
+    gross_amount,
+  }: UnsettledTransaction): Promise<boolean> {
+    // Subscription charges are listed by the Subscription Manager API,
+    // one-off checkouts by the Retrieval API (by order_id)
     const payments =
-      await this.payHereService.getSubscriptionPayments(payhere_sub_id);
+      kind === 'ONE_TIME'
+        ? await this.payHereService.getPaymentsByOrderId(payhere_order_id!)
+        : await this.payHereService.getSubscriptionPayments(payhere_sub_id!);
     const payment = payments.find(
       (p) => p.payment_id === String(payhere_pay_id) && p.status === 'RECEIVED',
     );
@@ -309,7 +326,7 @@ export class SettlementService {
       }
       return true;
     }
-    const matches = SettlementService.sameAmount(payment.amount, gross_amount);
+    const matches = sameAmount(payment.amount, gross_amount);
     if (!matches) {
       this.logger.warn(
         `PayHere payment ${payhere_pay_id} amount ${payment.amount} does not match recorded ${gross_amount}`,
@@ -318,21 +335,17 @@ export class SettlementService {
     return matches;
   }
 
-  private static sameAmount(a: string | number, b: string | number): boolean {
-    const x = Number(String(a).replace(/,/g, ''));
-    const y = Number(String(b).replace(/,/g, ''));
-    return Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) < 0.005;
-  }
-
-  /**
-   * Generate memo for fund transfer with package name
-   */
   /**
    * The memo is the transfer's idempotency key on the BitcoinDeepa API (a
    * repeated memo is rejected as already done), so it must be identical on
-   * every attempt: built from the payment id alone, nothing that can change.
+   * every attempt: built from the payment id and its kind, which never change.
    */
-  static transferMemo(payhere_pay_id: string): string {
-    return `DCA purchase (Ref: ${payhere_pay_id})`;
+  static transferMemo(
+    payhere_pay_id: string,
+    kind: PurchaseKind = 'RECURRING',
+  ): string {
+    return kind === 'ONE_TIME'
+      ? `One-time BTC purchase (Ref: ${payhere_pay_id})`
+      : `DCA purchase (Ref: ${payhere_pay_id})`;
   }
 }
