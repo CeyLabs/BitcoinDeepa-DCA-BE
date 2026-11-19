@@ -395,7 +395,12 @@ try {
 - A new subscription is `is_active = true` only if its first payment is SUCCESS; otherwise it is activated by its first SUCCESS.
 - `item_rec_status` -1/1 or `message_type` RECURRING_STOPPED/RECURRING_COMPLETE marks the subscription inactive.
 - SUCCESS payments saved without BTC price data (price API down) are backfilled by a cron every minute.
-- Settlement stops retrying (and alerts) when a BitcoinDeepa transfer times out, since it may have gone through.
+- **BitcoinDeepa bot API** (`src/modules/bitcoindeepa/`): every call is Ed25519-signed (`X-Wallet-ID`, `X-Timestamp`, `X-Nonce`, `X-Signature` over `BDB-SEND-ED25519-V1\nMETHOD\nPATH\nQUERY\nTS\nNONCE\nsha256hex(body)`; sign the exact bytes sent, new nonce per call). Env `BITCOINDEEPA_API_URL`, `BITCOINDEEPA_WALLET_ID`, `BITCOINDEEPA_SEND_PRIVATE_KEY_PEM`; `/send` timeout `BITCOINDEEPA_SEND_TIMEOUT` (95s). A 401/403 alerts at once (key/wallet/clock/IP).
+- The transfer memo is the bot's idempotency key (unique per payment, same on every retry). A timeout/5xx is an unknown outcome: the next attempt checks the user's bot history for the memo, then resends with the same memo (the bot answers "already completed" if it went through).
+- `/send` above the bot's approval threshold answers 202 awaiting approval: `transaction.bot_send_id` holds the bot's id and a 1-min cron polls `/send/status/{id}` (executed = settled; rejected/expired = retries stop + alert). `transaction.settlement_failure` records why the last send failed.
+- `POST /transaction/reset-retry-counts` is the bot's callback when the DCA wallet receives sats (empty body). Requires `X-Callback-Secret` when `BITCOINDEEPA_CALLBACK_SECRET` is set (the bot doesn't send one yet). Only `LOW_BALANCE` payments not attempted in the last 2 min: it skips the backoff and allows at most one more attempt (never gives attempts back), throttled to once per 30s (Redis, plus a per-instance fallback).
+- Settlement races: the claim also requires `bot_send_id IS NULL` and `hold_reason IS NULL`, and clears `settlement_failure` while the attempt is in flight; post-send writes are guarded by `retry_count = <this attempt>`. A status 404 for an approval stops as `UNKNOWN`; an approval not final after 25h is reported once a day.
+- Production requires `BITCOINDEEPA_API_URL`, `BITCOINDEEPA_WALLET_ID` and an Ed25519 `BITCOINDEEPA_SEND_PRIVATE_KEY_PEM` (env validation). `scripts/test-fund-transfer.sh` sends one signed transfer (`DRY_RUN=1` to only sign).
 
 ### Fee System
 

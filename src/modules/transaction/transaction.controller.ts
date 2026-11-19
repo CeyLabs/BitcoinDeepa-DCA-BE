@@ -11,6 +11,9 @@ import {
   Query,
   Param,
   Logger,
+  HttpCode,
+  Headers,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Response } from 'express';
 import { TransactionService } from './transaction.service';
@@ -90,6 +93,24 @@ export class TransactionController {
           : HttpStatus.INTERNAL_SERVER_ERROR;
       return res.status(status).send();
     }
+  }
+
+  /**
+   * Called by the BitcoinDeepa bot (empty body) when the DCA wallet receives
+   * sats: payments that failed for low wallet balance are retried now. When
+   * BITCOINDEEPA_CALLBACK_SECRET is set, the X-Callback-Secret header must
+   * match; until the bot can send one, it is open but harmless to repeat
+   * (see resetLowBalanceRetries). Never moves funds.
+   */
+  @Post('reset-retry-counts')
+  @HttpCode(HttpStatus.OK)
+  async resetLowBalanceRetries(
+    @Headers('x-callback-secret') secret: string | undefined,
+  ) {
+    if (!TransactionService.isBotCallbackAuthorized(secret)) {
+      throw new UnauthorizedException();
+    }
+    return this.transactionService.resetLowBalanceRetries();
   }
 
   @Post('reset-retry-count/:paymentId')

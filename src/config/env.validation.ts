@@ -1,4 +1,5 @@
 import { plainToInstance } from 'class-transformer';
+import { createPrivateKey } from 'crypto';
 import {
   IsIn,
   IsInt,
@@ -16,6 +17,30 @@ import {
   type ValidatorConstraintInterface,
   validateSync,
 } from 'class-validator';
+
+/** An Ed25519 private key PEM (multi-line, or one line with literal "\n") */
+@ValidatorConstraint({ name: 'isEd25519PrivateKeyPem' })
+class IsEd25519PrivateKeyPem implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    if (typeof value !== 'string' || !value) return false;
+    try {
+      return (
+        createPrivateKey(value.replace(/\\n/g, '\n')).asymmetricKeyType ===
+        'ed25519'
+      );
+    } catch {
+      return false;
+    }
+  }
+  defaultMessage(): string {
+    return 'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM must be an Ed25519 private key PEM';
+  }
+}
+
+/** Set, or required because it's production */
+const presentOrProduction =
+  (name: keyof EnvironmentVariables) => (env: EnvironmentVariables) =>
+    isProduction(env) || !!env[name];
 
 const isProduction = (env: EnvironmentVariables) =>
   env.NODE_ENV === 'production';
@@ -162,6 +187,34 @@ class EnvironmentVariables {
   @IsInt()
   @Min(1)
   BITCOINDEEPA_TIMEOUT?: number;
+
+  // BitcoinDeepa bot wallet API (Ed25519-signed). Required in production:
+  // without them every payout stops (HMAC is gone, there is no fallback).
+  // A key that is set must parse as Ed25519 in any environment.
+  @ValidateIf(isProduction)
+  @IsUrl({ require_tld: false, require_protocol: true })
+  BITCOINDEEPA_API_URL?: string;
+
+  @ValidateIf(isProduction)
+  @IsString()
+  @IsNotEmpty()
+  BITCOINDEEPA_WALLET_ID?: string;
+
+  @ValidateIf(presentOrProduction('BITCOINDEEPA_SEND_PRIVATE_KEY_PEM'))
+  @Validate(IsEd25519PrivateKeyPem)
+  BITCOINDEEPA_SEND_PRIVATE_KEY_PEM?: string;
+
+  // Shared secret the bot sends as X-Callback-Secret on its deposit callback.
+  // Optional until the bot supports it; when set, the callback requires it.
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  BITCOINDEEPA_CALLBACK_SECRET?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  BITCOINDEEPA_SEND_TIMEOUT?: number;
 
   // One-time buys (whole LKR). Defaults in buy.service.ts.
   @IsOptional()

@@ -1,4 +1,11 @@
+import { generateKeyPairSync } from 'crypto';
 import { validateEnv } from './env.validation';
+
+const pem = (type: 'ed25519' | 'x25519') =>
+  generateKeyPairSync(type as 'ed25519')
+    .privateKey.export({ type: 'pkcs8', format: 'pem' })
+    .toString();
+const ED25519_PEM = pem('ed25519');
 
 const base = { JWT_SECRET: 'secret' };
 const prodSecrets = {
@@ -19,6 +26,9 @@ const prodSecrets = {
   R2_ACCESS_KEY_ID: 'r2k',
   R2_SECRET_ACCESS_KEY: 'r2s',
   R2_BUCKET: 'statements',
+  BITCOINDEEPA_API_URL: 'https://bitcoindeepa.com',
+  BITCOINDEEPA_WALLET_ID: 'wallet',
+  BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: ED25519_PEM,
 };
 
 describe('validateEnv', () => {
@@ -68,6 +78,38 @@ describe('validateEnv', () => {
     expect(() =>
       validateEnv({ ...prod, CEYPAY_WEBHOOK_PUBLIC_KEY: '', R2_BUCKET: '' }),
     ).not.toThrow();
+  });
+
+  it('requires the BitcoinDeepa bot settings in production (no HMAC fallback)', () => {
+    const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
+    expect(() => validateEnv(prod)).not.toThrow();
+    for (const name of [
+      'BITCOINDEEPA_API_URL',
+      'BITCOINDEEPA_WALLET_ID',
+      'BITCOINDEEPA_SEND_PRIVATE_KEY_PEM',
+    ]) {
+      expect(() => validateEnv({ ...prod, [name]: '' })).toThrow(
+        new RegExp(name),
+      );
+    }
+  });
+
+  it('rejects a bot key that is not an Ed25519 PEM, in any environment', () => {
+    const dev = { ...base, NODE_ENV: 'development' };
+    expect(() =>
+      validateEnv({ ...dev, BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: 'nope' }),
+    ).toThrow(/Ed25519/);
+    expect(() =>
+      validateEnv({ ...dev, BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: pem('x25519') }),
+    ).toThrow(/Ed25519/);
+    // one line with literal \n, as some secret stores keep it
+    expect(() =>
+      validateEnv({
+        ...dev,
+        BITCOINDEEPA_SEND_PRIVATE_KEY_PEM: ED25519_PEM.replace(/\n/g, '\\n'),
+      }),
+    ).not.toThrow();
+    expect(() => validateEnv(dev)).not.toThrow(); // optional outside production
   });
 
   it('allows the bot collect mock only with the CeyPay sandbox', () => {

@@ -108,6 +108,11 @@ export interface PaginatedTransactions {
 }
 
 const SATOSHIS_PER_BTC = 100_000_000;
+/** Settlement attempts per payment before it waits for a human */
+export const MAX_SETTLEMENT_ATTEMPTS = 5;
+/** Longest a /send can be in flight (BITCOINDEEPA_SEND_TIMEOUT 95s) plus margin */
+const SEND_IN_FLIGHT_MS = 2 * 60_000;
+const DEPOSIT_RESET_THROTTLE_SECONDS = 30;
 
 // Unpriced payments older than this are alerted, not auto-priced and paid.
 const BACKFILL_MAX_AGE_HOURS = 24;
@@ -195,6 +200,79 @@ export class TransactionService {
 
     this.logger.warn(`Settlement retries reset for ${payhere_pay_id}`);
     return { payhere_pay_id };
+  }
+
+  /** Per-instance fallback for the callback throttle when Redis is down */
+  private lastDepositResetAt = 0;
+
+  /**
+   * True when the request carries the bot's callback secret, or no secret is
+   * configured (the bot can't send one yet). Constant-time compare.
+   */
+  static isBotCallbackAuthorized(header: string | undefined): boolean {
+    const secret = process.env.BITCOINDEEPA_CALLBACK_SECRET;
+    if (!secret) return true;
+    if (!header) return false;
+    const digest = (v: string) => createHash('sha256').update(v).digest();
+    return timingSafeEqual(digest(header), digest(secret));
+  }
+
+  /**
+   * The bot's deposit callback (POST /transaction/reset-retry-counts): the
+   * DCA wallet got sats, so payments that failed for low wallet balance are
+   * retried now. It only skips the backoff and allows at most one more
+   * attempt (an exhausted row gets one): it never moves funds, and calling
+   * it repeatedly can't keep a payment retrying, because a row only becomes
+   * LOW_BALANCE again after another real attempt. Rows attempted in the last
+   * 2 min are skipped (their send may be in flight), as are held,
+   * awaiting-approval and other failures. Throttled to one reset per 30s
+   * across instances, with a per-instance fallback if Redis is down.
+   */
+  async resetLowBalanceRetries(): Promise<{ reset: number }> {
+    const now = Date.now();
+    if (now - this.lastDepositResetAt < DEPOSIT_RESET_THROTTLE_SECONDS * 1000) {
+      return { reset: 0 };
+    }
+    if (
+      !(await this.redisService.setIfAbsent(
+        'dca:bot-deposit-reset',
+        DEPOSIT_RESET_THROTTLE_SECONDS,
+      ))
+    ) {
+      return { reset: 0 };
+    }
+    this.lastDepositResetAt = now;
+
+    const reset = await this.knexService
+      .knex('transaction')
+      .where({ status: 'SUCCESS', settled: false })
+      .whereNull('hold_reason')
+      .whereNull('bot_send_id')
+      .where('settlement_failure', 'LOW_BALANCE')
+      .where((qb) => {
+        void qb
+          .whereNull('last_retry_at')
+          .orWhere('last_retry_at', '<', new Date(now - SEND_IN_FLIGHT_MS));
+      })
+      .update({
+        retry_count: this.knexService.knex.raw('LEAST(retry_count, ?)', [
+          MAX_SETTLEMENT_ATTEMPTS - 1,
+        ]),
+        last_retry_at: null,
+        settlement_failure: null,
+      });
+    if (reset > 0) {
+      this.logger.warn(
+        `DCA wallet deposit: retrying ${reset} payment(s) that failed for low balance`,
+      );
+      await this.telegramLoggerService
+        .logAlert(
+          'Settlement',
+          `DCA wallet received sats: retrying ${reset} payout(s) that failed for low wallet balance.`,
+        )
+        .catch(() => undefined);
+    }
+    return { reset };
   }
 
   /**
