@@ -108,7 +108,7 @@ describe('Admin transactions list (e2e)', () => {
   });
 
   it('shows one-time buys without a plan and filters by kind', async () => {
-    await ctx.knex('payhere_order').insert({
+    await ctx.knex('buy_order').insert({
       order_id: 'O1',
       user_id: USER,
       kind: 'ONE_TIME',

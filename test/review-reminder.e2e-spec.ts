@@ -53,7 +53,7 @@ describe('Reminder of what waits for a human (e2e)', () => {
 
   /** A one-time buy held at payment time, `age` ago */
   const heldBuy = async (id: string, age: string) => {
-    await ctx.knex('payhere_order').insert({
+    await ctx.knex('buy_order').insert({
       order_id: `order-${id}`,
       user_id: USER,
       kind: 'ONE_TIME',

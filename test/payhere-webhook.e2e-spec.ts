@@ -306,7 +306,7 @@ describe('PayHere webhook (e2e)', () => {
 
       it("can't be locked to another user's order by a replayed notification", async () => {
         // attacker's own checkout; its notification went to their server
-        await ctx.knex('payhere_order').insert({
+        await ctx.knex('buy_order').insert({
           order_id: 'ORDER-ATTACKER',
           user_id: OTHER_USER,
           package_id: PACKAGE_WEEKLY,
@@ -320,7 +320,7 @@ describe('PayHere webhook (e2e)', () => {
           await row('subscription', { payhere_sub_id: 'S-OLD' }),
         ).toMatchObject({ payhere_order_id: null });
 
-        // the victim's genuine renewal (old order: no payhere_order row) works
+        // the victim's genuine renewal (old order: no buy_order row) works
         await notify({
           order_id: 'ORDER-OLD',
           payment_id: 'P-RENEWAL',
@@ -334,7 +334,7 @@ describe('PayHere webhook (e2e)', () => {
       it("binds the user's own new order", async () => {
         const order_id = 'ORDER-OWN';
         await ctx
-          .knex('payhere_order')
+          .knex('buy_order')
           .insert({ order_id, user_id: USER, package_id: PACKAGE_WEEKLY });
         await notify({
           order_id,
@@ -485,7 +485,7 @@ describe('PayHere webhook (e2e)', () => {
     // the second checkout is inserted directly.
     const insertOrder = (id: string) =>
       ctx
-        .knex('payhere_order')
+        .knex('buy_order')
         .insert({ order_id: id, user_id: USER, package_id: PACKAGE_WEEKLY });
 
     it('rejects a different order_id for an existing subscription', async () => {

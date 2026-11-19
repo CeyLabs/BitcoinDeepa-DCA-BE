@@ -44,7 +44,7 @@ export class SubscriptionService {
     package_id: string,
   ): Promise<void> {
     await this.knexService
-      .knex('payhere_order')
+      .knex('buy_order')
       .insert({ order_id, user_id, package_id });
   }
 

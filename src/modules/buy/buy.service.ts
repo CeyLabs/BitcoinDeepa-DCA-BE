@@ -84,7 +84,7 @@ export class BuyService {
   }
 
   /**
-   * Store a ONE_TIME payhere_order and return its PayHere checkout link.
+   * Store a ONE_TIME buy_order and return its PayHere checkout link.
    * The webhook only accepts a one-off payment for an order stored here, for
    * exactly this amount.
    */
@@ -114,7 +114,7 @@ export class BuyService {
       await trx('user').where('id', userId).forNoKeyUpdate().first();
       await this.assertLinkRate(trx, userId);
       await this.assertWithinDailyLimit(trx, userId, amountLkr);
-      await trx('payhere_order').insert({
+      await trx('buy_order').insert({
         order_id: orderId,
         user_id: userId,
         package_id: null,
@@ -152,13 +152,13 @@ export class BuyService {
 
   /**
    * At most BUY_LINKS_PER_HOUR checkouts per user per hour. Counted from
-   * payhere_order (every link stores one), so it holds across instances.
+   * buy_order (every link stores one), so it holds across instances.
    */
   private async assertLinkRate(
     db: Knex.Transaction,
     userId: string,
   ): Promise<void> {
-    const row = await db('payhere_order')
+    const row = await db('buy_order')
       .where('user_id', userId)
       .where('kind', 'ONE_TIME')
       .where('created_at', '>', db.raw("now() - interval '1 hour'"))
@@ -206,7 +206,7 @@ export class BuyService {
       currency: string;
       created_at: Date;
       expires_at: Date;
-    }>('payhere_order')
+    }>('buy_order')
       .select('order_id', 'amount', 'currency', 'created_at', 'expires_at')
       .where({ order_id: orderId, user_id: userId, kind: 'ONE_TIME' })
       .first();

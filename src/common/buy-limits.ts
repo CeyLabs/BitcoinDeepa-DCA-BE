@@ -52,7 +52,7 @@ export async function reservedOneTimeLkr(
   db: Knex | Knex.Transaction,
   userId: string,
 ): Promise<number> {
-  const row = await db('payhere_order as o')
+  const row = await db('buy_order as o')
     .where('o.user_id', userId)
     .where('o.kind', 'ONE_TIME')
     .where('o.expires_at', '>', db.raw('now()'))

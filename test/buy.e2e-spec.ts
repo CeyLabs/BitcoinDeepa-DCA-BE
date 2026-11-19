@@ -68,7 +68,7 @@ describe('One-time buy (e2e)', () => {
         ),
       ).toBe(order_id);
 
-      const order = await ctx.knex('payhere_order').where({ order_id }).first();
+      const order = await ctx.knex('buy_order').where({ order_id }).first();
       expect(order).toMatchObject({
         user_id: USER,
         kind: 'ONE_TIME',
@@ -126,7 +126,7 @@ describe('One-time buy (e2e)', () => {
 
       // an expired unpaid checkout no longer reserves its amount
       await ctx
-        .knex('payhere_order')
+        .knex('buy_order')
         .where({ user_id: USER, kind: 'ONE_TIME' })
         .whereNotIn(
           'order_id',
@@ -141,7 +141,7 @@ describe('One-time buy (e2e)', () => {
 
     it('gives each checkout an expiry', async () => {
       const { order_id } = await newBuy(1000);
-      const order = await ctx.knex('payhere_order').where({ order_id }).first();
+      const order = await ctx.knex('buy_order').where({ order_id }).first();
       const minutes =
         (new Date(order.expires_at).getTime() -
           new Date(order.created_at).getTime()) /
@@ -359,7 +359,7 @@ describe('One-time buy (e2e)', () => {
     it('holds a payment made after the checkout expired', async () => {
       const { order_id, amount } = await newBuy(1000);
       await ctx
-        .knex('payhere_order')
+        .knex('buy_order')
         .where({ order_id })
         .update({ expires_at: ctx.knex.raw("now() - interval '1 hour'") });
       await notify({
@@ -397,7 +397,7 @@ describe('One-time buy (e2e)', () => {
       const settlement = ctx.app.get(SettlementService);
       const { order_id, amount } = await newBuy(1000);
       await ctx
-        .knex('payhere_order')
+        .knex('buy_order')
         .where({ order_id })
         .update({ expires_at: ctx.knex.raw("now() - interval '1 hour'") });
       await notify({
