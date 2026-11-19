@@ -481,6 +481,10 @@ export class BitcoinDeepaService {
 
   async getUserBalance(telegramId: number): Promise<UserBalanceResponse> {
     const requestBody: UserBalanceRequest = { telegram_id: telegramId };
+    // No secrets here: the signature, timestamp and nonce are added per call
+    this.logger.log(
+      `BitcoinDeepa balance request: POST ${this.apiUrl}${this.balanceEndpoint} wallet=${this.walletId} body=${JSON.stringify(requestBody)}`,
+    );
     try {
       const response = await this.signedRequest<UserBalanceResponse>(
         'POST',
