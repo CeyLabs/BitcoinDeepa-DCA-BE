@@ -214,7 +214,7 @@ export async function createTestApp(): Promise<TestContext> {
 export async function resetData(ctx: TestContext): Promise<void> {
   const { knex, app } = ctx;
   await knex.raw(
-    'TRUNCATE sell_order, user_bank_account, "transaction", subscription, payhere_order, "user", package, admin_user, admin_verification RESTART IDENTITY CASCADE',
+    'TRUNCATE exchange_rate_log, sell_order, user_bank_account, "transaction", subscription, payhere_order, "user", package, admin_user, admin_verification RESTART IDENTITY CASCADE',
   );
   await knex('package').insert([
     {

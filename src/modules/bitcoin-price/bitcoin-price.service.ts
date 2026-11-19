@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import axios, { AxiosResponse } from 'axios';
 import Big from 'big.js';
+import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { CeyPayError, CeyPayService } from '../ceypay/ceypay.service';
@@ -44,6 +46,21 @@ const CHANGE_24H_CACHE_TTL_SECONDS = parseInt(
   10,
 );
 const SATOSHIS_PER_BTC = 100_000_000;
+/** One instance records the rate per minute (the claim outlives a late tick) */
+const RATE_LOG_CLAIM_TTL_SECONDS = 50;
+/** Default for EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS */
+const DEFAULT_FALLBACK_MAX_AGE_SECONDS = 300;
+
+/**
+ * How old a logged rate may be and still price a payment when the live price
+ * is unavailable (EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS, 0 = never).
+ */
+export const fallbackMaxAgeSeconds = (): number => {
+  const value = Number(process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS);
+  return Number.isInteger(value) && value >= 0
+    ? value
+    : DEFAULT_FALLBACK_MAX_AGE_SECONDS;
+};
 
 // Integer division, rounded down (its own constructor: Big.DP/RM are global)
 const BigFloor = Big();
@@ -84,6 +101,7 @@ export class BitcoinPriceService {
     private readonly redisService: RedisService,
     private readonly ceyPay: CeyPayService,
     private readonly coinMarketCap: CoinMarketCapService,
+    private readonly knexService: KnexService,
   ) {}
 
   /** BTC/LKR with its parts; null when either rate is unavailable. Never throws. */
@@ -111,11 +129,20 @@ export class BitcoinPriceService {
     return rate ? { btc_price: rate.btcLkr, currency: 'LKR' } : null;
   }
 
+  /**
+   * Sats for a buy/DCA payment. Priced live; when the live price is
+   * unavailable, from the latest exchange_rate_log row if it is recent enough
+   * (see getRecentLoggedRate). Null when there is neither.
+   */
   async calculateSatoshis(
     amount: number,
     currency: string,
   ): Promise<{ satoshis: number; btc_price: number; currency: string } | null> {
-    const priceData = await this.getBitcoinPrice(currency);
+    let priceData = await this.getBitcoinPrice(currency);
+    if (!priceData && currency.toUpperCase() === 'LKR') {
+      const logged = await this.getRecentLoggedRate();
+      if (logged) priceData = { btc_price: logged.btcLkr, currency: 'LKR' };
+    }
     if (!priceData) return null;
 
     return {
@@ -123,6 +150,95 @@ export class BitcoinPriceService {
       btc_price: priceData.btc_price,
       currency: priceData.currency,
     };
+  }
+
+  /**
+   * Append the current rate to exchange_rate_log as the one active row
+   * (the previous one is deactivated), once a minute across instances.
+   * Nothing is written while a rate is unavailable, so the active row's age
+   * says how long the outage has lasted. (The rate can be up to the cache
+   * TTLs older than its created_at: 30s for BTC/USD.)
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async recordExchangeRate(): Promise<void> {
+    try {
+      const claimed = await this.redisService.setIfAbsent(
+        CacheKeys.bitcoin.rateLogClaim(),
+        RATE_LOG_CLAIM_TTL_SECONDS,
+      );
+      if (!claimed) return;
+      const rate = await this.getBtcLkrRate();
+      if (!rate) return;
+      await this.knexService.knex.transaction(async (trx) => {
+        // One writer at a time: two instances deactivating and inserting
+        // together would both insert an active row (unique index violation)
+        await trx.raw(
+          "SELECT pg_advisory_xact_lock(hashtext('exchange_rate_log'))",
+        );
+        await trx('exchange_rate_log')
+          .where('is_active', true)
+          .update({ is_active: false });
+        await trx('exchange_rate_log').insert({
+          btc_usd: rate.btcUsd,
+          usdt_lkr: rate.usdtLkr,
+          btc_lkr: rate.btcLkr,
+          is_active: true,
+        });
+      });
+    } catch (error) {
+      this.logger.error(`Recording the exchange rate: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * The active logged rate, if it is at most
+   * EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS old. Only for pricing a payment
+   * that has already been made while the live price is down - quotes and
+   * displayed prices stay live. Null when there is none. Never throws.
+   */
+  async getRecentLoggedRate(): Promise<BtcLkrRate | null> {
+    const maxAge = fallbackMaxAgeSeconds();
+    if (maxAge === 0) return null;
+    try {
+      const row = await this.knexService
+        .knex('exchange_rate_log')
+        .select(
+          'btc_usd',
+          'usdt_lkr',
+          'btc_lkr',
+          this.knexService.knex.raw(
+            'extract(epoch from now() - created_at)::int as age_seconds',
+          ),
+        )
+        .where('is_active', true)
+        .where(
+          'created_at',
+          '>=',
+          this.knexService.knex.raw('now() - make_interval(secs => ?)', [
+            maxAge,
+          ]),
+        )
+        .first<{
+          btc_usd: string;
+          usdt_lkr: string;
+          btc_lkr: string;
+          age_seconds: number;
+        }>();
+      if (!row) return null;
+      this.logger.warn(
+        `Live BTC/LKR unavailable: using the rate logged ${row.age_seconds}s ago (${row.btc_lkr} LKR/BTC)`,
+      );
+      return {
+        btcLkr: Number(row.btc_lkr),
+        btcUsd: Number(row.btc_usd),
+        usdtLkr: Number(row.usdt_lkr),
+      };
+    } catch (error) {
+      this.logger.error(
+        `Reading the logged exchange rate: ${errorMessage(error)}`,
+      );
+      return null;
+    }
   }
 
   /**

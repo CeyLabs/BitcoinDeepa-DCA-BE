@@ -559,6 +559,103 @@ describe('PayHere webhook (e2e)', () => {
       ).toBe(sats(980));
     });
 
+    it('prices the payment from the rate log when the live price is down', async () => {
+      const { order_id } = await newOrder();
+      const { BitcoinPriceService } = await import(
+        '../src/modules/bitcoin-price/bitcoin-price.service'
+      );
+      const price = ctx.app.get(BitcoinPriceService);
+      // The cron logged a rate a minute ago: 64,000 × 330 = 21,120,000
+      await price.recordExchangeRate();
+      await ctx.knex('exchange_rate_log').update({
+        btc_usd: 64_000,
+        btc_lkr: 21_120_000,
+        created_at: new Date(Date.now() - 60_000),
+      });
+
+      const spy = jest.spyOn(price, 'getBtcUsd').mockResolvedValue(null);
+      try {
+        await notify({
+          order_id,
+          payment_id: 'P1',
+          subscription_id: 'S1',
+        }).expect(200);
+      } finally {
+        spy.mockResolvedValue(65_000);
+      }
+      const tx = await row('transaction', { payhere_pay_id: 'P1' });
+      expect(Number(tx.btc_price_at_purchase)).toBe(21_120_000);
+      // 980 LKR net / 21,120,000
+      expect(Number(tx.satoshis_purchased)).toBe(4640);
+    });
+
+    it('keeps one active rate, and a deactivated rate is not used', async () => {
+      const { order_id } = await newOrder();
+      const { BitcoinPriceService } = await import(
+        '../src/modules/bitcoin-price/bitcoin-price.service'
+      );
+      const price = ctx.app.get(BitcoinPriceService);
+      await price.recordExchangeRate();
+      // Release the once-a-minute claim
+      const { RedisService } = await import(
+        '../src/modules/redis/redis.service'
+      );
+      await ctx.app.get(RedisService).delByPattern('dca:rate-log:*');
+      await price.recordExchangeRate();
+      const rows = await ctx
+        .knex('exchange_rate_log')
+        .select('id', 'is_active')
+        .orderBy('id');
+      expect(rows.map((r: { is_active: boolean }) => r.is_active)).toEqual([
+        false,
+        true,
+      ]);
+
+      // A human takes the rate out of use
+      await ctx.knex('exchange_rate_log').update({ is_active: false });
+      const spy = jest.spyOn(price, 'getBtcUsd').mockResolvedValue(null);
+      try {
+        await notify({
+          order_id,
+          payment_id: 'P1',
+          subscription_id: 'S1',
+        }).expect(200);
+      } finally {
+        spy.mockResolvedValue(65_000);
+      }
+      expect(await row('transaction', { payhere_pay_id: 'P1' })).toMatchObject({
+        status: 'SUCCESS',
+        satoshis_purchased: null,
+      });
+    });
+
+    it('a logged rate that is too old is not used', async () => {
+      const { order_id } = await newOrder();
+      const { BitcoinPriceService } = await import(
+        '../src/modules/bitcoin-price/bitcoin-price.service'
+      );
+      const price = ctx.app.get(BitcoinPriceService);
+      await price.recordExchangeRate();
+      await ctx
+        .knex('exchange_rate_log')
+        .update({ created_at: new Date(Date.now() - 6 * 60_000) });
+
+      const spy = jest.spyOn(price, 'getBtcUsd').mockResolvedValue(null);
+      try {
+        await notify({
+          order_id,
+          payment_id: 'P1',
+          subscription_id: 'S1',
+        }).expect(200);
+      } finally {
+        spy.mockResolvedValue(65_000);
+      }
+      expect(await row('transaction', { payhere_pay_id: 'P1' })).toMatchObject({
+        status: 'SUCCESS',
+        satoshis_purchased: null,
+      });
+    });
+
     it('does not auto-price old payments; alerts about them instead', async () => {
       const { order_id } = await newOrder();
       const price = ctx.app.get(

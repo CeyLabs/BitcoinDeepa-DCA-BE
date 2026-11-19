@@ -4,6 +4,7 @@ import {
   btcLkrRate,
   satoshisFor,
 } from './bitcoin-price.service';
+import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
 import { CeyPayError, CeyPayService } from '../ceypay/ceypay.service';
 import { CoinMarketCapService } from '../coinmarketcap/coinmarketcap.service';
@@ -38,10 +39,31 @@ describe('BitcoinPriceService', () => {
   const redis = new RedisService();
   const ceyPay = { getQuote: jest.fn() };
   const cmc = { fetchBitcoinData: jest.fn() };
+  // exchange_rate_log: `latest` is what the "recent row" query finds
+  let latest: Record<string, unknown> | undefined;
+  const insert = jest.fn();
+  const update = jest.fn();
+  const query = {
+    select: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    first: jest.fn(() => Promise.resolve(latest)),
+    insert,
+    update,
+  };
+  const raw = jest.fn((sql: string, bindings?: unknown[]) => ({
+    sql,
+    bindings,
+  }));
+  const trx = Object.assign(jest.fn().mockReturnValue(query), { raw });
+  const knex = Object.assign(jest.fn().mockReturnValue(query), {
+    raw,
+    transaction: jest.fn((work: (t: typeof trx) => Promise<void>) => work(trx)),
+  });
   const service = new BitcoinPriceService(
     redis,
     ceyPay as unknown as CeyPayService,
     cmc as unknown as CoinMarketCapService,
+    { knex } as unknown as KnexService,
   );
 
   beforeEach(() => {
@@ -54,6 +76,14 @@ describe('BitcoinPriceService', () => {
       price: 99_999,
       percent_change_24h: 2,
     });
+    latest = undefined;
+    insert.mockReset();
+    insert.mockResolvedValue([]);
+    update.mockReset();
+    update.mockResolvedValue(1);
+    query.where.mockClear();
+    query.first.mockClear();
+    delete process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS;
   });
   afterAll(() => get.mockRestore());
 
@@ -107,6 +137,98 @@ describe('BitcoinPriceService', () => {
     arrange();
     await expect(service.getBtcLkrRate()).resolves.toBeNull();
     await expect(service.calculateSatoshis(980, 'LKR')).resolves.toBeNull();
+  });
+
+  describe('exchange rate log', () => {
+    const logged = {
+      btc_usd: '64000.00000000',
+      usdt_lkr: '330.00000000',
+      btc_lkr: '21120000.00',
+      age_seconds: 42,
+    };
+
+    it('records the live rate as the active row, deactivating the last one', async () => {
+      await service.recordExchangeRate();
+      expect(trx).toHaveBeenCalledWith('exchange_rate_log');
+      expect(query.where).toHaveBeenCalledWith('is_active', true);
+      expect(update).toHaveBeenCalledWith({ is_active: false });
+      expect(insert).toHaveBeenCalledWith({
+        btc_usd: 65000,
+        usdt_lkr: 330,
+        btc_lkr: 21_450_000,
+        is_active: true,
+      });
+      expect(update.mock.invocationCallOrder[0]).toBeLessThan(
+        insert.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('records nothing while the price is unavailable', async () => {
+      get.mockRejectedValue(new Error('down'));
+      await service.recordExchangeRate();
+      expect(insert).not.toHaveBeenCalled();
+      // The last good rate stays active
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it('a failed insert does not throw (it runs in a cron)', async () => {
+      insert.mockRejectedValue(new Error('db down'));
+      await expect(service.recordExchangeRate()).resolves.toBeUndefined();
+    });
+
+    it('prices a payment from the latest recent row when the live price is down', async () => {
+      get.mockRejectedValue(new Error('down'));
+      latest = logged;
+      // 980 / 21,120,000 = 0.00004640151... BTC
+      await expect(service.calculateSatoshis(980, 'LKR')).resolves.toEqual({
+        satoshis: 4640,
+        btc_price: 21_120_000,
+        currency: 'LKR',
+      });
+      // Only the active row, within the max age (default 5 min)
+      expect(query.where).toHaveBeenCalledWith('is_active', true);
+      expect(query.where).toHaveBeenCalledWith(
+        'created_at',
+        '>=',
+        expect.objectContaining({ bindings: [300] }),
+      );
+    });
+
+    it('uses the live price when there is one, not the log', async () => {
+      latest = logged;
+      await expect(
+        service.calculateSatoshis(980, 'LKR'),
+      ).resolves.toMatchObject({ btc_price: 21_450_000 });
+      expect(query.first).not.toHaveBeenCalled();
+    });
+
+    it('the max age is configurable, and 0 turns the fallback off', async () => {
+      get.mockRejectedValue(new Error('down'));
+      latest = logged;
+      process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS = '120';
+      await service.calculateSatoshis(980, 'LKR');
+      expect(query.where).toHaveBeenCalledWith(
+        'created_at',
+        '>=',
+        expect.objectContaining({ bindings: [120] }),
+      );
+
+      process.env.EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS = '0';
+      await expect(service.calculateSatoshis(980, 'LKR')).resolves.toBeNull();
+    });
+
+    it('quotes and displayed prices never use the log', async () => {
+      get.mockRejectedValue(new Error('down'));
+      latest = logged;
+      await expect(service.getBtcLkrRate()).resolves.toBeNull();
+      await expect(service.getBitcoinPrice('LKR')).resolves.toBeNull();
+    });
+
+    it('a failed lookup is treated as no rate', async () => {
+      get.mockRejectedValue(new Error('down'));
+      query.first.mockRejectedValueOnce(new Error('db down'));
+      await expect(service.calculateSatoshis(980, 'LKR')).resolves.toBeNull();
+    });
   });
 
   it('getUsdtLkr passes on CeyPay errors', async () => {
