@@ -5,6 +5,7 @@ import {
   UseGuards,
   Get,
   Param,
+  Patch,
   UsePipes,
   ValidationPipe,
   HttpException,
@@ -15,6 +16,7 @@ import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { SetAvatarDto } from './dto/set-avatar.dto';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { DiditService } from '../didit/didit.service';
 import { KycStatus } from './enums/kyc-status.enum';
@@ -65,6 +67,15 @@ export class UserController {
       ...currentUser,
       is_profile_complete: this.userService.isProfileComplete(currentUser),
     };
+  }
+
+  /** Save the user's avatar seed (the app draws the picture). Returns the profile like GET /user/me. */
+  @Patch('avatar')
+  @UseGuards(ConditionalAuthGuard)
+  async setAvatar(@CurrentUser() user: JwtPayload, @Body() body: SetAvatarDto) {
+    await this.userService.getUserOrThrow(user.id);
+    await this.userService.setAvatarSeed(user.id, body.seed);
+    return this.getMe(user);
   }
 
   @Get('exists/:telegramId')
