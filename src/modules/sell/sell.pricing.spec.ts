@@ -1,9 +1,4 @@
-import {
-  btcLkrRate,
-  ceyPayWebhookUrl,
-  priceSale,
-  usdtFor,
-} from './sell.service';
+import { ceyPayWebhookUrl, priceSale, usdtFor } from './sell.service';
 
 describe('priceSale', () => {
   it('prices the whole sale (rounded down) and takes the fee in LKR (rounded up)', () => {
@@ -30,14 +25,6 @@ describe('priceSale', () => {
       feeLkr: '0.00',
       amountLkr: '10000.00',
     });
-  });
-});
-
-describe('btcLkrRate', () => {
-  it('is BTC/USD × USDT/LKR, rounded down to cents', () => {
-    expect(btcLkrRate(65_000, 330)).toBe(21_450_000);
-    // 62,655.37 × 331.737 = 20,785,104.47769
-    expect(btcLkrRate(62_655.37, 331.737)).toBe(20_785_104.47);
   });
 });
 

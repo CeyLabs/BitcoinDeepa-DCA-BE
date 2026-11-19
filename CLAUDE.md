@@ -9,7 +9,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - Database: PostgreSQL with Knex.js ORM
 - Authentication: JWT tokens with Telegram WebApp InitData validation
 - Payment Gateway: PayHere (Sri Lankan payment processor)
-- Bitcoin Integration: CoinMarketCap API for real-time BTC prices and DCA calculations
+- Bitcoin Integration: BTC/LKR = Ceylon Cash BTC/USD × CeyPay USDT/LKR (buy, DCA, sell, wallet)
 - Time Management: dayjs for date/time operations
 - Development: bun (package manager; app runs on Node), ESLint, Prettier
 
@@ -54,10 +54,9 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Connection monitoring and keep-alive mechanisms
 
 8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
-   - CoinMarketCap API integration for real-time Bitcoin prices
-   - Automatic satoshi calculation for DCA transactions
-   - Redis price caching: BTC/USD `BTC_PRICE_CACHE_TTL` (300s default), USD/LKR `USD_LKR_CACHE_TTL` (20s default)
-   - Support for multiple currencies (LKR, USD, etc.)
+   - One price everywhere: `getBtcLkrRate()` = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`) × CeyPay's USDT/LKR (`getQuote('1')`), rounded down to cents. Each rate is cached 30s in Redis. Returns null (never throws) when either is down; callers answer 503 or leave the payment for the backfill cron
+   - Automatic satoshi calculation for buys and DCA payments (`calculateSatoshis`, LKR only)
+   - CoinMarketCap (`COINMARKETCAP_API_KEY`) is display only: the wallet's `24_hr_change` (`getBitcoin24HrChange()`, cached `BTC_PRICE_CACHE_TTL`, 0 when unavailable). Never use it for a price
 
 9. **Didit KYC Module** (`src/modules/didit/`)
    - KYC (Know Your Customer) verification integration via Didit API
@@ -88,7 +87,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - **Limits:** `SELL_MIN_SATS` (1,000), `SELL_MAX_SATS` per sale (5,000,000), `SELL_DAILY_MAX_SATS` per member over a rolling 24h (20,000,000; counts `COUNTED_SELL_STATUSES`). Checked at quote and again at confirm under a lock on the member's `user` row
    - **Bot collect mock:** `BITCOINDEEPA_COLLECT_MOCK=true` treats every debit as done without calling the bot (its collect endpoint isn't built yet) and skips the refund transfer. Env validation refuses it unless `CEYPAY_API_URL` is the sandbox. Collect 5xx = unknown outcome (the contract isn't fixed yet)
    - **Who can sell:** KYC `APPROVED` (`KycVerifiedGuard`) **and** a verified bank account (`BankVerifiedGuard` from bank-account). Both are re-checked at confirm, and the account again at payout time
-   - **Pricing:** BTC/LKR = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`, `BitcoinPriceService.getBtcUsdSellPrice()`, cached 30s) × CeyPay's USDT/LKR (cached 30s), rounded down to cents, so our LKR matches what CeyPay pays for the same USDT. Both rates are stored on the order. CoinMarketCap is not used for selling. The whole sale is priced in LKR (`gross_lkr`, rounded down), then the fee `BITCOINDEEPA_SELL_FEE_BASIS_POINTS` comes off it in LKR (`fee_lkr`, rounded up); `amount_lkr` is what the user gets. All sats collected stay with us. Quotes live `SELL_QUOTE_TTL_SECONDS`
+   - **Pricing:** BTC/LKR from `BitcoinPriceService.getBtcLkrRate()` (see Bitcoin Price Module), so our LKR matches what CeyPay pays for the same USDT. Both rates are stored on the order. The whole sale is priced in LKR (`gross_lkr`, rounded down), then the fee `BITCOINDEEPA_SELL_FEE_BASIS_POINTS` comes off it in LKR (`fee_lkr`, rounded up); `amount_lkr` is what the user gets. All sats collected stay with us. Quotes live `SELL_QUOTE_TTL_SECONDS`
    - **Confirm:** commits `QUOTED` → `COLLECTING` first (so a crash after the debit can't roll back to `QUOTED`), then, with no lock held, debits the user via the bot's `POST /api/v1/collect` (`BitcoinDeepaService.collectFunds`, memo `sell:<orderId>` = idempotent), then locks a CeyPay USDT quote sized so CeyPay's `amountLkr` >= ours and creates the off-ramp (`externalRef` = order id, CeyPay dedupes on it). The user always gets the LKR we quoted; CeyPay's USDT numbers are bookkeeping (it pays from our prefunded LKR float)
    - **Statuses** (`sell_order.status`, forward-only conditional updates): `QUOTED` → `COLLECTING` → `SATS_COLLECTED` → `PAYOUT_PENDING` → `COMPLETED`; `QUOTED`/`COLLECTING` → `EXPIRED` (nothing moved); payout failure → `REFUNDING` → `REFUNDED` (full sats back, memo `sell-refund:<id>`); any unknown transfer outcome (collect/refund timeout or 5xx, payout retries exhausted, stuck in `COLLECTING` > 2 min or `REFUNDING` > 5 min) → `NEEDS_REVIEW` + Telegram alert, never retried automatically. A `COMPLETED` webhook for a refunded order alerts (member may have both)
    - **CeyPay webhook** `POST /sell/ceypay-webhook`: ED25519 (`CEYPAY_WEBHOOK_PUBLIC_KEY`) over `X-Webhook-Timestamp` (ms, ±5 min) + raw body. Bound to the order by `externalRef` + `paymentId`. Crons: expire quotes (1 min), retry payout creation with 2^n min backoff up to 5 attempts (30s), poll CeyPay for `PAYOUT_PENDING` older than 10 min (5 min), stuck `COLLECTING`/`REFUNDING` → `NEEDS_REVIEW` (1 min), alert once on a payout pending > 2 h (10 min). Unknown webhook event types are acknowledged and ignored
@@ -192,10 +191,9 @@ PAYHERE_APP_SECRET=your_app_secret
 PAYHERE_ENV=sandbox  # or live
 
 # Bitcoin DCA Configuration
-COINMARKETCAP_API_KEY=your_cmc_api_key
 ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
-BTC_PRICE_CACHE_TTL=300  # BTC/USD cache in seconds (default: 300)
-USD_LKR_CACHE_TTL=20  # USD/LKR cache in seconds (default: 20)
+COINMARKETCAP_API_KEY=your_cmc_api_key  # wallet 24h change only (display)
+BTC_PRICE_CACHE_TTL=300  # 24h change cache in seconds (default: 300)
 
 # Fee Configuration
 PAYHERE_FEE_BASIS_POINTS=100  # Payment processor fee (1 bp = 0.01%)
@@ -218,7 +216,7 @@ BUY_LINKS_PER_HOUR=10
 BITCOINDEEPA_SELL_FEE_BASIS_POINTS=100  # taken off the LKR amount
 SELL_QUOTE_TTL_SECONDS=60
 SELL_MIN_SATS=1000
-CEYPAY_API_URL=https://api.ceypay.io
+CEYPAY_API_URL=https://api.ceypay.io  # CEYPAY_API_* required in production even with selling off (prices buys/DCA)
 CEYPAY_API_KEY_ID=ak_live_...  # BitcoinDeepa's CeyPay merchant must be account_type AGGREGATOR
 CEYPAY_API_SECRET=sk_live_...
 CEYPAY_WEBHOOK_PUBLIC_KEY=...  # ED25519 public key (PEM, or base64 DER)
@@ -367,7 +365,7 @@ try {
 
 ### Configuration
 - `ConfigModule.forRoot({ isGlobal: true, validate })` loads `.env` and validates it at startup (`src/config/env.validation.ts`). Add new env vars there; the app refuses to boot on missing/invalid values.
-- Production additionally requires `TELEGRAM_BOT_TOKEN`, `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET`, `DIDIT_WEBHOOK_SECRET`, and the CeyPay + R2 sell-flow variables.
+- Production additionally requires `TELEGRAM_BOT_TOKEN`, `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET`, `DIDIT_WEBHOOK_SECRET`, the CeyPay API (`CEYPAY_API_URL`, `CEYPAY_API_KEY_ID`, `CEYPAY_API_SECRET`, it prices every buy), and with `SELL_ENABLED=true` the CeyPay webhook key + R2.
 - `app.enableShutdownHooks()` is on, so `onModuleDestroy` (DB pool, Redis) runs on SIGTERM.
 
 ### Database Migrations

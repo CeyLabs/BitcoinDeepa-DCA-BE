@@ -8,23 +8,24 @@ import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/app.setup';
 import { KnexService } from '../../src/modules/knex/knex.service';
 import { RedisService } from '../../src/modules/redis/redis.service';
-import { CoinMarketCapService } from '../../src/modules/coinmarketcap/coinmarketcap.service';
 import { BitcoinPriceService } from '../../src/modules/bitcoin-price/bitcoin-price.service';
 import { BitcoinDeepaService } from '../../src/modules/bitcoindeepa/bitcoindeepa.service';
 import { PayHereService } from '../../src/modules/payhere/payhere.service';
 import { DiditService } from '../../src/modules/didit/didit.service';
 import { CeyPayService } from '../../src/modules/ceypay/ceypay.service';
 import { R2StorageService } from '../../src/modules/storage/r2-storage.service';
+import { CoinMarketCapService } from '../../src/modules/coinmarketcap/coinmarketcap.service';
 import { TelegramLoggerService } from '../../src/modules/telegram-logger/telegram-logger.service';
 
-/** Fixed market data so satoshi amounts are deterministic. */
+/**
+ * Fixed market data so satoshi amounts are deterministic: Ceylon Cash BTC/USD
+ * and CeyPay's USDT/LKR => 1 BTC = 21,450,000 LKR (buy, DCA and sell).
+ */
 export const BTC_USD = 65_000;
-export const USD_LKR = 300; // => 1 BTC = 19,500,000 LKR
-export const sats = (netLkr: number) =>
-  Math.floor((netLkr / (BTC_USD * USD_LKR)) * 100_000_000);
-
-/** Ceylon Cash BTC buying rate (sell flow) and CeyPay's USDT/LKR rate */
 export const CEYPAY_USDT_LKR = 330;
+export const BTC_LKR = BTC_USD * CEYPAY_USDT_LKR;
+export const sats = (netLkr: number) =>
+  Math.floor((netLkr / BTC_LKR) * 100_000_000);
 export const BANKS = [
   { code: 7010, name: 'Bank of Ceylon' },
   { code: 7056, name: 'Commercial Bank PLC' },
@@ -98,7 +99,7 @@ export async function createTestApp(): Promise<TestContext> {
     getBanks: jest.fn().mockResolvedValue(BANKS),
     upsertUser: jest.fn(),
     addBankAccount: jest.fn(),
-    getQuote: jest.fn(),
+    getQuote: jest.fn(quoteAt(CEYPAY_USDT_LKR)),
     createOfframp: jest.fn(),
     getOfframp: jest.fn(),
     verifyWebhookSignature: jest.fn(
@@ -114,6 +115,7 @@ export async function createTestApp(): Promise<TestContext> {
   };
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    // 24h change only (display); prices never come from CoinMarketCap
     .overrideProvider(CoinMarketCapService)
     .useValue({
       fetchBitcoinData: jest
@@ -138,15 +140,10 @@ export async function createTestApp(): Promise<TestContext> {
   const scheduler = app.get(SchedulerRegistry);
   scheduler.getCronJobs().forEach((job) => void job.stop());
 
-  // USD/LKR comes from an external FX API - pin it.
-  // (private method - typed through app.get's result type parameter)
-  const priceService = app.get<
-    BitcoinPriceService,
-    { getUsdLkrRate: () => Promise<number | null> }
-  >(BitcoinPriceService);
-  jest.spyOn(priceService, 'getUsdLkrRate').mockResolvedValue(USD_LKR);
+  // BTC/USD comes from Ceylon Cash's FX API - pin it. (USDT/LKR comes from
+  // the CeyPay mock's quotes, see quoteAt.)
   jest
-    .spyOn(app.get(BitcoinPriceService), 'getBtcUsdSellPrice')
+    .spyOn(app.get(BitcoinPriceService), 'getBtcUsd')
     .mockResolvedValue(BTC_USD);
   const notifyUser = jest
     .spyOn(app.get(TelegramLoggerService), 'notifyUser')
@@ -260,6 +257,16 @@ export async function resetData(ctx: TestContext): Promise<void> {
   resetSellMocks(ctx);
 }
 
+/** A CeyPay getQuote mock at a fixed USDT/LKR rate. */
+export const quoteAt = (rateUsdtLkr: number) => (amountUsdt: string) =>
+  Promise.resolve({
+    fxLockId: randomUUID(),
+    rateUsdtLkr,
+    amountUsdt: Number(amountUsdt),
+    amountLkr: Math.round(Number(amountUsdt) * rateUsdtLkr * 100) / 100,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+
 /** Default CeyPay / R2 / wallet behaviour for the sell flow. */
 export function resetSellMocks(ctx: TestContext): void {
   const { ceyPay, storage, bitcoinDeepa } = ctx;
@@ -273,15 +280,7 @@ export function resetSellMocks(ctx: TestContext): void {
       a: { bankCode: number; accountNumber: string; accountName: string },
     ) => Promise.resolve({ userBankId: randomUUID(), ...a, bankName: 'Bank' }),
   );
-  ceyPay.getQuote.mockImplementation((amountUsdt: string) =>
-    Promise.resolve({
-      fxLockId: randomUUID(),
-      rateUsdtLkr: CEYPAY_USDT_LKR,
-      amountUsdt: Number(amountUsdt),
-      amountLkr: Math.round(Number(amountUsdt) * CEYPAY_USDT_LKR * 100) / 100,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    }),
-  );
+  ceyPay.getQuote.mockImplementation(quoteAt(CEYPAY_USDT_LKR));
   ceyPay.createOfframp.mockImplementation((body: { externalRef: string }) =>
     Promise.resolve({
       paymentId: randomUUID(),

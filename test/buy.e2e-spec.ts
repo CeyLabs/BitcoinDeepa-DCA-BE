@@ -179,7 +179,7 @@ describe('One-time buy (e2e)', () => {
     it('shows a minimum, maximum and fees on the price endpoint', async () => {
       const res = await http().get('/buy/price').set(auth()).expect(200);
       expect(res.body).toEqual({
-        btcLkrPrice: 19_500_000,
+        btcLkrPrice: 21_450_000,
         paymentProcessorFeeBasisPoints: 100,
         bitcoindeepaFeeBasisPoints: 100,
         minLkr: 100,

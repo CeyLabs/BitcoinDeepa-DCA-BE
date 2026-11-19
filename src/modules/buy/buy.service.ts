@@ -65,8 +65,8 @@ export class BuyService {
     maxLkr: number;
     dailyMaxLkr: number;
   }> {
-    const price = await this.bitcoinPriceService.getCurrentPrice();
-    if (!price) {
+    const rate = await this.bitcoinPriceService.getBtcLkrRate();
+    if (!rate) {
       throw new ServiceUnavailableException(
         'Bitcoin price is unavailable right now, please try again shortly',
       );
@@ -74,7 +74,7 @@ export class BuyService {
     // Fees don't depend on the amount; computed on 0 just to read the bps
     const fees = computeBuyFees(0);
     return {
-      btcLkrPrice: price.lkr,
+      btcLkrPrice: rate.btcLkr,
       paymentProcessorFeeBasisPoints: fees.paymentProcessorFeeBps,
       bitcoindeepaFeeBasisPoints: fees.bitcoindeepaFeeBps,
       minLkr: buyLimits.minLkr(),

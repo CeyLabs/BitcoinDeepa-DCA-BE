@@ -1262,7 +1262,7 @@ export class TransactionService {
       .leftJoin('payhere_order as o', 't.payhere_order_id', 'o.order_id');
   }
 
-  /** Wallet balance (BitcoinDeepa) + market data (CMC). Never throws. */
+  /** Wallet balance (BitcoinDeepa) + BTC price and 24h change. Never throws. */
   private async fetchBalanceAndMarket(
     user_id: string,
   ): Promise<Omit<DcaSummary, 'dca' | 'currency'>> {
@@ -1278,23 +1278,19 @@ export class TransactionService {
       }
     }
 
-    let change24h = 0;
-    let currentPrice: { usd: number; lkr: number } | null = null;
-    try {
-      change24h = (await this.bitcoinPriceService.getBitcoin24HrChange()) ?? 0;
-      currentPrice = await this.bitcoinPriceService.getCurrentPrice();
-    } catch (error: unknown) {
-      this.logger.warn(
-        `Failed to fetch market data for user ${user_id}: ${errorMessage(error)}`,
-      );
-    }
+    // Neither throws; null when unavailable. The 24h change (CoinMarketCap)
+    // is display only - the price itself is Ceylon Cash × CeyPay.
+    const [rate, change24h] = await Promise.all([
+      this.bitcoinPriceService.getBtcLkrRate(),
+      this.bitcoinPriceService.getBitcoin24HrChange(),
+    ]);
 
     return {
       total_balance,
       total_lkr,
-      '24_hr_change': change24h,
-      current_btc_price: currentPrice
-        ? { usd: currentPrice.usd, lkr: currentPrice.lkr }
+      '24_hr_change': change24h ?? 0,
+      current_btc_price: rate
+        ? { usd: rate.btcUsd, lkr: rate.btcLkr }
         : undefined,
     };
   }

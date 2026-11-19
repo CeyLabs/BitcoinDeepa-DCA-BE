@@ -20,7 +20,7 @@ import {
 const isProduction = (env: EnvironmentVariables) =>
   env.NODE_ENV === 'production';
 
-/** Selling needs CeyPay and R2: required in production once it is switched on */
+/** Selling also needs CeyPay's webhook key and R2: required in production once it is switched on */
 const sellRequired = (env: EnvironmentVariables) =>
   isProduction(env) && env.SELL_ENABLED === 'true';
 
@@ -147,15 +147,11 @@ class EnvironmentVariables {
   @Max(10000)
   BITCOINDEEPA_FEE_BASIS_POINTS?: number;
 
+  // CoinMarketCap 24h change cache (display only), seconds
   @IsOptional()
   @IsInt()
   @Min(1)
   BTC_PRICE_CACHE_TTL?: number;
-
-  @IsOptional()
-  @IsInt()
-  @Min(1)
-  USD_LKR_CACHE_TTL?: number;
 
   @IsOptional()
   @IsInt()
@@ -235,16 +231,18 @@ class EnvironmentVariables {
   @Min(1)
   SELL_DAILY_MAX_SATS?: number;
 
-  @ValidateIf(sellRequired)
+  // CeyPay's USDT/LKR rate prices every buy, DCA payment and sale, so its API
+  // is required in production even with selling off
+  @ValidateIf(isProduction)
   @IsUrl({ require_tld: false })
   CEYPAY_API_URL?: string;
 
-  @ValidateIf(sellRequired)
+  @ValidateIf(isProduction)
   @IsString()
   @IsNotEmpty()
   CEYPAY_API_KEY_ID?: string;
 
-  @ValidateIf(sellRequired)
+  @ValidateIf(isProduction)
   @IsString()
   @IsNotEmpty()
   CEYPAY_API_SECRET?: string;

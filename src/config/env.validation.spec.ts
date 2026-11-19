@@ -50,16 +50,23 @@ describe('validateEnv', () => {
     ).toThrow(/PAYHERE_APP_SECRET/);
   });
 
-  it('requires CeyPay and R2 in production only once selling is enabled', () => {
+  it('requires the CeyPay API in production even with selling off (it prices buys)', () => {
     const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
-    const on = { ...prod, SELL_ENABLED: 'true' };
-    expect(() => validateEnv({ ...on, CEYPAY_API_SECRET: '' })).toThrow(
+    expect(() => validateEnv({ ...prod, CEYPAY_API_SECRET: '' })).toThrow(
       /CEYPAY_API_SECRET/,
     );
+  });
+
+  it('requires the CeyPay webhook key and R2 in production only once selling is enabled', () => {
+    const prod = { ...base, NODE_ENV: 'production', ...prodSecrets };
+    const on = { ...prod, SELL_ENABLED: 'true' };
+    expect(() => validateEnv({ ...on, CEYPAY_WEBHOOK_PUBLIC_KEY: '' })).toThrow(
+      /CEYPAY_WEBHOOK_PUBLIC_KEY/,
+    );
     expect(() => validateEnv({ ...on, R2_BUCKET: '' })).toThrow(/R2_BUCKET/);
-    // switched off: the buy flow deploys without any sell configuration
+    // switched off: deploys without the sell-only configuration
     expect(() =>
-      validateEnv({ ...prod, CEYPAY_API_SECRET: '', R2_BUCKET: '' }),
+      validateEnv({ ...prod, CEYPAY_WEBHOOK_PUBLIC_KEY: '', R2_BUCKET: '' }),
     ).not.toThrow();
   });
 
