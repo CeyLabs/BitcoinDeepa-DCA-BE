@@ -56,6 +56,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
    - One price everywhere: `getBtcLkrRate()` = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`) × CeyPay's USDT/LKR (`getQuote('1')`), rounded down to cents. Redis cache: BTC/USD 30s, USDT/LKR 5 min (each CeyPay fetch is a quote row in its `aggregator_fx_quote`, and the rate only moves every ~10 min). Fetches time out after 3s and a failure is remembered for 10s, so an outage costs one slow call per window. Returns null (never throws) when either is down; callers answer 503 or leave the payment for the backfill cron
    - Automatic satoshi calculation for buys and DCA payments (`calculateSatoshis`, LKR only)
+   - **Rate log** (`exchange_rate_log`): a 1-min cron (`recordExchangeRate`, one instance per minute via a Redis claim) appends the live rate as the single `is_active` row and deactivates the previous one; nothing is written while the price is down. `calculateSatoshis` falls back to the active row when the live price is unavailable and the row is at most `EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS` old (default 300, 0 = off), so a payment made during a short outage is priced at once instead of waiting for the backfill cron. Set `is_active = false` by hand to take a bad rate out of use. Quotes, sell and displayed prices (`getBtcLkrRate`) never use it
    - CoinMarketCap (`COINMARKETCAP_API_KEY`) is display only: the wallet's `24_hr_change` (`getBitcoin24HrChange()`, cached `BTC_PRICE_CACHE_TTL`, 0 when unavailable). Never use it for a price
 
 9. **Didit KYC Module** (`src/modules/didit/`)
@@ -110,6 +111,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 - `transaction`: Payment records (PayHere pay ID as PK, `kind` RECURRING/ONE_TIME, `user_id` (owner - read paths, settlement and admin use this, not the subscription), subscription ID (recurring only), `payhere_order_id` (one-time only), status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
 - `payhere_order`: Every checkout we start (order_id → user; `kind`; package for RECURRING, amount + currency for ONE_TIME)
 - `user_bank_account`: Payout bank accounts (status PENDING_REVIEW/VERIFIED/REJECTED, statement R2 key, name-match score, reviewer, CeyPay bank id). `user.ceypay_user_id` links the user to CeyPay
+- `exchange_rate_log`: BTC/LKR rate history (BTC/USD, USDT/LKR, BTC/LKR, `is_active` = the current row, at most one)
 - `sell_order`: Sell orders (sats, gross LKR, fee LKR, BTC/LKR rate, promised LKR, CeyPay quote/payment ids, bank ref, status, retries)
 
 **Relationships:**
@@ -194,6 +196,7 @@ PAYHERE_ENV=sandbox  # or live
 ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
 COINMARKETCAP_API_KEY=your_cmc_api_key  # wallet 24h change only (display)
 BTC_PRICE_CACHE_TTL=300  # 24h change cache in seconds (default: 300)
+EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS=300  # Optional: max age of the logged rate used when the live price is down (0 = never)
 
 # Fee Configuration
 PAYHERE_FEE_BASIS_POINTS=100  # Payment processor fee (1 bp = 0.01%)
@@ -395,7 +398,7 @@ try {
 - Status transitions: SUCCESS can only become CHARGEBACK, CHARGEBACK is final, nothing goes back to PENDING. Out-of-order notifications are ignored.
 - A new subscription is `is_active = true` only if its first payment is SUCCESS; otherwise it is activated by its first SUCCESS.
 - `item_rec_status` -1/1 or `message_type` RECURRING_STOPPED/RECURRING_COMPLETE marks the subscription inactive.
-- SUCCESS payments saved without BTC price data (price API down) are backfilled by a cron every minute.
+- SUCCESS payments saved without BTC price data (price API down and no recent rate in `exchange_rate_log`) are backfilled by a cron every minute.
 - **BitcoinDeepa bot API** (`src/modules/bitcoindeepa/`): every call is Ed25519-signed (`X-Wallet-ID`, `X-Timestamp`, `X-Nonce`, `X-Signature` over `BDB-SEND-ED25519-V1\nMETHOD\nPATH\nQUERY\nTS\nNONCE\nsha256hex(body)`; sign the exact bytes sent, new nonce per call). Env `BITCOINDEEPA_API_URL`, `BITCOINDEEPA_WALLET_ID`, `BITCOINDEEPA_SEND_PRIVATE_KEY_PEM`; `/send` timeout `BITCOINDEEPA_SEND_TIMEOUT` (95s). A 401/403 alerts at once (key/wallet/clock/IP).
 - The transfer memo is the bot's idempotency key (unique per payment, same on every retry). A timeout/5xx is an unknown outcome: the next attempt checks the user's bot history for the memo, then resends with the same memo (the bot answers "already completed" if it went through).
 - `/send` above the bot's approval threshold answers 202 awaiting approval: `transaction.bot_send_id` holds the bot's id and a 1-min cron polls `/send/status/{id}` (executed = settled; rejected/expired = retries stop + alert). `transaction.settlement_failure` records why the last send failed.
