@@ -7,6 +7,7 @@ import { UserService } from '../user/user.service';
 import { KycStatus } from '../user/enums/kyc-status.enum';
 import { WebhookDto } from './dto/webhook.dto';
 import { RedisService } from '../redis/redis.service';
+import { DiditService } from './didit.service';
 
 const SECRET = 'didit-secret';
 const now = () => String(Math.floor(Date.now() / 1000));
@@ -31,8 +32,21 @@ function setup(secret = SECRET, currentStatus: string = KycStatus.IN_PROGRESS) {
     ),
     del: jest.fn((key: string) => Promise.resolve(void claimed.delete(key))),
   } as unknown as RedisService;
-  const controller = new DiditController(realUserService, config, redis);
-  return { controller, userService };
+  // Didit's API: only used when an approval webhook carries no name
+  const didit = {
+    getSession: jest.fn().mockResolvedValue({
+      status: 'Approved',
+      url: null,
+      verifiedName: 'Amal Perera',
+    }),
+  };
+  const controller = new DiditController(
+    realUserService,
+    config,
+    redis,
+    didit as unknown as DiditService,
+  );
+  return { controller, userService, didit };
 }
 
 function call(
@@ -114,14 +128,47 @@ describe('DiditController webhook', () => {
   });
 
   describe('status handling', () => {
-    it('Approved sets APPROVED with a verified date', async () => {
-      const { controller, userService } = setup();
-      await call(controller, { session_id: 's1', status: 'Approved' });
+    it('Approved sets APPROVED with a verified date and the name on the ID', async () => {
+      const { controller, userService, didit } = setup();
+      await call(controller, {
+        session_id: 's1',
+        status: 'Approved',
+        decision: {
+          id_verifications: [
+            { full_name: 'Freja Nielsen', status: 'Approved' },
+          ],
+        },
+      });
       expect(userService.updateKycStatus).toHaveBeenCalledWith('u1', {
         kyc_status: KycStatus.APPROVED,
         kyc_verified_at: expect.any(Date),
         kyc_rejection_reason: null,
+        kyc_full_name: 'Freja Nielsen',
       });
+      expect(didit.getSession).not.toHaveBeenCalled();
+    });
+
+    it('fetches the verified name from Didit when the webhook has none', async () => {
+      const { controller, userService, didit } = setup();
+      await call(controller, { session_id: 's1', status: 'Approved' });
+      expect(didit.getSession).toHaveBeenCalledWith('s1');
+      expect(userService.updateKycStatus).toHaveBeenCalledWith(
+        'u1',
+        expect.objectContaining({ kyc_full_name: 'Amal Perera' }),
+      );
+    });
+
+    it('clears the verified name when KYC is no longer approved', async () => {
+      const { controller, userService } = setup(SECRET, KycStatus.APPROVED);
+      await call(controller, {
+        session_id: 's1',
+        status: 'Declined',
+        failure_reason: 'x',
+      });
+      expect(userService.updateKycStatus).toHaveBeenCalledWith(
+        'u1',
+        expect.objectContaining({ kyc_full_name: null }),
+      );
     });
 
     it('Declined stores the failure reason', async () => {

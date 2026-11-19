@@ -20,6 +20,10 @@ import {
 const isProduction = (env: EnvironmentVariables) =>
   env.NODE_ENV === 'production';
 
+/** Selling needs CeyPay and R2: required in production once it is switched on */
+const sellRequired = (env: EnvironmentVariables) =>
+  isProduction(env) && env.SELL_ENABLED === 'true';
+
 /** A cross-site (SameSite=None) admin cookie is for dev/staging only */
 @ValidatorConstraint({ name: 'notNoneInProduction' })
 class NotNoneInProduction implements ValidatorConstraintInterface {
@@ -162,6 +166,109 @@ class EnvironmentVariables {
   @IsInt()
   @Min(1)
   BITCOINDEEPA_TIMEOUT?: number;
+
+  // Sell flow (CeyPay aggregator off-ramp). Off unless SELL_ENABLED=true:
+  // the sell and bank-account endpoints answer 503 and its crons don't run.
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  SELL_ENABLED?: string;
+
+  // Pretend the bot debited the sats (its collect endpoint isn't built yet).
+  // Sandbox CeyPay only, so fake sats can never be paid out for real.
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  BITCOINDEEPA_COLLECT_MOCK?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  BITCOINDEEPA_SELL_FEE_BASIS_POINTS?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(10)
+  @Max(600)
+  SELL_QUOTE_TTL_SECONDS?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  SELL_MIN_SATS?: number;
+
+  // Largest single sale (default 5,000,000 sats)
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  SELL_MAX_SATS?: number;
+
+  // Most a member can sell in a rolling 24 hours (default 20,000,000 sats)
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  SELL_DAILY_MAX_SATS?: number;
+
+  @ValidateIf(sellRequired)
+  @IsUrl({ require_tld: false })
+  CEYPAY_API_URL?: string;
+
+  @ValidateIf(sellRequired)
+  @IsString()
+  @IsNotEmpty()
+  CEYPAY_API_KEY_ID?: string;
+
+  @ValidateIf(sellRequired)
+  @IsString()
+  @IsNotEmpty()
+  CEYPAY_API_SECRET?: string;
+
+  // ED25519 public key (PEM or base64 DER) CeyPay signs webhooks with
+  @ValidateIf(sellRequired)
+  @IsString()
+  @IsNotEmpty()
+  CEYPAY_WEBHOOK_PUBLIC_KEY?: string;
+
+  // Defaults to BASE_URL + /sell/ceypay-webhook
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  CEYPAY_WEBHOOK_URL?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  CEYPAY_TIMEOUT?: number;
+
+  // Cloudflare R2 (bank statements, private bucket)
+  @ValidateIf(sellRequired)
+  @IsString()
+  @IsNotEmpty()
+  R2_ACCOUNT_ID?: string;
+
+  @ValidateIf(sellRequired)
+  @IsString()
+  @IsNotEmpty()
+  R2_ACCESS_KEY_ID?: string;
+
+  @ValidateIf(sellRequired)
+  @IsString()
+  @IsNotEmpty()
+  R2_SECRET_ACCESS_KEY?: string;
+
+  @ValidateIf(sellRequired)
+  @IsString()
+  @IsNotEmpty()
+  R2_BUCKET?: string;
+
+  // Optional S3-compatible endpoint override (local MinIO / tests)
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  R2_ENDPOINT?: string;
+
+  // Admin dashboard URL for Telegram alert links; defaults to the first
+  // ADMIN_APP_URL origin
+  @IsOptional()
+  @IsUrl({ require_tld: false })
+  ADMIN_DASHBOARD_URL?: string;
 }
 
 export function validateEnv(
@@ -171,14 +278,20 @@ export function validateEnv(
     enableImplicitConversion: true,
   });
   const errors = validateSync(validated, { skipMissingProperties: false });
+  const problems = errors.map(
+    (e) => `${e.property}: ${Object.values(e.constraints ?? {}).join(', ')}`,
+  );
+  if (
+    validated.BITCOINDEEPA_COLLECT_MOCK === 'true' &&
+    !/sandbox/i.test(validated.CEYPAY_API_URL ?? '')
+  ) {
+    problems.push(
+      'BITCOINDEEPA_COLLECT_MOCK: only allowed with the CeyPay sandbox (CEYPAY_API_URL)',
+    );
+  }
 
-  if (errors.length > 0) {
-    const details = errors
-      .map(
-        (e) =>
-          `${e.property}: ${Object.values(e.constraints ?? {}).join(', ')}`,
-      )
-      .join('\n  ');
+  if (problems.length > 0) {
+    const details = problems.join('\n  ');
     throw new Error(`Invalid environment configuration:\n  ${details}`);
   }
   return validated;

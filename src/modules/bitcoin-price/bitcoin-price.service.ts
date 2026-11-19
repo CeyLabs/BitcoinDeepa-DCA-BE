@@ -14,6 +14,13 @@ interface CeylonCashResponse {
   selling_rate: number;
 }
 
+/** fx.ceyloncash.com/currency/BTC */
+interface CeylonCashBtcResponse {
+  buying_rate_lkr?: number;
+  selling_rate_lkr?: number;
+  usd_price?: number;
+}
+
 interface BitcoinCacheData {
   price: number;
   percent_change_24h: number;
@@ -30,6 +37,7 @@ export class BitcoinPriceService {
     process.env.USD_LKR_CACHE_TTL || '20',
     10,
   );
+  private readonly BTC_SELL_RATE_CACHE_TTL_SECONDS = 30;
   private readonly SATOSHIS_PER_BTC = 100_000_000;
 
   constructor(
@@ -87,6 +95,36 @@ export class BitcoinPriceService {
       lkr: btc.price * usdLkrRate,
       timestamp: new Date(),
     };
+  }
+
+  /**
+   * BTC/USD from our own Ceylon Cash FX (sell flow; the LKR side comes from
+   * CeyPay's USDT/LKR rate). Cached briefly; null when unavailable or invalid.
+   */
+  getBtcUsdSellPrice(): Promise<number | null> {
+    return this.redisService.getOrSet(
+      CacheKeys.bitcoin.ceylonCashBtcUsd(),
+      this.BTC_SELL_RATE_CACHE_TTL_SECONDS,
+      async () => {
+        try {
+          const response: AxiosResponse<CeylonCashBtcResponse> =
+            await axios.get('https://fx.ceyloncash.com/currency/BTC', {
+              timeout: 10000,
+            });
+          const usd = response.data?.usd_price;
+          if (typeof usd !== 'number' || !(usd > 0)) {
+            this.logger.warn(`Invalid BTC/USD price from Ceylon Cash: ${usd}`);
+            return null;
+          }
+          return usd;
+        } catch (error) {
+          this.logger.error(
+            `Ceylon Cash API error for BTC/USD: ${errorMessage(error)}`,
+          );
+          return null;
+        }
+      },
+    );
   }
 
   private getBitcoinMarketData(): Promise<BitcoinCacheData | null> {

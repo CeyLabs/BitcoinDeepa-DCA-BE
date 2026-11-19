@@ -2,10 +2,13 @@ import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CreateSessionResponse } from './dto/create-session.dto';
 import { DiditStatusType } from '../user/enums/kyc-status.enum';
+import { verifiedNameFrom } from './verified-name.util';
 
 export interface DiditSession {
   status: DiditStatusType | null;
   url: string | null;
+  /** Name read from the member's ID, once Didit has one */
+  verifiedName: string | null;
 }
 
 @Injectable()
@@ -92,7 +95,7 @@ export class DiditService {
     }
   }
 
-  /** Current status and resume URL of a session, or null if Didit doesn't know it. */
+  /** Status, resume URL and verified name of a session, or null if Didit doesn't know it. */
   async getSession(sessionId: string): Promise<DiditSession | null> {
     if (!this.apiKey) {
       throw new HttpException(
@@ -132,6 +135,7 @@ export class DiditService {
       return {
         status: result.status ?? null,
         url: result.session_url ?? result.url ?? null,
+        verifiedName: verifiedNameFrom(result),
       };
     } catch (error) {
       this.logger.error(`Error getting Didit session ${sessionId}:`, error);

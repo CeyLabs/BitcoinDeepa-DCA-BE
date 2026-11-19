@@ -114,6 +114,7 @@ export class UserController {
       if (existing?.status === 'Approved' || existing?.status === 'In Review') {
         await this.userService.applyDiditResult(user.id, currentStatus.status, {
           status: existing.status,
+          verifiedName: existing.verifiedName,
         });
         throw new HttpException(
           existing.status === 'Approved'

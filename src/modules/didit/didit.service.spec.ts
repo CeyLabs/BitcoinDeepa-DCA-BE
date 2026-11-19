@@ -87,6 +87,7 @@ describe('DiditService', () => {
       await expect(makeService().getSession('s1')).resolves.toEqual({
         status: 'In Progress',
         url: 'https://v/s1',
+        verifiedName: null,
       });
       expect(fetchSpy.mock.calls[0][0]).toBe(
         'https://didit.test/v3/session/s1/decision/',
@@ -98,6 +99,20 @@ describe('DiditService', () => {
       await expect(makeService().getSession('s2')).resolves.toEqual({
         status: null,
         url: 'https://v/s2',
+        verifiedName: null,
+      });
+    });
+
+    it('returns the name read from the ID once approved', async () => {
+      fetchSpy.mockResolvedValueOnce(
+        Response.json({
+          status: 'Approved',
+          id_verifications: [{ first_name: 'Amal', last_name: 'Perera' }],
+        }),
+      );
+      await expect(makeService().getSession('s3')).resolves.toMatchObject({
+        status: 'Approved',
+        verifiedName: 'Amal Perera',
       });
     });
 

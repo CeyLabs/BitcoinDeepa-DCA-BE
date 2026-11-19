@@ -79,6 +79,39 @@ export class TelegramLoggerService {
     await this.sendMessage(message);
   }
 
+  /**
+   * Direct message to a user through the bot (best effort; never throws).
+   * `text` is HTML - escape user-supplied parts with escapeHtml().
+   */
+  async notifyUser(telegramId: string, text: string): Promise<boolean> {
+    if (!this.botToken) return false;
+    try {
+      const response = await fetch(
+        `https://api.telegram.org/bot${this.botToken}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: telegramId,
+            text,
+            parse_mode: 'HTML',
+          }),
+        },
+      );
+      if (!response.ok) {
+        this.logger.warn(
+          `Telegram message to user ${telegramId} failed (HTTP ${response.status})`,
+        );
+      }
+      return response.ok;
+    } catch (error) {
+      this.logger.warn(
+        `Telegram message to user ${telegramId} failed: ${(error as Error).message}`,
+      );
+      return false;
+    }
+  }
+
   async logGenericAction(
     action: string,
     user: JwtPayload,

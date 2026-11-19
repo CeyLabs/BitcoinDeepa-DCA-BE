@@ -31,6 +31,14 @@ export class CacheKeys {
     price: (currency: string): string =>
       `${CacheKeys.PREFIX}:btc:price:${currency}`,
     usdLkr: (): string => `${CacheKeys.PREFIX}:exchange:usd:lkr`,
+    ceylonCashBtcUsd: (): string =>
+      `${CacheKeys.PREFIX}:exchange:btc-usd:ceyloncash`,
+  };
+
+  // Sell flow cache keys
+  static sell = {
+    banks: (): string => `${CacheKeys.PREFIX}:sell:banks`,
+    ceypayRate: (): string => `${CacheKeys.PREFIX}:sell:ceypay:usdt-lkr`,
   };
 
   // Pattern generators for bulk operations

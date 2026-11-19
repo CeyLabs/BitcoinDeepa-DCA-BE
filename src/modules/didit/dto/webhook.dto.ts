@@ -1,5 +1,11 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import {
+  IsInt,
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+} from 'class-validator';
 
 /**
  * Only the fields we use. Unknown fields are stripped by the global
@@ -31,4 +37,9 @@ export class WebhookDto {
   @Type(() => Number)
   @IsInt()
   timestamp?: number;
+
+  /** Didit's result; on approval it holds the name read from the ID */
+  @IsOptional()
+  @IsObject()
+  decision?: Record<string, unknown>;
 }
