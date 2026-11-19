@@ -11,13 +11,15 @@ import {
   type P2pPurpose,
   spendFreshUntil,
 } from './p2p-credential.service';
-import type { P2pResolveDto, P2pSendDto } from './dto/p2p.dto';
+import type { P2pInitDto, P2pResolveDto, P2pSendDto } from './dto/p2p.dto';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { errorMessage } from '../../common/error-message';
 
 const P2P_PATH = '/api/v1/p2p';
+/** Creates the user's bot wallet; not under /p2p but signed the same way */
+const INIT_PATH = '/api/v1/init';
 
 /** What the controller sends back: the bot's status (200/202) and JSON */
 export interface P2pResult {
@@ -61,7 +63,12 @@ export class P2pService {
 
   async me(userId: string, initData?: string): Promise<P2pResult> {
     const resolved = await this.credentials.resolve(userId, initData, 'read');
-    const result = await this.call('GET', '/me', resolved.credential, 'read');
+    const result = await this.call(
+      'GET',
+      `${P2P_PATH}/me`,
+      resolved.credential,
+      'read',
+    );
     return {
       ...result,
       body: {
@@ -77,6 +84,35 @@ export class P2pService {
     };
   }
 
+  /**
+   * Creates the user's bot wallet if they never pressed Start in the bot
+   * (201, created: true; else 200). Safe on every app open. can_message false
+   * (new wallets only) means the bot can't message them yet: the app should
+   * offer t.me/<bot>?start=... so Confirm buttons and receipts reach them.
+   */
+  async init(
+    userId: string,
+    initData: string | undefined,
+    dto: P2pInitDto,
+  ): Promise<P2pResult> {
+    const { credential } = await this.credentials.resolve(
+      userId,
+      initData,
+      'read',
+    );
+    const result = await this.call(
+      'POST',
+      INIT_PATH,
+      credential,
+      'read',
+      dto.referral_code ? { referral_code: dto.referral_code } : {},
+    );
+    if (result.body.created === true) {
+      await this.redis.del(CacheKeys.transaction.dcaSummary(userId));
+    }
+    return result;
+  }
+
   async resolveRecipient(
     userId: string,
     initData: string | undefined,
@@ -87,7 +123,9 @@ export class P2pService {
       initData,
       'read',
     );
-    return this.call('POST', '/resolve', credential, 'read', { to: dto.to });
+    return this.call('POST', `${P2P_PATH}/resolve`, credential, 'read', {
+      to: dto.to,
+    });
   }
 
   async send(
@@ -100,12 +138,18 @@ export class P2pService {
       initData,
       'spend',
     );
-    const result = await this.call('POST', '/send', credential, 'spend', {
-      to_telegram_id: dto.to_telegram_id,
-      amount: dto.amount,
-      ...(dto.memo ? { memo: dto.memo } : {}),
-      idempotency_key: dto.idempotency_key,
-    });
+    const result = await this.call(
+      'POST',
+      `${P2P_PATH}/send`,
+      credential,
+      'spend',
+      {
+        to_telegram_id: dto.to_telegram_id,
+        amount: dto.amount,
+        ...(dto.memo ? { memo: dto.memo } : {}),
+        idempotency_key: dto.idempotency_key,
+      },
+    );
     if (result.body.status === 'completed') {
       await this.clearWalletCaches(userId, dto.to_telegram_id);
     }
@@ -128,7 +172,7 @@ export class P2pService {
     );
     return this.call(
       'POST',
-      `/collect/${encodeURIComponent(collectId)}/approve`,
+      `${P2P_PATH}/collect/${encodeURIComponent(collectId)}/approve`,
       credential,
       'spend',
       {},
@@ -147,7 +191,7 @@ export class P2pService {
     );
     return this.call(
       'GET',
-      `/transfers/${encodeURIComponent(id)}`,
+      `${P2P_PATH}/transfers/${encodeURIComponent(id)}`,
       credential,
       'read',
     );
@@ -168,12 +212,7 @@ export class P2pService {
     }
     let response: P2pBotResponse;
     try {
-      response = await this.bot.request(
-        method,
-        `${P2P_PATH}${path}`,
-        credential,
-        body,
-      );
+      response = await this.bot.request(method, path, credential, body);
     } catch (error) {
       this.logger.error(
         `P2P ${method} ${path}: no answer from the bot (${errorMessage(error)})`,

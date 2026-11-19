@@ -4,6 +4,7 @@ import {
   IsOptional,
   IsString,
   Length,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -42,4 +43,14 @@ export class P2pSendDto {
   @IsString()
   @Length(8, 128)
   idempotency_key!: string;
+}
+
+export class P2pInitDto {
+  /** Recorded like a /start payload, for new bot users only */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]{1,64}$/, {
+    message: 'referral_code must be 1-64 letters, digits, _ or -',
+  })
+  referral_code?: string;
 }

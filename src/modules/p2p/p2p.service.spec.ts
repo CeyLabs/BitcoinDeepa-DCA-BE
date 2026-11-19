@@ -211,6 +211,60 @@ describe('P2pService', () => {
     expect(credentials.resolve).toHaveBeenCalledWith('42', 'init', 'read');
   });
 
+  it('init forwards only referral_code to /api/v1/init with a read credential', async () => {
+    bot.request.mockResolvedValue({
+      status: 201,
+      body: { telegram_id: 42, created: true, can_message: false },
+    });
+    await expect(
+      service.init('42', 'init', { referral_code: 'PROMO2024' }),
+    ).resolves.toEqual({
+      status: 201,
+      body: { telegram_id: 42, created: true, can_message: false },
+    });
+    expect(credentials.resolve).toHaveBeenCalledWith('42', 'init', 'read');
+    expect(bot.request).toHaveBeenCalledWith(
+      'POST',
+      '/api/v1/init',
+      credential,
+      { referral_code: 'PROMO2024' },
+    );
+    expect(redis.del).toHaveBeenCalledWith(
+      CacheKeys.transaction.dcaSummary('42'),
+    );
+  });
+
+  it('init for an existing wallet sends {} and keeps the cache', async () => {
+    bot.request.mockResolvedValue({
+      status: 200,
+      body: { telegram_id: 42, created: false },
+    });
+    await expect(service.init('42', 'init', {})).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(bot.request.mock.calls[0][3]).toEqual({});
+    expect(redis.del).not.toHaveBeenCalled();
+  });
+
+  it("init passes the bot's refusals through (sender_not_allowed, wallet_unavailable)", async () => {
+    bot.request.mockResolvedValue({
+      status: 403,
+      body: { code: 'sender_not_allowed', message: 'Not allowed.' },
+    });
+    expect(await errorOf(service.init('42', 'init', {}))).toEqual({
+      status: 403,
+      body: { code: 'sender_not_allowed', message: 'Not allowed.' },
+    });
+    bot.request.mockResolvedValue({
+      status: 503,
+      body: { code: 'wallet_unavailable', message: 'Retry.' },
+    });
+    expect(await errorOf(service.init('42', 'init', {}))).toEqual({
+      status: 503,
+      body: { code: 'wallet_unavailable', message: 'Retry.' },
+    });
+  });
+
   it('503 when the P2P key or bot URL is missing', async () => {
     bot.isConfigured.mockReturnValue(false);
     expect(await errorOf(send())).toMatchObject({
