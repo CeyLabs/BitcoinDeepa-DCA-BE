@@ -10,12 +10,20 @@ export const TRANSACTION_STATUSES = [
 ] as const;
 export type TransactionStatus = (typeof TRANSACTION_STATUSES)[number];
 
+export const TRANSACTION_KINDS = ['RECURRING', 'ONE_TIME'] as const;
+export type TransactionKind = (typeof TRANSACTION_KINDS)[number];
+
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 export class ListTransactionsQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsIn(TRANSACTION_STATUSES)
   status?: TransactionStatus;
+
+  /** RECURRING = subscription charge, ONE_TIME = one-time buy */
+  @IsOptional()
+  @IsIn(TRANSACTION_KINDS)
+  kind?: TransactionKind;
 
   /** First day to include, YYYY-MM-DD in Sri Lanka time */
   @IsOptional()

@@ -73,6 +73,7 @@ export class TransactionController {
         body.payhere_amount,
         owner ?? 'unknown',
         this.transactionService.getPayHereStatusMapped(body.status_code),
+        !body.subscription_id,
       );
 
       await this.transactionService.handlePayHereNotification(body);

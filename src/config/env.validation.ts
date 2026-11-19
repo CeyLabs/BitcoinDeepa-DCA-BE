@@ -167,6 +167,22 @@ class EnvironmentVariables {
   @Min(1)
   BITCOINDEEPA_TIMEOUT?: number;
 
+  // One-time buys (whole LKR). Defaults in buy.service.ts.
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  BUY_MIN_LKR?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  BUY_MAX_LKR?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  BUY_DAILY_MAX_LKR?: number;
+
   // Sell flow (CeyPay aggregator off-ramp). Off unless SELL_ENABLED=true:
   // the sell and bank-account endpoints answer 503 and its crons don't run.
   @IsOptional()

@@ -112,8 +112,7 @@ export class AdminMembersService {
                    coalesce(sum(t.satoshis_purchased) filter (where t.settled), 0) as satoshis,
                    coalesce(sum(t.gross_amount) filter (where not t.settled), 0) as unsettled
             from "transaction" t
-            join subscription s on s.payhere_sub_id = t.payhere_sub_id
-            where s.user_id = u.id and t.status = 'SUCCESS'
+            where t.user_id = u.id and t.status = 'SUCCESS'
           ) paid on true`,
         )
         .orderBy([

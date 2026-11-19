@@ -67,6 +67,7 @@ export interface TestContext {
   payHereCancel: jest.SpyInstance;
   /** PayHere's payment lookup used by settlement (see below) */
   payHerePayments: jest.SpyInstance;
+  payHereOrderPayments: jest.SpyInstance;
   tokenFor: (userId: string) => string;
   close: () => Promise<void>;
 }
@@ -175,6 +176,22 @@ export async function createTestApp(): Promise<TestContext> {
       }));
     });
 
+  // Same for one-off checkouts (Retrieval API, by order_id)
+  const payHereOrderPayments = jest
+    .spyOn(app.get(PayHereService), 'getPaymentsByOrderId')
+    .mockImplementation(async (payhere_order_id: string) => {
+      const rows: { payhere_pay_id: string; gross_amount: string | null }[] =
+        await knex('transaction')
+          .select('payhere_pay_id', 'gross_amount')
+          .where({ payhere_order_id, status: 'SUCCESS' });
+      return rows.map((r) => ({
+        payment_id: r.payhere_pay_id,
+        status: 'RECEIVED',
+        amount: r.gross_amount,
+        order_id: payhere_order_id,
+      }));
+    });
+
   const jwt = app.get(JwtService);
   return {
     app,
@@ -186,6 +203,7 @@ export async function createTestApp(): Promise<TestContext> {
     notifyUser,
     payHereCancel,
     payHerePayments,
+    payHereOrderPayments,
     tokenFor: (userId) => jwt.sign({ id: userId, username: `u${userId}` }),
     close: () => app.close(),
   };
@@ -316,7 +334,8 @@ const md5U = (s: string) =>
 export function payhereNotification(fields: {
   order_id: string;
   payment_id: string;
-  subscription_id: string;
+  /** Leave out for a one-off (one-time buy) checkout */
+  subscription_id?: string;
   payhere_amount?: string;
   status_code?: string;
   [key: string]: string | undefined;

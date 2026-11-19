@@ -402,6 +402,7 @@ describe('PayHere webhook (e2e)', () => {
         expect.anything(),
         USER,
         'SUCCESS',
+        false, // not a one-time buy
       );
       log.mockRestore();
     });

@@ -11,6 +11,7 @@ import {
 } from './support/test-app';
 import { SettlementService } from '../src/modules/settlement/settlement.service';
 import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-logger.service';
+import { TransactionService } from '../src/modules/transaction/transaction.service';
 
 describe('Settlement (e2e)', () => {
   let ctx: TestContext;
@@ -63,6 +64,21 @@ describe('Settlement (e2e)', () => {
 
     await settlement.retryUnsettledTransactions();
     expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1); // never twice
+  });
+
+  it('settles a plan charge saved without an owner once the owner is filled in', async () => {
+    // e.g. written by the previous build during a deploy
+    await ctx.knex('transaction').where({ payhere_pay_id: 'P1' }).update({
+      user_id: null,
+    });
+    await settlement.retryUnsettledTransactions();
+    expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+
+    await ctx.app.get(TransactionService).fillMissingTransactionOwners();
+    expect(await tx()).toMatchObject({ user_id: USER });
+    await settlement.retryUnsettledTransactions();
+    expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
+    expect(await tx()).toMatchObject({ settled: true });
   });
 
   it('treats "already completed" as settled', async () => {

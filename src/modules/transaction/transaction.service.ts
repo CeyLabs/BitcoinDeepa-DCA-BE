@@ -18,8 +18,11 @@ import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
 import { PayHereService } from '../payhere/payhere.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 import { errorMessage } from '../../common/error-message';
+import { computeBuyFees } from '../../common/buy-fees';
 
 export type PayHereNotificationParams = PayHereNotificationDto;
+
+export type PurchaseKind = 'RECURRING' | 'ONE_TIME';
 
 export type Status =
   | 'SUCCESS'
@@ -30,7 +33,12 @@ export type Status =
 
 export interface Transaction {
   payhere_pay_id: string;
-  payhere_sub_id: string;
+  /** Null for one-time buys */
+  payhere_sub_id: string | null;
+  kind?: PurchaseKind;
+  user_id?: string | null;
+  /** One-time buys: the checkout order this payment paid */
+  payhere_order_id?: string | null;
   status: Status;
   btc_price_at_purchase?: number;
   satoshis_purchased?: number;
@@ -104,6 +112,27 @@ const PACKAGE_COLUMNS = [
 
 function md5Upper(input: string): string {
   return createHash('md5').update(input).digest('hex').toUpperCase();
+}
+
+/** Money amounts equal to the cent (PayHere sends e.g. "1000.00"). */
+export function sameAmount(a: string | number, b: string | number): boolean {
+  const x = Number(String(a).replace(/,/g, ''));
+  const y = Number(String(b).replace(/,/g, ''));
+  return Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) < 0.005;
+}
+
+/** Where a payment came from: exactly one of the two is set */
+type PaymentLink =
+  | { kind: 'RECURRING'; payhere_sub_id: string; payhere_order_id: null }
+  | { kind: 'ONE_TIME'; payhere_sub_id: null; payhere_order_id: string };
+
+interface PayHereOrderRow {
+  order_id: string;
+  user_id: string;
+  package_id: string | null;
+  kind: PurchaseKind;
+  amount: string | null;
+  currency: string | null;
 }
 
 @Injectable()
@@ -182,14 +211,16 @@ export class TransactionService {
    */
   async getNotificationOwner(
     order_id: string,
-    subscription_id: string,
+    subscription_id: string | undefined,
   ): Promise<string | null> {
-    const sub = await this.knexService
-      .knex<Subscription>('subscription')
-      .select('user_id')
-      .where('payhere_sub_id', subscription_id)
-      .first();
-    if (sub) return sub.user_id;
+    if (subscription_id) {
+      const sub = await this.knexService
+        .knex<Subscription>('subscription')
+        .select('user_id')
+        .where('payhere_sub_id', subscription_id)
+        .first();
+      if (sub) return sub.user_id;
+    }
     const order = await this.knexService
       .knex<{ order_id: string; user_id: string }>('payhere_order')
       .select('user_id')
@@ -199,9 +230,14 @@ export class TransactionService {
   }
 
   /**
-   * Record a PayHere notification. The caller must have checked
+   * Record a PayHere notification: a subscription charge, or a one-off
+   * checkout (one-time buy, no subscription_id). The caller must have checked
    * isValidPayHereSignature first (the controller does, before anything is
    * logged).
+   *
+   * Both kinds share the payment rules (upsertPayment): the signed order_id
+   * decides the owner, statuses only move forward, pricing at SUCCESS. Only
+   * finding the payment's source and what follows a SUCCESS differ.
    */
   async handlePayHereNotification(
     data: PayHereNotificationParams,
@@ -217,7 +253,8 @@ export class TransactionService {
       item_rec_status,
     } = data;
 
-    if (!payment_id || !subscription_id || Number(subscription_id) < 0) {
+    const oneTime = !subscription_id;
+    if (!payment_id || (!oneTime && Number(subscription_id) < 0)) {
       this.logger.error(
         `Invalid payment/subscription id: payment_id=${payment_id}, subscription_id=${subscription_id}`,
       );
@@ -226,124 +263,87 @@ export class TransactionService {
 
     const status = this.getPayHereStatusMapped(status_code);
     this.logger.log(
-      `Processing PayHere notification: payment_id=${payment_id}, subscription_id=${subscription_id}, status=${status}, amount=${payhere_amount} ${payhere_currency}`,
+      `Processing PayHere ${oneTime ? 'one-time' : 'subscription'} notification: payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id ?? '-'}, status=${status}, amount=${payhere_amount} ${payhere_currency}`,
     );
 
-    // Pre-fetch Bitcoin data outside the DB transaction to keep it short
-    const existing = await this.knexService
-      .knex<Transaction>('transaction')
-      .where('payhere_pay_id', payment_id)
-      .first();
-
-    let bitcoinData: BitcoinData | null = null;
-    if (
-      status === 'SUCCESS' &&
-      (!existing ||
-        (existing.status !== 'CHARGEBACK' && !existing.satoshis_purchased))
-    ) {
-      bitcoinData = await this.fetchBitcoinDataForTransaction(
-        parseFloat(payhere_amount),
-        payhere_currency,
-      );
-    }
+    const bitcoinData = await this.priceIfNeeded(
+      payment_id,
+      status,
+      payhere_amount,
+      payhere_currency,
+    );
 
     // PayHere stopped (retries exhausted / cancelled) or completed the plan
     const subscriptionEnded =
-      item_rec_status === '-1' ||
-      item_rec_status === '1' ||
-      message_type === 'RECURRING_STOPPED' ||
-      message_type === 'RECURRING_COMPLETE';
+      !oneTime &&
+      (item_rec_status === '-1' ||
+        item_rec_status === '1' ||
+        message_type === 'RECURRING_STOPPED' ||
+        message_type === 'RECURRING_COMPLETE');
 
     const alerts: string[] = [];
-    // Set when this notification is what made the payment SUCCESS (a resent
-    // SUCCESS must not re-activate a plan the user has since cancelled).
-    let becameSuccess = false;
+    let userId = '';
     let duplicate: { payhere_sub_id: string; activeSubId: string } | null =
       null;
     let createdSubscription: { user_id: string; package_id: string } | null =
       null;
-    let subscriptionUserId = '';
 
     const trx = await this.knexService.knex.transaction();
     try {
-      const { subscription, created } = await this.resolveSubscription(trx, {
-        subscription_id,
-        order_id,
-        status,
-      });
-      subscriptionUserId = subscription.user_id;
-      if (created) {
-        createdSubscription = {
-          user_id: subscription.user_id,
-          package_id: subscription.package_id,
+      let link: PaymentLink;
+      let subscription: Subscription | null = null;
+
+      if (oneTime) {
+        const order = await this.resolveOneTimeOrder(trx, data);
+        userId = order.user_id;
+        link = {
+          kind: 'ONE_TIME',
+          payhere_sub_id: null,
+          payhere_order_id: order_id,
         };
-      }
-
-      if (subscriptionEnded && subscription.is_active) {
-        await trx('subscription')
-          .update({ is_active: false, updated_at: trx.fn.now() })
-          .where('payhere_sub_id', subscription_id);
-        alerts.push(
-          `PayHere ended subscription ${subscription_id} (user ${subscription.user_id}): message_type=${message_type ?? '-'}, item_rec_status=${item_rec_status ?? '-'}. Marked inactive.`,
-        );
-      }
-
-      const current: Transaction | undefined = await trx('transaction')
-        .where('payhere_pay_id', payment_id)
-        .forUpdate()
-        .first();
-
-      if (current) {
-        if (current.payhere_sub_id !== subscription_id) {
-          throw new BadRequestException(
-            'payment_id belongs to a different subscription',
-          );
-        }
-
-        if (!this.isAllowedTransition(current.status, status)) {
-          this.logger.warn(
-            `Ignoring status change ${current.status} → ${status} for payment_id ${payment_id} (out-of-order or duplicate notification)`,
-          );
-        } else {
-          const update: Partial<Transaction> = { status };
-          if (bitcoinData && !current.satoshis_purchased) {
-            Object.assign(update, bitcoinData);
-          }
-          await trx('transaction')
-            .update(update)
-            .where('payhere_pay_id', payment_id);
-          becameSuccess = status === 'SUCCESS' && current.status !== 'SUCCESS';
-
-          if (status === 'CHARGEBACK' && current.status !== 'CHARGEBACK') {
-            alerts.push(
-              current.settled
-                ? `CHARGEBACK on settled payment ${payment_id} (sub ${subscription_id}, user ${subscription.user_id}). ${current.satoshis_purchased} sats were already sent - manual reversal needed.`
-                : `CHARGEBACK on unsettled payment ${payment_id} (sub ${subscription_id}, user ${subscription.user_id}). It will not be settled.`,
-            );
-          }
-
-          this.logger.log(
-            `Transaction ${payment_id} updated: ${current.status} → ${status}`,
-          );
-        }
       } else {
-        const row: Transaction = {
-          payhere_pay_id: payment_id,
-          payhere_sub_id: subscription_id,
+        const resolved = await this.resolveSubscription(trx, {
+          subscription_id,
+          order_id,
           status,
-          retry_count: 0,
-          gross_amount: parseFloat(payhere_amount),
-          ...(bitcoinData ?? {}),
+        });
+        subscription = resolved.subscription;
+        userId = subscription.user_id;
+        if (resolved.created) {
+          createdSubscription = {
+            user_id: subscription.user_id,
+            package_id: subscription.package_id,
+          };
+        }
+        if (subscriptionEnded && subscription.is_active) {
+          await trx('subscription')
+            .update({ is_active: false, updated_at: trx.fn.now() })
+            .where('payhere_sub_id', subscription_id);
+          alerts.push(
+            `PayHere ended subscription ${subscription_id} (user ${userId}): message_type=${message_type ?? '-'}, item_rec_status=${item_rec_status ?? '-'}. Marked inactive.`,
+          );
+        }
+        link = {
+          kind: 'RECURRING',
+          payhere_sub_id: subscription_id,
+          payhere_order_id: null,
         };
-        await trx('transaction').insert(row);
-        becameSuccess = status === 'SUCCESS';
-
-        this.logger.log(
-          `New transaction ${payment_id} created (status ${status})`,
-        );
       }
 
-      if (becameSuccess && !subscriptionEnded) {
+      // Set when this notification is what made the payment SUCCESS (a
+      // resent SUCCESS must not re-activate a plan the user has since
+      // cancelled, or re-raise the paid-twice alert).
+      const { becameSuccess } = await this.upsertPayment(trx, {
+        payment_id,
+        status,
+        gross_amount: parseFloat(payhere_amount),
+        bitcoinData,
+        user_id: userId,
+        link,
+        alerts,
+      });
+
+      if (becameSuccess && subscription && !subscriptionEnded) {
         const duplicateOf = await this.activateIfFirstSuccess(
           trx,
           subscription,
@@ -354,6 +354,21 @@ export class TransactionService {
             payhere_sub_id: subscription_id,
             activeSubId: duplicateOf,
           };
+        }
+      }
+      if (becameSuccess && oneTime) {
+        // PayHere doesn't stop an order_id being paid twice (e.g. the
+        // checkout form resubmitted). Both are real payments and are
+        // settled, but it bypasses the per-checkout limit check - flag it.
+        const otherPaid = await trx<Transaction>('transaction')
+          .where('payhere_order_id', order_id)
+          .whereNot('payhere_pay_id', payment_id)
+          .whereIn('status', ['SUCCESS', 'CHARGEBACK'])
+          .first();
+        if (otherPaid) {
+          alerts.push(
+            `Order ${order_id} (user ${userId}) was paid again: payment ${payment_id} after ${otherPaid.payhere_pay_id}. Both will be settled once PayHere confirms them.`,
+          );
         }
       }
 
@@ -367,7 +382,7 @@ export class TransactionService {
       if (error instanceof BadRequestException) {
         await this.telegramLoggerService.logAlert(
           'PayHere webhook',
-          `Rejected signed notification payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id}: ${errorMessage(error)}`,
+          `Rejected signed notification payment_id=${payment_id}, order_id=${order_id}, subscription_id=${subscription_id ?? '-'}: ${errorMessage(error)}`,
         );
       }
       this.logger.error(
@@ -389,7 +404,7 @@ export class TransactionService {
         await this.cancelDuplicateSubscription(
           duplicate.payhere_sub_id,
           duplicate.activeSubId,
-          subscriptionUserId,
+          userId,
         ),
       );
     }
@@ -397,7 +412,153 @@ export class TransactionService {
       this.logger.error(alert);
       await this.telegramLoggerService.logAlert('PayHere webhook', alert);
     }
-    await this.invalidateUserCaches(subscriptionUserId);
+    await this.invalidateUserCaches(userId);
+  }
+
+  /**
+   * BTC price data for a SUCCESS that isn't priced yet. Fetched before the DB
+   * transaction opens, to keep that short.
+   */
+  private async priceIfNeeded(
+    payment_id: string,
+    status: Status,
+    amount: string,
+    currency: string,
+  ): Promise<BitcoinData | null> {
+    if (status !== 'SUCCESS') return null;
+    const existing = await this.knexService
+      .knex<Transaction>('transaction')
+      .where('payhere_pay_id', payment_id)
+      .first();
+    if (
+      existing &&
+      (existing.status === 'CHARGEBACK' || existing.satoshis_purchased)
+    ) {
+      return null;
+    }
+    return this.fetchBitcoinDataForTransaction(parseFloat(amount), currency);
+  }
+
+  /**
+   * The ONE_TIME order a one-off notification pays. Its order_id and amount
+   * are signed, so the order must exist, be one-time, and be for exactly the
+   * signed amount.
+   */
+  private async resolveOneTimeOrder(
+    trx: Knex.Transaction,
+    { order_id, payhere_amount, payhere_currency }: PayHereNotificationParams,
+  ): Promise<PayHereOrderRow> {
+    const order = await trx<PayHereOrderRow>('payhere_order')
+      .where('order_id', order_id)
+      .first();
+    if (!order) {
+      throw new BadRequestException(
+        `Unknown order_id ${order_id} - no checkout link was generated for it`,
+      );
+    }
+    if (order.kind !== 'ONE_TIME') {
+      // A subscription checkout whose recurrence fields were stripped
+      throw new BadRequestException(
+        `order_id ${order_id} is a subscription checkout but the notification has no subscription_id`,
+      );
+    }
+    if (
+      order.amount === null ||
+      !sameAmount(order.amount, payhere_amount) ||
+      order.currency !== payhere_currency
+    ) {
+      throw new BadRequestException(
+        `Amount ${payhere_amount} ${payhere_currency} does not match order ${order_id} (${order.amount} ${order.currency})`,
+      );
+    }
+    return order;
+  }
+
+  /**
+   * Insert or update the payment row, the same for both kinds. The row is
+   * locked; a payment_id already recorded for another subscription/order is
+   * refused, and status changes follow isAllowedTransition.
+   */
+  private async upsertPayment(
+    trx: Knex.Transaction,
+    p: {
+      payment_id: string;
+      status: Status;
+      gross_amount: number;
+      bitcoinData: BitcoinData | null;
+      user_id: string;
+      link: PaymentLink;
+      alerts: string[];
+    },
+  ): Promise<{ becameSuccess: boolean }> {
+    const { payment_id, status, bitcoinData, link } = p;
+    const source =
+      link.kind === 'ONE_TIME'
+        ? `order ${link.payhere_order_id}`
+        : `sub ${link.payhere_sub_id}`;
+
+    const current = await trx<Transaction>('transaction')
+      .where('payhere_pay_id', payment_id)
+      .forUpdate()
+      .first();
+
+    if (!current) {
+      const row: Transaction = {
+        payhere_pay_id: payment_id,
+        ...link,
+        user_id: p.user_id,
+        status,
+        retry_count: 0,
+        gross_amount: p.gross_amount,
+        ...(bitcoinData ?? {}),
+      };
+      await trx('transaction').insert(row);
+      this.logger.log(
+        `New ${link.kind} transaction ${payment_id} created (${source}, status ${status})`,
+      );
+      return { becameSuccess: status === 'SUCCESS' };
+    }
+
+    // Rows from before kinds existed are RECURRING with no order id
+    if (
+      (current.kind ?? 'RECURRING') !== link.kind ||
+      current.payhere_sub_id !== link.payhere_sub_id ||
+      (current.payhere_order_id ?? null) !== link.payhere_order_id
+    ) {
+      throw new BadRequestException(
+        link.kind === 'ONE_TIME'
+          ? 'payment_id belongs to a different order'
+          : 'payment_id belongs to a different subscription',
+      );
+    }
+
+    if (!this.isAllowedTransition(current.status, status)) {
+      this.logger.warn(
+        `Ignoring status change ${current.status} → ${status} for payment_id ${payment_id} (out-of-order or duplicate notification)`,
+      );
+      return { becameSuccess: false };
+    }
+
+    const update: Partial<Transaction> = { status };
+    if (bitcoinData && !current.satoshis_purchased) {
+      Object.assign(update, bitcoinData);
+    }
+    await trx('transaction').update(update).where('payhere_pay_id', payment_id);
+
+    if (status === 'CHARGEBACK' && current.status !== 'CHARGEBACK') {
+      const what = link.kind === 'ONE_TIME' ? 'one-time buy' : 'payment';
+      p.alerts.push(
+        current.settled
+          ? `CHARGEBACK on settled ${what} ${payment_id} (${source}, user ${p.user_id}). ${current.satoshis_purchased} sats were already sent - manual reversal needed.`
+          : `CHARGEBACK on unsettled ${what} ${payment_id} (${source}, user ${p.user_id}). It will not be settled.`,
+      );
+    }
+    this.logger.log(
+      `Transaction ${payment_id} updated: ${current.status} → ${status}`,
+    );
+    return {
+      becameSuccess: status === 'SUCCESS' && current.status !== 'SUCCESS',
+    };
   }
 
   getPayHereStatusMapped(status_code: string): Status {
@@ -461,10 +622,17 @@ export class TransactionService {
         // wrong order. Every order since binding has a payhere_order row, so
         // it must belong to this subscription's user. Old orders have no row
         // and only arrive as genuine renewals.
-        const order = await trx<{ user_id: string }>('payhere_order')
-          .select('user_id')
+        const order = await trx<{ user_id: string; kind: PurchaseKind }>(
+          'payhere_order',
+        )
+          .select('user_id', 'kind')
           .where('order_id', order_id)
           .first();
+        if (order?.kind === 'ONE_TIME') {
+          throw new BadRequestException(
+            'order_id is a one-time checkout, not a subscription',
+          );
+        }
         if (order && order.user_id !== existing.user_id) {
           throw new BadRequestException(
             'order_id belongs to another user than the subscription',
@@ -479,15 +647,19 @@ export class TransactionService {
       return { subscription: existing, created: false };
     }
 
-    const order = await trx<{ user_id: string; package_id: string }>(
-      'payhere_order',
-    )
-      .select('user_id', 'package_id')
+    const order = await trx<PayHereOrderRow>('payhere_order')
       .where('order_id', order_id)
       .first();
     if (!order) {
       throw new BadRequestException(
         `Unknown order_id ${order_id} - no checkout link was generated for it`,
+      );
+    }
+    // A one-time checkout with recurrence fields added by the payer would
+    // otherwise become a subscription with no package
+    if (order.kind !== 'RECURRING' || !order.package_id) {
+      throw new BadRequestException(
+        'order_id is a one-time checkout, not a subscription',
       );
     }
     const { user_id, package_id } = order;
@@ -655,22 +827,8 @@ export class TransactionService {
         return null;
       }
 
-      const paymentProcessorFeeBps = parseInt(
-        process.env.PAYHERE_FEE_BASIS_POINTS || '0',
-        10,
-      );
-      const bitcoindeepaFeeBps = parseInt(
-        process.env.BITCOINDEEPA_FEE_BASIS_POINTS || '0',
-        10,
-      );
-
-      const gross = new Big(amount);
-      const paymentProcessorFee = gross
-        .times(paymentProcessorFeeBps)
-        .div(10000);
-      const bitcoindeepaFee = gross.times(bitcoindeepaFeeBps).div(10000);
-      const totalFees = paymentProcessorFee.plus(bitcoindeepaFee);
-      const netAmount = gross.minus(totalFees).toNumber();
+      const fees = computeBuyFees(amount);
+      const netAmount = fees.net;
 
       const calc = await this.bitcoinPriceService.calculateSatoshis(
         netAmount,
@@ -684,7 +842,7 @@ export class TransactionService {
       }
 
       this.logger.log(
-        `Bitcoin DCA calculation: ${amount} ${currency} gross, ${totalFees.toString()} fees, ${netAmount} net = ${calc.satoshis} sats at ${calc.btc_price} ${currency}/BTC`,
+        `Bitcoin buy calculation: ${amount} ${currency} gross, ${fees.totalFees} fees, ${netAmount} net = ${calc.satoshis} sats at ${calc.btc_price} ${currency}/BTC`,
       );
 
       return {
@@ -693,10 +851,10 @@ export class TransactionService {
         price_currency: calc.currency,
         coingecko_timestamp: new Date(),
         gross_amount: amount,
-        payment_processor_fee_basis_points: paymentProcessorFeeBps,
-        payment_processor_fee_amount: paymentProcessorFee.toNumber(),
-        bitcoindeepa_fee_basis_points: bitcoindeepaFeeBps,
-        bitcoindeepa_fee_amount: bitcoindeepaFee.toNumber(),
+        payment_processor_fee_basis_points: fees.paymentProcessorFeeBps,
+        payment_processor_fee_amount: fees.paymentProcessorFee,
+        bitcoindeepa_fee_basis_points: fees.bitcoindeepaFeeBps,
+        bitcoindeepa_fee_amount: fees.bitcoindeepaFee,
         net_amount: netAmount,
       };
     } catch (error: unknown) {
@@ -704,6 +862,35 @@ export class TransactionService {
         `Error fetching Bitcoin data for transaction (${amount} ${currency}): ${errorMessage(error)}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Settlement and history find a payment's owner through transaction.user_id.
+   * During a deploy, an instance still running the previous build can insert
+   * plan charges without it; copy it from their subscription so they're
+   * settled and shown. A no-op once every instance runs this build.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async fillMissingTransactionOwners(): Promise<void> {
+    try {
+      const result: { rowCount?: number } = await this.knexService.knex.raw(`
+        UPDATE "transaction" t
+           SET user_id = s.user_id
+          FROM subscription s
+         WHERE t.user_id IS NULL
+           AND s.payhere_sub_id = t.payhere_sub_id
+           AND s.user_id IS NOT NULL
+      `);
+      if (result.rowCount) {
+        this.logger.warn(
+          `Filled the owner of ${result.rowCount} transaction(s) from their subscription`,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        `Filling transaction owners failed: ${errorMessage(error)}`,
+      );
     }
   }
 
@@ -726,8 +913,10 @@ export class TransactionService {
           't.payhere_pay_id',
           't.gross_amount',
           'p.amount as package_amount',
-          'p.currency as package_currency',
-          's.user_id',
+          this.knexService.knex.raw(
+            "coalesce(p.currency, o.currency, 'LKR') as currency",
+          ),
+          't.user_id',
         )
         .where('t.status', 'SUCCESS')
         .whereNull('t.satoshis_purchased')
@@ -744,7 +933,7 @@ export class TransactionService {
         const amount = Number(row.gross_amount ?? row.package_amount);
         const data = await this.fetchBitcoinDataForTransaction(
           amount,
-          row.package_currency,
+          row.currency,
         );
         if (!data) {
           return; // price source still down - try again next run
@@ -819,29 +1008,19 @@ export class TransactionService {
     page: number,
     limit: number,
   ): Promise<PaginatedTransactions> {
-    const subscriptionIds = await this.getSubscriptionIds(user_id);
-    if (subscriptionIds.length === 0) {
-      return {
-        transactions: [],
-        total_count: 0,
-        total_pages: 0,
-        current_page: page,
-        has_more: false,
-      };
-    }
-
     const [countResult] = await this.knexService
       .knex('transaction')
-      .whereIn('payhere_sub_id', subscriptionIds)
+      .where('user_id', user_id)
       .count<{ count: string }[]>('* as count');
 
     const totalCount = Number(countResult.count);
     const totalPages = Math.ceil(totalCount / limit);
 
     // Joined with package info so callers get the LKR amount and plan name
+    // (null for one-time buys - see kind)
     const transactions = await this.transactionsWithPackage()
       .select('t.*', ...PACKAGE_COLUMNS)
-      .whereIn('t.payhere_sub_id', subscriptionIds)
+      .where('t.user_id', user_id)
       .orderBy('t.created_at', 'desc')
       .limit(limit)
       .offset((page - 1) * limit);
@@ -910,15 +1089,12 @@ export class TransactionService {
   }
 
   private async computeDcaSummary(user_id: string): Promise<DcaSummary> {
-    const subscriptionIds = await this.getSubscriptionIds(user_id);
-    const transactions: Transaction[] =
-      subscriptionIds.length === 0
-        ? []
-        : await this.knexService
-            .knex<Transaction>('transaction')
-            .whereIn('payhere_sub_id', subscriptionIds)
-            .whereNotNull('satoshis_purchased')
-            .where('status', 'SUCCESS');
+    // Subscription charges and one-time buys alike
+    const transactions: Transaction[] = await this.knexService
+      .knex<Transaction>('transaction')
+      .where('user_id', user_id)
+      .whereNotNull('satoshis_purchased')
+      .where('status', 'SUCCESS');
 
     let totalSatoshis = new Big(0);
     // "Invested" excludes fees so Current Value vs Invested shows market
@@ -964,20 +1140,16 @@ export class TransactionService {
     };
   }
 
-  /** transaction t → subscription s → package p */
+  /**
+   * transaction t → subscription s → package p, and the checkout order o.
+   * Left joins: one-time buys have no subscription or package.
+   */
   private transactionsWithPackage() {
     return this.knexService
       .knex('transaction as t')
-      .join('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
-      .join('package as p', 's.package_id', 'p.id');
-  }
-
-  private async getSubscriptionIds(user_id: string): Promise<string[]> {
-    const rows = await this.knexService
-      .knex<Subscription>('subscription')
-      .select('payhere_sub_id')
-      .where('user_id', user_id);
-    return rows.map((row) => row.payhere_sub_id);
+      .leftJoin('subscription as s', 't.payhere_sub_id', 's.payhere_sub_id')
+      .leftJoin('package as p', 's.package_id', 'p.id')
+      .leftJoin('payhere_order as o', 't.payhere_order_id', 'o.order_id');
   }
 
   /** Wallet balance (BitcoinDeepa) + market data (CMC). Never throws. */
