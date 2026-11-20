@@ -352,10 +352,12 @@ export class TransactionService {
    * captured notification being reused for another user or subscription.
    *
    * A replay with an invented payment_id still passes this check, and
-   * getting a genuine signed notification is easy: notify_url is an unsigned
-   * checkout parameter, so a payer can point it at their own server. Such
-   * payments are recorded but never paid out - settlement only pays a
-   * payment_id that PayHere's API lists as RECEIVED.
+   * getting a genuine signed notification is possible: notify_url is an
+   * unsigned checkout parameter, so a payer can point it at their own server.
+   * Settlement does not look the payment up with PayHere (decided 2026-11:
+   * the signed webhook is trusted). A one-time order replayed this way is
+   * held as paid twice (oneTimeHoldReason); a replayed subscription charge
+   * is not told apart from a real one.
    */
   isValidPayHereSignature(data: PayHereNotificationParams): boolean {
     const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
