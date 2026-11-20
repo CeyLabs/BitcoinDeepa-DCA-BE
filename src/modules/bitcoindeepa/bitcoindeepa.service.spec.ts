@@ -305,7 +305,7 @@ describe('BitcoinDeepaService', () => {
     });
   });
 
-  describe('findTransferByMemo', () => {
+  describe('findSettlementTransfer', () => {
     const tx = (memo: string, extra = {}) => ({
       id: 1,
       time: '2026-11-19T00:00:00Z',
@@ -315,18 +315,18 @@ describe('BitcoinDeepaService', () => {
       success: true,
       ...extra,
     });
+    const history = (transactions: unknown[]) => ({
+      status: 200,
+      data: { success: true, transactions },
+    });
 
-    it('finds a successful incoming transfer with the memo', async () => {
-      request.mockResolvedValue({
-        status: 200,
-        data: {
-          success: true,
-          transactions: [tx('other'), tx('DCA (Ref: P1)')],
-        },
-      });
-      await expect(
-        service.findTransferByMemo(42, 'DCA (Ref: P1)'),
-      ).resolves.toBe(true);
+    it('finds the successful incoming transfer for the payment', async () => {
+      request.mockResolvedValue(
+        history([tx('other'), tx('DCA purchase (Ref: P1)')]),
+      );
+      await expect(service.findSettlementTransfer(42, 'P1', 100)).resolves.toBe(
+        true,
+      );
       expect(JSON.parse(call().data as string)).toEqual({
         telegram_id: 42,
         limit: 250,
@@ -334,38 +334,46 @@ describe('BitcoinDeepaService', () => {
       });
     });
 
-    it('ignores outgoing or failed entries', async () => {
-      request.mockResolvedValue({
-        status: 200,
-        data: {
-          success: true,
-          transactions: [
-            tx('m', { direction: 'outgoing' }),
-            tx('m', { success: false }),
-          ],
-        },
-      });
-      await expect(service.findTransferByMemo(42, 'm')).resolves.toBe(false);
+    it('matches either memo format (the previous release sent the package name)', async () => {
+      request.mockResolvedValue(
+        history([tx('Shrimp Weekly DCA plan (Ref: P1)')]),
+      );
+      await expect(
+        service.findSettlementTransfer(42, 'P1', '100'),
+      ).resolves.toBe(true);
+    });
+
+    it('ignores another payment, another amount, outgoing or failed entries', async () => {
+      request.mockResolvedValue(
+        history([
+          tx('DCA purchase (Ref: P10)'),
+          tx('DCA purchase (Ref: P1) extra'),
+          tx('DCA purchase (Ref: P1)', { amount: 99 }),
+          tx('DCA purchase (Ref: P1)', { direction: 'outgoing' }),
+          tx('DCA purchase (Ref: P1)', { success: false }),
+        ]),
+      );
+      await expect(service.findSettlementTransfer(42, 'P1', 100)).resolves.toBe(
+        false,
+      );
     });
 
     it('pages through full pages, then stops', async () => {
       const full = Array.from({ length: 250 }, () => tx('x'));
       request
-        .mockResolvedValueOnce({
-          status: 200,
-          data: { success: true, transactions: full },
-        })
-        .mockResolvedValueOnce({
-          status: 200,
-          data: { success: true, transactions: [tx('m')] },
-        });
-      await expect(service.findTransferByMemo(42, 'm')).resolves.toBe(true);
+        .mockResolvedValueOnce(history(full))
+        .mockResolvedValueOnce(history([tx('DCA purchase (Ref: P1)')]));
+      await expect(service.findSettlementTransfer(42, 'P1', 100)).resolves.toBe(
+        true,
+      );
       expect(JSON.parse(call(1).data as string)).toMatchObject({ offset: 250 });
     });
 
     it('returns null when the history cannot be read', async () => {
       request.mockRejectedValue(apiError(503, 'down'));
-      await expect(service.findTransferByMemo(42, 'm')).resolves.toBeNull();
+      await expect(
+        service.findSettlementTransfer(42, 'P1', 100),
+      ).resolves.toBeNull();
     });
   });
 

@@ -10,6 +10,7 @@ import { TelegramLoggerService } from '../telegram-logger/telegram-logger.servic
 import { PayHereService } from '../payhere/payhere.service';
 import { RedisService } from '../redis/redis.service';
 import { errorMessage } from '../../common/error-message';
+import { legacyTransferMemo, transferMemo } from './transfer-memo';
 import {
   MAX_SETTLEMENT_ATTEMPTS,
   sameAmount,
@@ -37,6 +38,8 @@ interface UnsettledTransaction {
   created_at: Date;
   /** Why the last send didn't go through (UNKNOWN = may have gone, check the memo first) */
   settlement_failure: string | null;
+  /** Null = created by an earlier release: sent with the legacy memo */
+  transfer_memo: string | null;
 }
 
 /** A send held for approval in Telegram (the bot answered 202) */
@@ -84,6 +87,7 @@ export class SettlementService {
             't.retry_count',
             't.created_at',
             't.settlement_failure',
+            't.transfer_memo',
             'u.id as telegram_id',
           )
           .join('user as u', 't.user_id', 'u.id')
@@ -209,7 +213,9 @@ export class SettlementService {
         return;
       }
 
-      const memo = SettlementService.transferMemo(payhere_pay_id, kind);
+      const memo = await this.memoFor(transaction);
+      const mayHaveGoneThrough =
+        SettlementService.mayHaveGoneThrough(transaction);
 
       // The claim and the PayHere lookup took a while. A chargeback that
       // arrived meanwhile was told "it will not be settled": keep that true.
@@ -235,14 +241,11 @@ export class SettlementService {
         // Nothing more is sent, but an earlier send with no answer may have
         // gone through, and nothing looks at a charged-back payment again:
         // find out now (markSettled says so if sats went out).
-        if (
-          current &&
-          !current.settled &&
-          transaction.settlement_failure === 'UNKNOWN'
-        ) {
-          const found = await this.bitcoinDeepaService.findTransferByMemo(
+        if (current && !current.settled && mayHaveGoneThrough) {
+          const found = await this.bitcoinDeepaService.findSettlementTransfer(
             Number(telegram_id),
-            memo,
+            payhere_pay_id,
+            satoshis_purchased,
           );
           if (found) {
             await this.markSettled(payhere_pay_id);
@@ -255,7 +258,7 @@ export class SettlementService {
               .where('retry_count', currentRetryCount);
             await this.telegramLogger.logAlert(
               'Settlement',
-              `Settlement of ${payhere_pay_id} was skipped (it is ${now} now), but an earlier send of ${satoshis_purchased} sats to user ${telegram_id} got no answer and memo "${memo}" ${found === null ? "couldn't be looked up" : "isn't in their bot history"}. Check the bot before treating it as not sent.`,
+              `Settlement of ${payhere_pay_id} was skipped (it is ${now} now), but an earlier send of ${satoshis_purchased} sats to user ${telegram_id} got no answer and a transfer with "(Ref: ${payhere_pay_id})" ${found === null ? "couldn't be looked up" : "isn't in their bot history"}. Check the bot before treating it as not sent.`,
             );
           }
         }
@@ -269,20 +272,36 @@ export class SettlementService {
         currentRetryCount,
       );
 
-      // The last send may have gone through (timeout/5xx): look for its memo
-      // first. Not found (or history unreadable) means resend with the SAME
-      // memo - the bot answers "already completed" if it did go through.
-      if (transaction.settlement_failure === 'UNKNOWN') {
-        const found = await this.bitcoinDeepaService.findTransferByMemo(
+      // An earlier send may have gone through: look for it first. Not found
+      // means resend with the SAME memo - the bot answers "already completed"
+      // if it did go through.
+      if (mayHaveGoneThrough) {
+        const found = await this.bitcoinDeepaService.findSettlementTransfer(
           Number(telegram_id),
-          memo,
+          payhere_pay_id,
+          satoshis_purchased,
         );
         if (found) {
           await this.markSettled(payhere_pay_id);
           this.logger.log(
-            `Settlement for ${payhere_pay_id} had gone through: found memo "${memo}" in the user's bot history`,
+            `Settlement for ${payhere_pay_id} had gone through: found "(Ref: ${payhere_pay_id})" in the user's bot history`,
           );
           await this.telegramLogger.setMessageReaction(logMessage);
+          return;
+        }
+        if (found === null && !transaction.settlement_failure) {
+          // An attempt whose outcome nobody recorded (the previous release,
+          // or a crash mid-send) may have used another memo, which the bot
+          // would not dedupe: don't resend blind. Give the attempt back;
+          // last_retry_at keeps the backoff.
+          await this.knexService
+            .knex('transaction')
+            .update({ retry_count: retry_count })
+            .where('payhere_pay_id', payhere_pay_id)
+            .where('retry_count', currentRetryCount);
+          this.logger.warn(
+            `Settlement of ${payhere_pay_id} postponed: an earlier attempt's outcome is unknown and the bot history can't be read`,
+          );
           return;
         }
       }
@@ -626,17 +645,50 @@ export class SettlementService {
     return matches;
   }
 
-  /**
-   * The memo is the transfer's idempotency key on the BitcoinDeepa API (a
-   * repeated memo is rejected as already done), so it must be identical on
-   * every attempt: built from the payment id and its kind, which never change.
-   */
+  /** The memo a new payment is created with (see transfer-memo.ts) */
   static transferMemo(
     payhere_pay_id: string,
     kind: PurchaseKind = 'RECURRING',
   ): string {
-    return kind === 'ONE_TIME'
-      ? `One-time BTC purchase (Ref: ${payhere_pay_id})`
-      : `DCA purchase (Ref: ${payhere_pay_id})`;
+    return transferMemo(payhere_pay_id, kind);
+  }
+
+  /**
+   * The memo this payment is sent with: the one stored when it was created,
+   * or, for a payment created by an earlier release (no stored memo), the
+   * memo that release used, so a send it already made is still recognised by
+   * the bot as "already completed". A failed package lookup throws: guessing
+   * the legacy memo wrong could pay twice, so the attempt is not made.
+   */
+  private async memoFor(transaction: UnsettledTransaction): Promise<string> {
+    if (transaction.transfer_memo) return transaction.transfer_memo;
+    if (transaction.kind === 'ONE_TIME' || !transaction.payhere_sub_id) {
+      // Only this release creates one-time buys, and it always stores a memo
+      return transferMemo(transaction.payhere_pay_id, transaction.kind);
+    }
+    const row = await this.knexService
+      .knex('subscription as s')
+      .select('p.name as package_name')
+      .join('package as p', 's.package_id', 'p.id')
+      .where('s.payhere_sub_id', transaction.payhere_sub_id)
+      .first<{ package_name: string | null } | undefined>();
+    return legacyTransferMemo(transaction.payhere_pay_id, row?.package_name);
+  }
+
+  /**
+   * Whether an earlier send may have gone through, so the bot history is
+   * checked before sending. UNKNOWN is recorded by this release (timeout or
+   * 5xx). An attempt with no recorded outcome counts too: the previous
+   * release recorded none and gave up on /send after 10s (it also settles
+   * this release's rows while both run during a deploy, with its own memo),
+   * and a crash mid-send leaves none.
+   */
+  private static mayHaveGoneThrough(
+    transaction: UnsettledTransaction,
+  ): boolean {
+    return (
+      transaction.settlement_failure === 'UNKNOWN' ||
+      (!transaction.settlement_failure && (transaction.retry_count ?? 0) > 0)
+    );
   }
 }

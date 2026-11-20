@@ -152,9 +152,10 @@ describe('Settlement (e2e)', () => {
       .where({ payhere_pay_id: 'P1' })
       .update({ last_retry_at: new Date(0) });
     await settlement.retryUnsettledTransactions();
-    expect(ctx.bitcoinDeepa.findTransferByMemo).toHaveBeenCalledWith(
+    expect(ctx.bitcoinDeepa.findSettlementTransfer).toHaveBeenCalledWith(
       Number(USER),
-      'DCA purchase (Ref: P1)',
+      'P1',
+      expect.anything(),
     );
     expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(2);
     const memos = ctx.bitcoinDeepa.transferFunds.mock.calls.map(
@@ -175,7 +176,7 @@ describe('Settlement (e2e)', () => {
       message: 'timeout',
     });
     await settlement.retryUnsettledTransactions();
-    ctx.bitcoinDeepa.findTransferByMemo.mockResolvedValueOnce(true);
+    ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(true);
     await ctx
       .knex('transaction')
       .where({ payhere_pay_id: 'P1' })
@@ -183,6 +184,99 @@ describe('Settlement (e2e)', () => {
     await settlement.retryUnsettledTransactions();
     expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
     expect(await tx()).toMatchObject({ settled: true });
+  });
+
+  describe('payments created by the previous release (no stored memo)', () => {
+    const LEGACY_MEMO = 'Shrimp Weekly DCA plan (Ref: P1)';
+    /** As the previous release left it: no memo, `attempts` sends made */
+    const asPreviousRelease = (attempts: number) =>
+      ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'P1' })
+        .update({
+          transfer_memo: null,
+          retry_count: attempts,
+          last_retry_at: attempts ? new Date(0) : null,
+          settlement_failure: null,
+        });
+
+    it('stores the memo on new payments', async () => {
+      expect(await tx()).toMatchObject({
+        transfer_memo: 'DCA purchase (Ref: P1)',
+      });
+    });
+
+    it('never attempted: sent with the old memo, no history lookup', async () => {
+      await asPreviousRelease(0);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.findSettlementTransfer).not.toHaveBeenCalled();
+      expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
+      expect(ctx.bitcoinDeepa.transferFunds.mock.calls[0][2]).toBe(LEGACY_MEMO);
+      expect(await tx()).toMatchObject({ settled: true });
+    });
+
+    it('attempted before (may have timed out): found in the bot history, not resent', async () => {
+      await asPreviousRelease(2);
+      ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(true);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.findSettlementTransfer).toHaveBeenCalledWith(
+        Number(USER),
+        'P1',
+        expect.anything(),
+      );
+      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      expect(await tx()).toMatchObject({ settled: true });
+    });
+
+    it('attempted before, not in the history: resent with the SAME old memo', async () => {
+      await asPreviousRelease(2);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.findSettlementTransfer).toHaveBeenCalledWith(
+        Number(USER),
+        'P1',
+        expect.anything(),
+      );
+      expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
+      expect(ctx.bitcoinDeepa.transferFunds.mock.calls[0][2]).toBe(LEGACY_MEMO);
+      expect(await tx()).toMatchObject({ settled: true, retry_count: 3 });
+    });
+
+    it('a new payment the previous release attempted during the deploy: looked up first, not resent', async () => {
+      // stored memo, but the old release sent it (old memo) and recorded nothing
+      await ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'P1' })
+        .update({
+          retry_count: 1,
+          last_retry_at: new Date(0),
+          settlement_failure: null,
+        });
+      ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(true);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      expect(await tx()).toMatchObject({ settled: true });
+    });
+
+    it('an attempt with no recorded outcome is not resent while the bot history is unreadable', async () => {
+      await asPreviousRelease(2);
+      ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(null);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      // the attempt is given back; the backoff still applies
+      expect(await tx()).toMatchObject({ settled: false, retry_count: 2 });
+    });
+
+    it('a subscription without a package keeps the old fallback memo', async () => {
+      await asPreviousRelease(0);
+      await ctx
+        .knex('subscription')
+        .where({ payhere_sub_id: 'S1' })
+        .update({ package_id: null });
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds.mock.calls[0][2]).toBe(
+        'DCA Purchase (Ref: P1)',
+      );
+    });
   });
 
   describe('sends held for approval in the bot (202)', () => {
@@ -746,7 +840,7 @@ describe('Settlement (e2e)', () => {
     afterEach(() => alert.mockRestore());
 
     it('sends nothing more, and records that the first send went through', async () => {
-      ctx.bitcoinDeepa.findTransferByMemo.mockResolvedValueOnce(true);
+      ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(true);
       await settlement.retryUnsettledTransactions();
 
       expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
@@ -763,7 +857,7 @@ describe('Settlement (e2e)', () => {
     ])(
       'sends nothing more, and asks a human when the memo lookup says %s',
       async (found, wording) => {
-        ctx.bitcoinDeepa.findTransferByMemo.mockResolvedValueOnce(found);
+        ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(found);
         await settlement.retryUnsettledTransactions();
 
         expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
@@ -776,7 +870,7 @@ describe('Settlement (e2e)', () => {
         expect(alert).toHaveBeenCalledWith(
           'Settlement',
           expect.stringContaining(
-            `memo "DCA purchase (Ref: P1)" ${wording}. Check the bot`,
+            `a transfer with "(Ref: P1)" ${wording}. Check the bot`,
           ),
         );
       },

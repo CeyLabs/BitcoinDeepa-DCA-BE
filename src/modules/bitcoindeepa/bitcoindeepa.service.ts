@@ -406,14 +406,20 @@ export class BitcoinDeepaService {
   }
 
   /**
-   * Whether the user received a successful transfer with this memo (checks
-   * the latest MEMO_LOOKUP_PAGES pages of their bot history). Null when the
-   * history can't be read - the caller must not assume either way.
+   * Whether the user received the settlement transfer for this payment: a
+   * successful incoming transfer whose memo ends in `(Ref: <paymentId>)` and
+   * whose amount is the payment's sats (checks the latest MEMO_LOOKUP_PAGES
+   * pages of their bot history). Matched on the reference, not the whole
+   * memo, because the memo format changed between releases and either may
+   * have sent it. Null when the history can't be read - the caller must not
+   * assume either way.
    */
-  async findTransferByMemo(
+  async findSettlementTransfer(
     telegramId: number,
-    memo: string,
+    paymentId: string,
+    sats: number | string,
   ): Promise<boolean | null> {
+    const ref = `(Ref: ${paymentId})`;
     for (let page = 0; page < MEMO_LOOKUP_PAGES; page++) {
       const history = await this.getUserTransactions(
         telegramId,
@@ -422,7 +428,11 @@ export class BitcoinDeepaService {
       );
       if (!history.success) return null;
       const found = history.transactions.some(
-        (tx) => tx.memo === memo && tx.direction === 'incoming' && tx.success,
+        (tx) =>
+          tx.direction === 'incoming' &&
+          tx.success &&
+          (tx.memo ?? '').endsWith(ref) &&
+          Number(tx.amount) === Number(sats),
       );
       if (found) return true;
       if (history.transactions.length < MAX_HISTORY_PAGE) return false;
