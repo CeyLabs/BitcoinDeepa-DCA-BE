@@ -61,7 +61,7 @@ const asObject = (body: unknown): Record<string, unknown> =>
  * The P2P relay: a user sends sats from their own bot wallet. The Telegram
  * login is checked once, at login (init, which links the user on the bot for
  * a year); after that our session names the user (X-BDB-User, signed V2 with
- * the P2P key) and we pass the bot's answer through (its messages are written
+ * the bot key) and we pass the bot's answer through (its messages are written
  * for users). A user the bot hasn't linked (403 login_required) gets our 403
  * relogin_required: logging in again links them. What isn't the user's to
  * fix - our signature, IP allowlist, a bot outage - is mapped:

@@ -151,26 +151,6 @@ describe('validateEnv', () => {
     ).not.toThrow();
   });
 
-  it('the P2P key is its own Ed25519 key pair, not the send key', () => {
-    expect(() =>
-      validateEnv({
-        ...base,
-        BITCOINDEEPA_PRIVATE_KEY_PEM: ED25519_PEM,
-        BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: ED25519_PEM,
-      }),
-    ).toThrow(/BITCOINDEEPA_P2P_PRIVATE_KEY_PEM/);
-    expect(() =>
-      validateEnv({
-        ...base,
-        BITCOINDEEPA_PRIVATE_KEY_PEM: ED25519_PEM,
-        BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: pem('ed25519'),
-      }),
-    ).not.toThrow();
-    expect(() =>
-      validateEnv({ ...base, BITCOINDEEPA_P2P_PRIVATE_KEY_PEM: pem('x25519') }),
-    ).toThrow(/BITCOINDEEPA_P2P_PRIVATE_KEY_PEM/);
-  });
-
   it('P2P_ENABLED is true or false', () => {
     const dev = { ...base, NODE_ENV: 'development' };
     expect(() => validateEnv({ ...dev, P2P_ENABLED: 'true' })).not.toThrow();
@@ -197,20 +177,9 @@ describe('validateEnv', () => {
     expect(() => validateEnv(dev)).not.toThrow(); // optional outside production
   });
 
-  it('allows the bot collect mock only with the CeyPay sandbox', () => {
+  it('a leftover BITCOINDEEPA_COLLECT_MOCK does not stop the app (it does nothing now)', () => {
     expect(() =>
-      validateEnv({
-        ...base,
-        BITCOINDEEPA_COLLECT_MOCK: 'true',
-        CEYPAY_API_URL: 'https://api.ceypay.io',
-      }),
-    ).toThrow(/BITCOINDEEPA_COLLECT_MOCK/);
-    expect(() =>
-      validateEnv({
-        ...base,
-        BITCOINDEEPA_COLLECT_MOCK: 'true',
-        CEYPAY_API_URL: 'https://sandbox-api.ceypay.io',
-      }),
+      validateEnv({ ...base, BITCOINDEEPA_COLLECT_MOCK: 'true' }),
     ).not.toThrow();
   });
 

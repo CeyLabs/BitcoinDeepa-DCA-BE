@@ -173,20 +173,12 @@ export class BitcoinDeepaService {
       process.env.BITCOINDEEPA_SEND_TIMEOUT || '95000',
       10,
     );
-    if (BitcoinDeepaService.isCollectMocked()) {
+    if (process.env.BITCOINDEEPA_COLLECT_MOCK === 'true') {
+      // The mock is gone: a sale only pays out once the bot says it was paid
       this.logger.warn(
-        'BITCOINDEEPA_COLLECT_MOCK is on: sell debits are NOT sent to the bot (sandbox only)',
+        'BITCOINDEEPA_COLLECT_MOCK is set but no longer does anything: sell debits always go to the bot. Remove it.',
       );
     }
-  }
-
-  /**
-   * Dev without a collect-enabled wallet on the bot can pretend every sell
-   * debit was approved and paid. Env validation only allows it with the
-   * CeyPay sandbox.
-   */
-  static isCollectMocked(): boolean {
-    return process.env.BITCOINDEEPA_COLLECT_MOCK === 'true';
   }
 
   isConfigured(): boolean {

@@ -1,5 +1,5 @@
 import { plainToInstance } from 'class-transformer';
-import { createPrivateKey, createPublicKey } from 'crypto';
+import { createPrivateKey } from 'crypto';
 import {
   IsIn,
   IsInt,
@@ -73,28 +73,6 @@ class NotFalseInProduction implements ValidatorConstraintInterface {
   }
   defaultMessage(): string {
     return "can't be 'false' in production";
-  }
-}
-
-/** The P2P key must be its own key pair, not the send key */
-@ValidatorConstraint({ name: 'differsFromSendKey' })
-class DiffersFromSendKey implements ValidatorConstraintInterface {
-  validate(value: unknown, args: ValidationArguments): boolean {
-    const send = (args.object as EnvironmentVariables)
-      .BITCOINDEEPA_PRIVATE_KEY_PEM;
-    if (typeof value !== 'string' || !send) return true;
-    try {
-      const pub = (pem: string) =>
-        createPublicKey(createPrivateKey(pem.replace(/\\n/g, '\n')))
-          .export({ type: 'spki', format: 'der' })
-          .toString('base64');
-      return pub(value) !== pub(send);
-    } catch {
-      return true; // IsEd25519PrivateKeyPem reports a bad key
-    }
-  }
-  defaultMessage(): string {
-    return 'must be a different key pair from BITCOINDEEPA_PRIVATE_KEY_PEM (the send key)';
   }
 }
 
@@ -292,25 +270,20 @@ class EnvironmentVariables {
   @IsNotEmpty()
   BITCOINDEEPA_WALLET_ID?: string;
 
-  // The send key: our DCA wallet's API (payouts, collect requests). Its
-  // public key is the wallet's ed25519_public_key on the bot.
+  // The bot key: one Ed25519 key pair signs everything we send the bot - the
+  // DCA wallet's API (payouts, collect requests) and P2P (users' own wallets:
+  // login via /api/v1/init, then /api/v1/p2p/* naming the user with
+  // X-BDB-User). Its public key is both the wallet's ed25519_public_key and
+  // the bot's api.p2p.service_public_key. A different one per environment.
+  // If it leaks it can pay from the DCA wallet and from any linked user's
+  // wallet up to the bot's daily_limit: keep it in the secret store.
   @ValidateIf(presentOrProduction('BITCOINDEEPA_PRIVATE_KEY_PEM'))
   @Validate(IsEd25519PrivateKeyPem)
   BITCOINDEEPA_PRIVATE_KEY_PEM?: string;
 
-  // The P2P key: users' own wallets (login via /api/v1/init, then
-  // /api/v1/p2p/* naming the user with X-BDB-User). A separate key pair from
-  // the send key, and a different one per environment; its public key is the
-  // bot's api.p2p.service_public_key. If it leaks it can pay from any linked
-  // user's wallet up to the bot's daily_limit: keep it in the secret store.
-  @IsOptional()
-  @Validate(IsEd25519PrivateKeyPem)
-  @Validate(DiffersFromSendKey)
-  BITCOINDEEPA_P2P_PRIVATE_KEY_PEM?: string;
-
   // P2P sends (users' own wallets, relayed to the bot's /api/v1/p2p). On by
   // default; P2P_ENABLED=false switches it off (/p2p/* answers 503), and it
-  // is off without BITCOINDEEPA_P2P_PRIVATE_KEY_PEM.
+  // is off without BITCOINDEEPA_PRIVATE_KEY_PEM.
   @IsOptional()
   @IsIn(['true', 'false'])
   P2P_ENABLED?: string;
@@ -369,12 +342,6 @@ class EnvironmentVariables {
   @IsOptional()
   @IsIn(['true', 'false'])
   SELL_ENABLED?: string;
-
-  // Pretend the bot debited the sats (its collect endpoint isn't built yet).
-  // Sandbox CeyPay only, so fake sats can never be paid out for real.
-  @IsOptional()
-  @IsIn(['true', 'false'])
-  BITCOINDEEPA_COLLECT_MOCK?: string;
 
   @IsOptional()
   @IsInt()
@@ -488,15 +455,6 @@ export function validateEnv(
   const problems = errors.map(
     (e) => `${e.property}: ${Object.values(e.constraints ?? {}).join(', ')}`,
   );
-  if (
-    validated.BITCOINDEEPA_COLLECT_MOCK === 'true' &&
-    !/sandbox/i.test(validated.CEYPAY_API_URL ?? '')
-  ) {
-    problems.push(
-      'BITCOINDEEPA_COLLECT_MOCK: only allowed with the CeyPay sandbox (CEYPAY_API_URL)',
-    );
-  }
-
   if (problems.length > 0) {
     const details = problems.join('\n  ');
     throw new Error(`Invalid environment configuration:\n  ${details}`);

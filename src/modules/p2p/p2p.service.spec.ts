@@ -314,7 +314,7 @@ describe('P2pService', () => {
     });
   });
 
-  it('503 when the P2P key or bot URL is missing', async () => {
+  it('503 when the bot key or bot URL is missing', async () => {
     bot.isConfigured.mockReturnValue(false);
     expect(await errorOf(send())).toMatchObject({
       status: 503,
