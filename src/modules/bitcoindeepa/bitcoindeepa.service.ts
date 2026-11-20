@@ -57,6 +57,8 @@ export interface CollectRequest {
   transfer?: {
     id: string;
     status: string;
+    /** Hash of the invoice the transfer paid: the same as its bot-history row's */
+    payment_hash?: string;
     error?: string;
     confirm_by?: string;
   };
