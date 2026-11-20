@@ -540,14 +540,6 @@ export class SellService {
 
     // No lock held while the bot works
     const order = claim.order;
-    if (BitcoinDeepaService.isCollectMocked()) {
-      this.logger.warn(
-        `MOCK collect: ${order.sats} sats from user ${userId} (sell ${id}) treated as approved and paid`,
-      );
-      await this.markCollected(order);
-      return toSellOrderView(await this.findOrder(userId, id));
-    }
-
     const result = await this.bitcoinDeepa.createCollect(
       userId,
       Number(order.sats),
@@ -584,8 +576,6 @@ export class SellService {
     if (order.status !== SellStatus.COLLECTING || !order.collect_expires_at) {
       return;
     }
-    // Confirm treats a mocked debit as paid; a row it left behind is the same
-    if (BitcoinDeepaService.isCollectMocked()) return this.markCollected(order);
     const result: CollectResult = order.bot_collect_id
       ? await this.bitcoinDeepa.getCollect(order.bot_collect_id)
       : await this.bitcoinDeepa.createCollect(
@@ -1060,14 +1050,11 @@ export class SellService {
     });
     if (!claimed) return false;
 
-    // Mock collect never took the sats, so there is nothing to give back
-    const result = BitcoinDeepaService.isCollectMocked()
-      ? { success: true, message: 'Mock collect: nothing to return' }
-      : await this.bitcoinDeepa.transferFunds(
-          Number(order.sats),
-          order.user_id,
-          `sell-refund:${order.id}`,
-        );
+    const result = await this.bitcoinDeepa.transferFunds(
+      Number(order.sats),
+      order.user_id,
+      `sell-refund:${order.id}`,
+    );
     if (
       result.success ||
       ('already_completed' in result && result.already_completed)

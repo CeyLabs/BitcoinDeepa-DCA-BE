@@ -13,14 +13,14 @@ describe('P2pBotClient (bot docs/dca-backend-integration.md §5)', () => {
 
   beforeAll(() => {
     process.env.BITCOINDEEPA_API_URL = 'https://bot.test';
-    process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM = privateKey
+    process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = privateKey
       .export({ type: 'pkcs8', format: 'pem' })
       .toString();
     client = new P2pBotClient();
   });
   afterAll(() => {
     delete process.env.BITCOINDEEPA_API_URL;
-    delete process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM;
+    delete process.env.BITCOINDEEPA_PRIVATE_KEY_PEM;
   });
   beforeEach(() => {
     request.mockReset();

@@ -663,7 +663,7 @@ describe('Sell flow (e2e)', () => {
         expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
       });
 
-      it('with the mock on, a sale left COLLECTING is treated as paid', async () => {
+      it('BITCOINDEEPA_COLLECT_MOCK does nothing: an unpaid sale stays unpaid and the bot is still asked', async () => {
         const { q } = await confirmPending();
         process.env.BITCOINDEEPA_COLLECT_MOCK = 'true';
         try {
@@ -672,8 +672,9 @@ describe('Sell flow (e2e)', () => {
         } finally {
           process.env.BITCOINDEEPA_COLLECT_MOCK = 'false';
         }
-        expect(ctx.bitcoinDeepa.getCollect).not.toHaveBeenCalled();
-        expect((await order(q.id)).status).toBe('PAYOUT_PENDING');
+        expect(ctx.bitcoinDeepa.getCollect).toHaveBeenCalled();
+        expect((await order(q.id)).status).toBe('COLLECTING');
+        expect(ctx.ceyPay.createOfframp).not.toHaveBeenCalled();
       });
 
       it('the user can cancel before paying', async () => {

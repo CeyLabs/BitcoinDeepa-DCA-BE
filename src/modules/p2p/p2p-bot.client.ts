@@ -31,11 +31,11 @@ const MAX_BODY_BYTES = 16 * 1024;
 /** Internal sends run synchronously in the request */
 const SEND_TIMEOUT_MS = 60_000;
 
-export const P2P_KEY_ENV = 'BITCOINDEEPA_P2P_PRIVATE_KEY_PEM';
+export const P2P_KEY_ENV = 'BITCOINDEEPA_PRIVATE_KEY_PEM';
 
 /**
- * The bot's /api/v1/init and /api/v1/p2p API, signed with the P2P key (not
- * the DCA wallet's send key). No X-Wallet-ID.
+ * The bot's /api/v1/init and /api/v1/p2p API, signed with the bot key (the
+ * same key as the DCA wallet's send API). No X-Wallet-ID.
  * - init: BDB-P2P-ED25519-V1 over ..., sha256(credential), sha256(body)
  * - everything else: BDB-P2P-ED25519-V2 over ..., telegramId, sha256(body),
  *   with X-BDB-User: telegramId and no Telegram header

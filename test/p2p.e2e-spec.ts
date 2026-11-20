@@ -57,12 +57,12 @@ describe('P2P sends (e2e)', () => {
     process.env.P2P_ENABLED = 'false';
     await http().get('/p2p/me').set(auth()).expect(503);
     delete process.env.P2P_ENABLED;
-    const key = process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM;
-    delete process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM;
+    const key = process.env.BITCOINDEEPA_PRIVATE_KEY_PEM;
+    delete process.env.BITCOINDEEPA_PRIVATE_KEY_PEM;
     try {
       await http().get('/p2p/me').set(auth()).expect(503);
     } finally {
-      process.env.BITCOINDEEPA_P2P_PRIVATE_KEY_PEM = key;
+      process.env.BITCOINDEEPA_PRIVATE_KEY_PEM = key;
     }
     await http().get('/p2p/me').expect(401);
     expect(ctx.p2pBot.request).not.toHaveBeenCalled();
