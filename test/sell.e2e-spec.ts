@@ -25,7 +25,7 @@ import { CacheKeys } from '../src/modules/redis/utils/cache-keys.util';
 // 100,000 sats, 1% fee = 1,000 sats; 99,000 sats at 20,000,000 LKR/BTC
 const SATS = 100_000;
 // 100,000 sats × (65,000 USD × 330 LKR/USDT) = 21,450 LKR, minus the 1% fee
-const AMOUNT_LKR = 21_235.5;
+const AMOUNT_LKR = 21_205.5;
 
 describe('Sell flow (e2e)', () => {
   let ctx: TestContext;
@@ -127,6 +127,7 @@ describe('Sell flow (e2e)', () => {
       expect(res.body).toEqual({
         btcLkrRate: 21_450_000,
         feeBasisPoints: 100,
+        bankChargeLkr: 30,
         minSats: 1000,
         maxSats: 5_000_000,
       });
@@ -142,6 +143,7 @@ describe('Sell flow (e2e)', () => {
         feeBasisPoints: 100,
         grossLkr: 21_450,
         feeLkr: 214.5,
+        bankChargeLkr: 30,
         btcLkrRate: 21_450_000,
         amountLkr: AMOUNT_LKR,
       });
@@ -171,7 +173,7 @@ describe('Sell flow (e2e)', () => {
       expect(ctx.bitcoinDeepa.createCollect).toHaveBeenCalledWith(
         USER,
         SATS,
-        'Bitcoin Deepa sale: 21,235.50 LKR to your bank account',
+        'Bitcoin Deepa sale: 21,205.50 LKR to your bank account',
         q.id,
       );
       // USDT sized from CeyPay's rate so it pays at least our LKR
@@ -209,7 +211,7 @@ describe('Sell flow (e2e)', () => {
       });
       expect(ctx.notifyUser).toHaveBeenCalledWith(
         USER,
-        expect.stringContaining('21235.50 LKR'),
+        expect.stringContaining('21205.50 LKR'),
       );
 
       // a late failure webhook can't undo it

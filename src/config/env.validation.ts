@@ -352,8 +352,9 @@ class EnvironmentVariables {
 
   // Flat bank transfer charge (LKR) taken off each sale (default 30)
   @IsOptional()
-  @IsNumber()
+  @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @Max(1000)
   SELL_BANK_CHARGE_LKR?: number;
 
   @IsOptional()

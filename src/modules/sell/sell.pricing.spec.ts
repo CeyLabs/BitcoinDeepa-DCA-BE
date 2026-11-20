@@ -30,6 +30,12 @@ describe('priceSale', () => {
     });
   });
 
+  it('subtracts the charge as stored (rounded to the cent)', () => {
+    const priced = priceSale(100_000, 100, 20_000_000, 30.555);
+    expect(priced.bankChargeLkr).toBe('30.56');
+    expect(priced.amountLkr).toBe('19769.44');
+  });
+
   it('works with no fee', () => {
     expect(priceSale(50_000, 0, 20_000_000)).toEqual({
       grossLkr: '10000.00',

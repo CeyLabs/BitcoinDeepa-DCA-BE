@@ -274,11 +274,12 @@ export function priceSale(
     .times(feeBasisPoints)
     .div(10000)
     .round(2, Big.roundUp);
+  const chargeLkr = new Big(bankChargeLkr).round(2, Big.roundHalfUp);
   return {
     grossLkr: grossLkr.toFixed(2),
     feeLkr: feeLkr.toFixed(2),
-    bankChargeLkr: new Big(bankChargeLkr).toFixed(2),
-    amountLkr: grossLkr.minus(feeLkr).minus(bankChargeLkr).toFixed(2),
+    bankChargeLkr: chargeLkr.toFixed(2),
+    amountLkr: grossLkr.minus(feeLkr).minus(chargeLkr).toFixed(2),
   };
 }
 
@@ -319,9 +320,10 @@ export class SellService {
     return parseInt(process.env.BITCOINDEEPA_SELL_FEE_BASIS_POINTS || '0', 10);
   }
 
-  /** Flat LKR bank transfer charge per sale (default 30) */
+  /** Flat LKR bank transfer charge per sale (default 30; 0 must be explicit) */
   private static bankChargeLkr(): number {
-    return Number(process.env.SELL_BANK_CHARGE_LKR ?? '30');
+    const raw = process.env.SELL_BANK_CHARGE_LKR;
+    return raw === undefined || raw.trim() === '' ? 30 : Number(raw);
   }
 
   private static quoteTtlSeconds(): number {
