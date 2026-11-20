@@ -55,7 +55,7 @@ describe('One-time buy (e2e)', () => {
       expect(amount).toBe('2500.00');
       expect(link.searchParams.get('recurrence')).toBeNull();
       expect(link.searchParams.get('duration')).toBeNull();
-      expect(link.searchParams.get('items')).toBe('Bitcoin purchase');
+      expect(link.searchParams.get('items')).toBe('Sats Purchase');
       // PayHere appends nothing on return; the app reads the order from here
       expect(
         new URL(link.searchParams.get('return_url')!).searchParams.get(
