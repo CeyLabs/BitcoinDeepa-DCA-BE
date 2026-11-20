@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { KeyObject } from 'crypto';
 import axios, { AxiosResponse, Method } from 'axios';
 import {
+  COLLECT_SIGNING_VERSION,
   loadEd25519Key,
   SEND_SIGNING_VERSION,
   sha256hex,
@@ -198,22 +199,29 @@ export class BitcoinDeepaService {
    * The body is serialized once and those exact bytes are hashed and sent.
    * Every call (retries included) gets a fresh timestamp and nonce: the bot
    * rejects a reused nonce.
+   *
+   * With `collectPayerId` (creating a collect request) the user to charge is
+   * named in X-BDB-User and signed, as the line before the body hash:
+   *   BDB-COLLECT-ED25519-V1 \n ... \n NONCE \n PAYER TELEGRAM ID \n sha256hex(body)
    */
   private signedRequest<T>(
     method: Extract<Method, 'GET' | 'POST'>,
     pathWithQuery: string,
     body?: object,
     timeoutMs = this.timeout,
+    collectPayerId?: string,
   ): Promise<AxiosResponse<T>> {
     if (!this.privateKey) {
       return Promise.reject(new Error('BitcoinDeepa API is not configured'));
     }
     const raw = body ? JSON.stringify(body) : '';
     const signed = signBotRequest({
-      version: SEND_SIGNING_VERSION,
+      version: collectPayerId ? COLLECT_SIGNING_VERSION : SEND_SIGNING_VERSION,
       method,
       pathWithQuery,
-      hashedLines: [sha256hex(raw)],
+      hashedLines: collectPayerId
+        ? [collectPayerId, sha256hex(raw)]
+        : [sha256hex(raw)],
       key: this.privateKey,
     });
 
@@ -226,6 +234,7 @@ export class BitcoinDeepaService {
       headers: {
         'Content-Type': 'application/json',
         'X-Wallet-ID': this.walletId,
+        ...(collectPayerId ? { 'X-BDB-User': collectPayerId } : {}),
         ...signed,
       },
       timeout: timeoutMs,
@@ -430,22 +439,33 @@ export class BitcoinDeepaService {
   }
 
   /**
-   * Ask a user to pay the DCA wallet (POST /api/v1/collect). Nothing moves
-   * until they approve, in the bot chat or in the app. external_id makes it
+   * Ask a user to pay the DCA wallet (POST /api/v1/collect). The payer is not
+   * in the body: their Telegram id goes in X-BDB-User and the signed text
+   * (BDB-COLLECT-ED25519-V1). The bot must have linked them (a login through
+   * its /api/v1/init), else 403 payer_not_linked. external_id makes it
    * idempotent: asking again returns the same request (200 instead of 201).
    */
   createCollect(
-    toTelegramId: string,
+    payerTelegramId: string,
     amount: number,
     memo: string,
     externalId: string,
   ): Promise<CollectResult> {
-    return this.collectCall('POST', this.collectEndpoint, {
-      to: toTelegramId,
-      amount: Number(amount),
-      memo,
-      external_id: externalId,
-    });
+    if (!/^[1-9][0-9]{0,19}$/.test(payerTelegramId)) {
+      // Never sign or send something that isn't a Telegram id
+      return Promise.resolve({
+        kind: 'refused',
+        status: 400,
+        code: 'invalid_payer',
+        message: 'The payer is not a Telegram id',
+      });
+    }
+    return this.collectCall(
+      'POST',
+      this.collectEndpoint,
+      { amount: Number(amount), memo, external_id: externalId },
+      payerTelegramId,
+    );
   }
 
   getCollect(id: string): Promise<CollectResult> {
@@ -468,12 +488,15 @@ export class BitcoinDeepaService {
     method: 'GET' | 'POST',
     path: string,
     body?: object,
+    payerTelegramId?: string,
   ): Promise<CollectResult> {
     try {
       const response = await this.signedRequest<CollectRequest>(
         method,
         path,
         body,
+        this.timeout,
+        payerTelegramId,
       );
       return { kind: 'ok', request: response.data };
     } catch (error: unknown) {
