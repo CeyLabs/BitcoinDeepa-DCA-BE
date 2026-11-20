@@ -77,7 +77,8 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - **auth/**: Better Auth (email + password) for the admin dashboard (BitcoinDeepa-Admin-FE), mounted on Express at `/api/admin-auth/*` in `app.setup.ts` (before Nest's body parsers)
    - Tables `admin_user`, `admin_session`, `admin_account`, `admin_verification` (snake_case; mapping in `admin-auth.config.ts`). Separate from the Telegram `user` table; the analytics role has no access
    - Only `role = 'admin'` users can get a session (`databaseHooks.session.create.before`); public sign-up is disabled
-   - Create admins with `bun run admin:create --email <email> --name "<name>"` (prod build: `node dist/src/scripts/create-admin.js ...`; password prompted or `ADMIN_PASSWORD`)
+   - Create the first admin with `bun run admin:create --email <email> --name "<name>"` (prod build: `node dist/src/scripts/create-admin.js ...`; password prompted or `ADMIN_PASSWORD`)
+   - **admins/**: signed-in admins list and add other admins from the dashboard (`GET`/`POST /admin/admins`, server-side `auth.api.createUser` with role `admin`; password >= 12 chars, duplicate email 409)
    - Protect admin endpoints with `@UseGuards(AdminSessionGuard)` and read the session with `@CurrentAdmin()`
    - better-auth is ESM-only: it's loaded with a real dynamic `import()` (same trick as jose), so never import it statically outside `import type`
    - CORS: origins in `ADMIN_APP_URL` get an exact-match credentialed response; other origins keep `CORS_ORIGIN`, without credentials. Cookies are `SameSite=Lax` (`Secure` in production), so **sign-in only works when the dashboard and the API share a registrable domain** (`admin.<domain>` / `api.<domain>`). A dashboard on another site (a `vercel.app` preview against a `railway.app` API; `*.up.railway.app` and `*.vercel.app` are public suffixes, so even two Railway subdomains are different sites) signs in and then gets 401s. For dev/staging only, `ADMIN_COOKIE_SAME_SITE=none` makes it `SameSite=None; Secure` (HTTPS required; refused in production; Safari still blocks it). Admin requests other than GET/HEAD/OPTIONS must carry an `Origin` from `ADMIN_APP_URL` (CSRF)
@@ -295,6 +296,8 @@ PORT=3000
 - `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily settled LKR, payment count, unsettled LKR and new users (Asia/Colombo days)
 - `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&kind=RECURRING|ONE_TIME&from=&to=&q=` - Paginated transactions, newest first, with member, plan (null for one-time buys) and `kind`. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
 - `GET /admin/members?page=&pageSize=&kyc=&subscription=active|none&q=` - Paginated members, newest first, with active plan, settled SUCCESS-payment totals (LKR, sats) and unsettled LKR. `q` matches Telegram id, name, email or phone
+- `GET /admin/admins` - All dashboard admins (`id`, `name`, `email`, `banned`, `createdAt`), oldest first
+- `POST /admin/admins { email, name, password }` - Add an admin (password >= 12 chars; 409 if the email exists)
 
 ### Bank accounts
 - `GET /bank-accounts/banks` - Supported banks (CeyPay list, cached 1h)
@@ -505,7 +508,7 @@ src/
 │   ├── sell/             # Sell sats for LKR (quotes, CeyPay payouts, refunds)
 │   ├── ceypay/           # CeyPay aggregator off-ramp client
 │   ├── storage/          # Cloudflare R2 (presigned URLs)
-│   ├── admin/            # Admin dashboard API: auth/, analytics/, transactions/, members/, bank-reviews/
+│   ├── admin/            # Admin dashboard API: auth/, analytics/, transactions/, members/, bank-reviews/, admins/
 │   └── knex/             # Database connection
 ├── migrations/           # Database schema migrations
 └── seeds/               # Initial data seeding
