@@ -1358,6 +1358,7 @@ export class TransactionService {
       memo?: string;
       amount: number;
       success: boolean;
+      payment_hash?: string;
     },
   >(
     userId: string,
@@ -1368,7 +1369,7 @@ export class TransactionService {
         ? TransactionService.SETTLEMENT_REF.exec(row.memo ?? '')?.[1]
         : undefined;
     const refs = [...new Set(rows.map(refOf).filter((r): r is string => !!r))];
-    const purchases = new Map<string, { settled: boolean; sats: number }>();
+    const purchases = new Map<string, SettledPurchase>();
     if (refs.length > 0) {
       const found = await this.knexService
         .knex('transaction')
@@ -1380,21 +1381,24 @@ export class TransactionService {
             payhere_pay_id: string;
             settled: boolean;
             satoshis_purchased: string | number | null;
+            bot_payment_hash: string | null;
           }[]
-        >('payhere_pay_id', 'settled', 'satoshis_purchased');
+        >('payhere_pay_id', 'settled', 'satoshis_purchased', 'bot_payment_hash');
       for (const p of found) {
         purchases.set(p.payhere_pay_id, {
           settled: p.settled,
           sats: Number(p.satoshis_purchased),
+          paymentHash: p.bot_payment_hash,
         });
       }
     }
     return rows.map((row) => {
       const ref = refOf(row);
       const p = ref === undefined ? undefined : purchases.get(ref);
-      const isSettlement =
-        !!p && Number(row.amount) === p.sats && (p.settled || !row.success);
-      return { ...row, purchase_settlement: isSettlement };
+      return {
+        ...row,
+        purchase_settlement: !!p && isPurchaseSettlement(row, p),
+      };
     });
   }
 
@@ -1441,15 +1445,16 @@ export class TransactionService {
 
   /**
    * Marks the bot-history rows that are a sale's payment (the user's approved
-   * collect request), so the app shows that sale once. Matched against the
-   * user's own sell orders whose sats left their wallet, by
+   * collect request), so the app shows that sale once, and says which sale
+   * (`sale_order_id`) so it can show the transfer's memo on it. Matched against
+   * the user's own sell orders whose sats left their wallet, by
    * matchSalePayments. Left unmarked: a refunded sale's payment (it nets out
    * with the refund, which is listed too) and anything that doesn't match.
    */
   async markSalePayments<T extends SaleMatchRow>(
     userId: string,
     rows: T[],
-  ): Promise<(T & { sale_payment: boolean })[]> {
+  ): Promise<(T & { sale_payment: boolean; sale_order_id: string | null })[]> {
     const amounts = [
       ...new Set(
         rows
@@ -1465,9 +1470,15 @@ export class TransactionService {
             .where('user_id', userId)
             .whereIn('status', SALE_PAID_STATUSES)
             .whereIn('sats', amounts)
-            .select<SaleMatchOrder[]>('id', 'sats', 'amount_lkr', 'created_at');
+            .select<
+              SaleMatchOrder[]
+            >('id', 'sats', 'amount_lkr', 'created_at', 'bot_payment_hash');
     const paid = matchSalePayments(rows, orders);
-    return rows.map((row, i) => ({ ...row, sale_payment: paid.has(i) }));
+    return rows.map((row, i) => ({
+      ...row,
+      sale_payment: paid.has(i),
+      sale_order_id: paid.get(i) ?? null,
+    }));
   }
 
   async getLatestTransactionForUser(
@@ -1648,12 +1659,40 @@ const SALE_PAID_STATUSES: SellStatus[] = [
   SellStatus.NEEDS_REVIEW,
 ];
 
+export interface SettledPurchase {
+  settled: boolean;
+  sats: number;
+  /** The settling transfer's hash, once known (transaction.bot_payment_hash) */
+  paymentHash?: string | null;
+}
+
+/**
+ * Is this bot-history row (already found by its "(Ref: <payment id>)" memo)
+ * the transfer that settled that purchase? Same sats, and:
+ * - a successful row: the purchase is settled, and when its transfer's hash is
+ *   known the row must carry that hash, so a transfer from someone else with
+ *   the memo copied into it isn't hidden;
+ * - a failed attempt: hidden too (nothing arrived, the purchase is listed).
+ * Purchases without a hash (older ones, or settled by finding the memo) keep
+ * the memo-only rule.
+ */
+export function isPurchaseSettlement(
+  row: { amount: number; success: boolean; payment_hash?: string },
+  p: SettledPurchase,
+): boolean {
+  if (Number(row.amount) !== p.sats) return false;
+  if (!row.success) return true;
+  if (!p.settled) return false;
+  return !p.paymentHash || row.payment_hash === p.paymentHash;
+}
+
 export interface SaleMatchRow {
   direction: string;
   time: string;
   memo?: string;
   amount: number;
   success: boolean;
+  payment_hash?: string;
 }
 
 export interface SaleMatchOrder {
@@ -1661,20 +1700,52 @@ export interface SaleMatchOrder {
   sats: string | number;
   amount_lkr: string | number;
   created_at: Date | string;
+  bot_payment_hash?: string | null;
 }
 
 /**
- * Which rows (by index) are a sale's payment: an outgoing successful transfer
- * of the order's exact sats, with the memo its collect request carried
- * (saleCollectMemo, the same function that set it), made after the order was
- * created. Each order matches at most one row; a row goes to the most recent
- * order created before it, so two equal sales each keep their own payment.
+ * The bot stores a collect's memo wrapped: "💰 Collect by @wallet from @user.
+ * Memo: <our memo>". Older transfers have just our memo.
+ */
+const isSaleMemo = (rowMemo: string | undefined, saleMemo: string) =>
+  !!rowMemo && (rowMemo === saleMemo || rowMemo.endsWith(` Memo: ${saleMemo}`));
+
+/**
+ * Which rows (by index) are a sale's payment, and whose: row index → order id.
+ * First exactly, by the paying transfer's payment_hash (stored on the order
+ * when its collect was paid). Then, for orders not matched that way (older
+ * sales without a hash), an
+ * outgoing successful transfer of the order's exact sats with the memo its
+ * collect request carried (saleCollectMemo, the same function that set it,
+ * bare or as the bot wraps it), made after the order was created. Each order
+ * matches at most one row; by memo, a row goes to the most recent order
+ * created before it, so two equal sales each keep their own payment.
  */
 export function matchSalePayments(
   rows: SaleMatchRow[],
   orders: SaleMatchOrder[],
-): Set<number> {
+): Map<number, string> {
+  const matched = new Map<number, string>();
+  const paidOut = (row: SaleMatchRow) =>
+    row.direction === 'outgoing' && row.success;
+
+  // 1. Exact: the transfer's hash
+  const byHash = new Map(
+    orders
+      .filter((o) => o.bot_payment_hash)
+      .map((o) => [o.bot_payment_hash!, o]),
+  );
+  const hashed = new Set<string>();
+  rows.forEach((row, i) => {
+    const o = row.payment_hash ? byHash.get(row.payment_hash) : undefined;
+    if (!o || !paidOut(row) || hashed.has(o.id)) return;
+    hashed.add(o.id);
+    matched.set(i, o.id);
+  });
+
+  // 2. The rest (older sales without a hash): by sats, memo and time
   const open = orders
+    .filter((o) => !hashed.has(o.id))
     .map((o) => ({
       id: o.id,
       sats: Number(o.sats),
@@ -1683,22 +1754,21 @@ export function matchSalePayments(
     }))
     // newest first: a payment belongs to the latest sale started before it
     .sort((a, b) => b.createdAt - a.createdAt);
-  const matched = new Set<number>();
   // Oldest payments first, so each claims its own sale before a later one
   const byTime = rows
     .map((row, i) => ({ row, i, at: new Date(row.time).getTime() }))
     .sort((a, b) => a.at - b.at);
   for (const { row, i, at } of byTime) {
-    if (row.direction !== 'outgoing' || !row.success) continue;
+    if (matched.has(i) || !paidOut(row)) continue;
     const k = open.findIndex(
       (o) =>
         o.sats === Number(row.amount) &&
-        o.memo === row.memo &&
+        isSaleMemo(row.memo, o.memo) &&
         o.createdAt <= at,
     );
     if (k === -1) continue;
+    matched.set(i, open[k].id);
     open.splice(k, 1);
-    matched.add(i);
   }
   return matched;
 }

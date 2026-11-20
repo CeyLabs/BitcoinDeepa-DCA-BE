@@ -33,6 +33,8 @@ export interface FundTransferResponse {
   failure?: TransferFailure;
   /** 202: above the bot's approval threshold, waiting for a human in Telegram. Poll getSendStatus(). */
   awaiting_approval_id?: string;
+  /** On success: the transfer's hash, the same as its row in the user's bot history */
+  payment_hash?: string;
 }
 
 /** A collect request: we ask a user to pay the DCA wallet (sell flow). */
@@ -57,6 +59,8 @@ export interface CollectRequest {
   transfer?: {
     id: string;
     status: string;
+    /** Hash of the invoice the transfer paid: the same as its bot-history row's */
+    payment_hash?: string;
     error?: string;
     confirm_by?: string;
   };
@@ -134,6 +138,7 @@ export interface SendStatusResponse {
   status: SendApprovalStatus;
   amount?: number;
   memo?: string;
+  /** Once executed: the transfer's hash, the same as its bot-history row */
   payment_hash?: string;
 }
 

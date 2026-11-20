@@ -110,6 +110,7 @@ export interface SellOrderRow {
   ceypay_rate_usdt_lkr: string | null;
   ceypay_payment_id: string | null;
   bot_collect_id: string | null;
+  bot_payment_hash: string | null;
   collect_expires_at: Date | null;
   collect_state: CollectState | null;
   bank_ref: string | null;
@@ -728,10 +729,22 @@ export class SellService {
     mayCancel = true,
   ): Promise<void> {
     const state = toCollectState(request);
-    if (order.bot_collect_id !== request.id || order.collect_state !== state) {
+    // The paying transfer's hash links the sale to its row in the user's bot
+    // history (markSalePayments), so the app lists the sale once.
+    const paymentHash =
+      request.transfer?.payment_hash || order.bot_payment_hash;
+    if (
+      order.bot_collect_id !== request.id ||
+      order.collect_state !== state ||
+      order.bot_payment_hash !== paymentHash
+    ) {
       await this.knex('sell_order')
         .where({ id: order.id, status: SellStatus.COLLECTING })
-        .update({ bot_collect_id: request.id, collect_state: state });
+        .update({
+          bot_collect_id: request.id,
+          collect_state: state,
+          bot_payment_hash: paymentHash,
+        });
     }
 
     switch (request.status) {

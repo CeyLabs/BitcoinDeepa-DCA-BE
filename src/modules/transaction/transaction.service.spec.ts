@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import {
+  isPurchaseSettlement,
   matchSalePayments,
   parseAmount,
   TransactionService,
@@ -153,7 +154,7 @@ describe('matchSalePayments', () => {
       },
     ];
     const orders = [order('a', 20000, 5792, '2026-11-19T10:00:00Z')];
-    expect([...matchSalePayments(rows, orders)]).toEqual([0]);
+    expect([...matchSalePayments(rows, orders)]).toEqual([[0, 'a']]);
   });
 
   it('ignores a transfer with another memo, amount, a failure or one made before the sale', () => {
@@ -167,6 +168,41 @@ describe('matchSalePayments', () => {
     expect(matchSalePayments(rows, orders).size).toBe(0);
   });
 
+  it("matches the bot's wrapped collect memo", () => {
+    const orders = [order('a', 1478, 300.07, '2026-11-20T09:46:00Z')];
+    const rows = [
+      payment(1478, 300.07, '2026-11-20T09:47:00Z', {
+        memo: `💰 Collect by @BitcoinDeepaDCA from @naween_95. Memo: ${saleCollectMemo(300.07)}`,
+      }),
+    ];
+    expect([...matchSalePayments(rows, orders)]).toEqual([[0, 'a']]);
+  });
+
+  it('matches by payment hash first, whatever the memo says', () => {
+    const orders = [
+      {
+        ...order('a', 20000, 5792, '2026-11-19T10:00:00Z'),
+        bot_payment_hash: 'h-a',
+      },
+      {
+        ...order('b', 20000, 5792, '2026-11-19T11:00:00Z'),
+        bot_payment_hash: 'h-b',
+      },
+    ];
+    const rows = [
+      // Both after b was created: by memo alone, the first would go to b
+      payment(20000, 5792, '2026-11-19T11:01:00Z', {
+        payment_hash: 'h-a',
+        memo: 'anything',
+      }),
+      payment(20000, 5792, '2026-11-19T11:02:00Z', { payment_hash: 'h-b' }),
+    ];
+    expect([...matchSalePayments(rows, orders)]).toEqual([
+      [0, 'a'],
+      [1, 'b'],
+    ]);
+  });
+
   it('gives two equal sales one payment each', () => {
     const orders = [
       order('a', 20000, 5792, '2026-11-19T10:00:00Z'),
@@ -177,6 +213,42 @@ describe('matchSalePayments', () => {
       payment(20000, 5792, '2026-11-19T10:01:00Z'),
       payment(20000, 5792, '2026-11-19T12:00:00Z'), // a third: no sale left
     ];
-    expect([...matchSalePayments(rows, orders)].sort()).toEqual([0, 1]);
+    expect([...matchSalePayments(rows, orders).keys()].sort()).toEqual([0, 1]);
+  });
+});
+
+describe('isPurchaseSettlement', () => {
+  const ok = { amount: 500, success: true, payment_hash: 'h1' };
+
+  it('needs the same sats', () => {
+    expect(
+      isPurchaseSettlement(
+        { ...ok, amount: 499 },
+        { settled: true, sats: 500 },
+      ),
+    ).toBe(false);
+  });
+
+  it('by memo alone when the purchase has no hash', () => {
+    expect(isPurchaseSettlement(ok, { settled: true, sats: 500 })).toBe(true);
+    expect(isPurchaseSettlement(ok, { settled: false, sats: 500 })).toBe(false);
+  });
+
+  it('by hash when the purchase has one: a copied memo is not enough', () => {
+    const p = { settled: true, sats: 500, paymentHash: 'h1' };
+    expect(isPurchaseSettlement(ok, p)).toBe(true);
+    expect(isPurchaseSettlement({ ...ok, payment_hash: 'other' }, p)).toBe(
+      false,
+    );
+    expect(isPurchaseSettlement({ amount: 500, success: true }, p)).toBe(false);
+  });
+
+  it('hides a failed attempt either way', () => {
+    expect(
+      isPurchaseSettlement(
+        { amount: 500, success: false },
+        { settled: false, sats: 500 },
+      ),
+    ).toBe(true);
   });
 });
