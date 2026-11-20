@@ -1,6 +1,10 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import { createHash } from 'crypto';
-import { PayHereService, IGetLinkParams } from './payhere.service';
+import {
+  PayHereService,
+  IGetLinkParams,
+  payHereErrorDetail,
+} from './payhere.service';
 
 const md5 = (s: string) =>
   createHash('md5').update(s).digest('hex').toUpperCase();
@@ -270,5 +274,52 @@ describe('PayHereService', () => {
       await service.getSubscriptionPayments('1');
       expect(get.mock.calls[1][1]!.headers!.Authorization).toBe('Bearer fresh');
     });
+  });
+});
+
+describe('payHereErrorDetail', () => {
+  const rejected = (status: number, data: unknown) =>
+    new AxiosError(
+      `Request failed with status code ${status}`,
+      'ERR_BAD_REQUEST',
+      undefined,
+      undefined,
+      { status, data } as never,
+    );
+
+  it("adds PayHere's answer to the axios message", () => {
+    const detail = payHereErrorDetail(
+      rejected(401, {
+        status: -1,
+        msg: 'Access denied for the domain',
+        data: null,
+      }),
+    );
+    expect(detail).toContain('Request failed with status code 401');
+    expect(detail).toContain('Access denied for the domain');
+  });
+
+  it('cuts the access token out of an invalid_token answer', () => {
+    const token = 'cb5c47fd-741c-489a-b69e-fd73155ca34e';
+    for (const description of [
+      `Invalid access token: ${token}`,
+      `Access token expired: ${token}`,
+    ]) {
+      const detail = payHereErrorDetail(
+        rejected(401, {
+          error: 'invalid_token',
+          error_description: description,
+        }),
+      );
+      expect(detail).toContain('invalid_token');
+      expect(detail).not.toContain(token);
+    }
+  });
+
+  it('is the plain message when there is no response', () => {
+    expect(payHereErrorDetail(new Error('timeout'))).toBe('timeout');
+    expect(payHereErrorDetail(new AxiosError('Network Error'))).toBe(
+      'Network Error',
+    );
   });
 });

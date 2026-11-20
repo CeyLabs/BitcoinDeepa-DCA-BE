@@ -139,7 +139,7 @@ export class BuyService {
       address: user.address,
       city: user.city,
       country: user.country,
-      items: 'Bitcoin purchase',
+      items: 'Sats Purchase',
       type: 'checkout',
       // The app's success/cancel pages show this order's progress
       return_query: { buy_order: orderId },

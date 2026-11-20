@@ -6,6 +6,7 @@ import {
   type FundTransferResponse,
 } from '../bitcoindeepa/bitcoindeepa.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import { PayHereService, payHereErrorDetail } from '../payhere/payhere.service';
 import { RedisService } from '../redis/redis.service';
 import { errorMessage } from '../../common/error-message';
 import { legacyTransferMemo, transferMemo } from './transfer-memo';
@@ -156,6 +157,43 @@ export class SettlementService {
     }
 
     try {
+      confirmed = await this.isConfirmedByPayHere(transaction);
+    } catch (error) {
+      // PayHere's API failing says nothing about this payment, so it must not
+      // use up settlement attempts (an outage would otherwise flag every
+      // payment in it as forged). Give the attempt back; last_retry_at keeps
+      // the backoff, so it is retried later.
+      await this.knexService
+        .knex('transaction')
+        .update({ retry_count: retry_count })
+        .where('payhere_pay_id', payhere_pay_id)
+        .where('retry_count', currentRetryCount);
+      this.logger.warn(
+        `Settlement of ${payhere_pay_id} postponed: PayHere payment lookup failed (${payHereErrorDetail(error)})`,
+      );
+      await this.alertLookupFailure(transaction, error);
+      return;
+    }
+
+    try {
+      if (!confirmed) {
+        const message =
+          kind === 'ONE_TIME'
+            ? `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for order ${payhere_order_id}`
+            : `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for subscription ${payhere_sub_id}`;
+        if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
+          const alert = `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) stopped: ${message}. Possibly a forged/replayed notification - check the PayHere dashboard.`;
+          this.logger.error(alert);
+          await this.telegramLogger.logAlert('Settlement', alert);
+        } else {
+          // PayHere's list can lag the notification; retry with backoff.
+          this.logger.warn(
+            `Settlement of ${payhere_pay_id} deferred (attempt ${currentRetryCount}/${MAX_SETTLEMENT_ATTEMPTS}): ${message}`,
+          );
+        }
+        return;
+      }
+
       const memo = await this.memoFor(transaction);
       const mayHaveGoneThrough =
         SettlementService.mayHaveGoneThrough(transaction);
@@ -494,6 +532,98 @@ export class SettlementService {
         )
         .catch(() => undefined);
     }
+  }
+
+  /**
+   * Retrying a failed lookup forever is right for a PayHere outage, but a
+   * problem that never clears (wrong app secret, missing Subscription Manager
+   * permission, sandbox/live mix-up) would stop every payout silently. Alert
+   * at once on 401/403, otherwise once the payment has waited a while - and
+   * at most hourly, since lookups are retried every minute.
+   */
+  private async alertLookupFailure(
+    transaction: UnsettledTransaction,
+    error: unknown,
+  ): Promise<void> {
+    const status = axios.isAxiosError(error)
+      ? error.response?.status
+      : undefined;
+    const credentialsProblem = status === 401 || status === 403;
+    const waitedMs = Date.now() - new Date(transaction.created_at).getTime();
+    if (!credentialsProblem && waitedMs < LOOKUP_FAILURE_ALERT_AFTER_MS) return;
+    if (
+      Date.now() - this.lastLookupFailureAlertAt <
+      LOOKUP_FAILURE_ALERT_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastLookupFailureAlertAt = Date.now();
+
+    const reason = credentialsProblem
+      ? `PayHere rejected our credentials (HTTP ${status}) - check PAYHERE_APP_ID/PAYHERE_APP_SECRET, the API key's permissions, its allowed domains and PayHere's IP allow-list for this server, and PAYHERE_ENV`
+      : `PayHere payment lookups are still failing after ${Math.round(waitedMs / 60_000)} min`;
+    await this.telegramLogger
+      .logAlert(
+        'Settlement',
+        `Payouts are paused: ${reason}. Latest error for ${transaction.payhere_pay_id}: ${payHereErrorDetail(error)}. Settlement resumes by itself once lookups succeed.`,
+      )
+      .catch(() => undefined);
+  }
+
+  /**
+   * Only pay out payments PayHere itself lists as received. The webhook's
+   * md5sig doesn't cover payment_id, so a signed notification can be replayed
+   * with invented payment_ids - this is the check that stops those being
+   * paid. API errors throw (the caller retries without using an attempt).
+   *
+   * The payment must be listed as RECEIVED and for the amount we recorded.
+   * When PayHere's list has no amount, id + status decide, and an alert goes
+   * out (at most daily): if that happens for normal payments, the amount
+   * check isn't running (e.g. PayHere names the field differently).
+   */
+  private async isConfirmedByPayHere({
+    payhere_pay_id,
+    kind,
+    payhere_sub_id,
+    payhere_order_id,
+    gross_amount,
+  }: UnsettledTransaction): Promise<boolean> {
+    // Subscription charges are listed by the Subscription Manager API,
+    // one-off checkouts by the Retrieval API (by order_id)
+    const payments =
+      kind === 'ONE_TIME'
+        ? await this.payHereService.getPaymentsByOrderId(payhere_order_id!)
+        : await this.payHereService.getSubscriptionPayments(payhere_sub_id!);
+    const payment = payments.find(
+      (p) => p.payment_id === String(payhere_pay_id) && p.status === 'RECEIVED',
+    );
+    if (!payment) return false;
+    if (payment.amount === null || gross_amount === null) {
+      const missing = payment.amount === null ? "PayHere's list" : 'our record';
+      this.logger.warn(
+        `PayHere payment ${payhere_pay_id}: no amount in ${missing}; confirmed on id and status only`,
+      );
+      if (
+        await this.redisService.setIfAbsent(
+          'dca:alert:payhere-amount-missing',
+          24 * 60 * 60,
+        )
+      ) {
+        await this.telegramLogger.logAlert(
+          'Settlement',
+          `PayHere payment ${payhere_pay_id} had no amount in ${missing}, so it was confirmed on id and status only. ` +
+            `If this repeats for normal payments, the amount check is not running. (Reported at most once a day.)`,
+        );
+      }
+      return true;
+    }
+    const matches = sameAmount(payment.amount, gross_amount);
+    if (!matches) {
+      this.logger.warn(
+        `PayHere payment ${payhere_pay_id} amount ${payment.amount} does not match recorded ${gross_amount}`,
+      );
+    }
+    return matches;
   }
 
   /** The memo a new payment is created with (see transfer-memo.ts) */
