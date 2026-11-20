@@ -6,6 +6,7 @@ describe('priceSale', () => {
     expect(priceSale(100_000, 100, 20_000_000)).toEqual({
       grossLkr: '20000.00',
       feeLkr: '200.00',
+      bankChargeLkr: '0.00',
       amountLkr: '19800.00',
     });
   });
@@ -15,7 +16,17 @@ describe('priceSale', () => {
     expect(priceSale(12_345, 100, 21_444_240.35)).toEqual({
       grossLkr: '2647.29',
       feeLkr: '26.48',
+      bankChargeLkr: '0.00',
       amountLkr: '2620.81',
+    });
+  });
+
+  it('takes the flat bank charge after the fee', () => {
+    expect(priceSale(100_000, 100, 20_000_000, 30)).toEqual({
+      grossLkr: '20000.00',
+      feeLkr: '200.00',
+      bankChargeLkr: '30.00',
+      amountLkr: '19770.00',
     });
   });
 
@@ -23,6 +34,7 @@ describe('priceSale', () => {
     expect(priceSale(50_000, 0, 20_000_000)).toEqual({
       grossLkr: '10000.00',
       feeLkr: '0.00',
+      bankChargeLkr: '0.00',
       amountLkr: '10000.00',
     });
   });

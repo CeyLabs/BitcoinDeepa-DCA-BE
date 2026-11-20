@@ -4,6 +4,7 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   Max,
@@ -348,6 +349,12 @@ class EnvironmentVariables {
   @Min(0)
   @Max(10000)
   BITCOINDEEPA_SELL_FEE_BASIS_POINTS?: number;
+
+  // Flat bank transfer charge (LKR) taken off each sale (default 30)
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  SELL_BANK_CHARGE_LKR?: number;
 
   @IsOptional()
   @IsInt()

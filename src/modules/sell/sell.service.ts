@@ -100,6 +100,7 @@ export interface SellOrderRow {
   fee_basis_points: number;
   gross_lkr: string;
   fee_lkr: string;
+  bank_charge_lkr: string;
   btc_lkr_buying_rate: string;
   btc_usd_price: string | null;
   amount_lkr: string;
@@ -130,6 +131,8 @@ export interface SellOrderView {
   /** The whole sale at the rate, before the fee */
   grossLkr: number;
   feeLkr: number;
+  /** Flat bank transfer charge, taken after the fee */
+  bankChargeLkr: number;
   btcLkrRate: number;
   amountLkr: number;
   expiresAt: string;
@@ -183,6 +186,7 @@ export const toSellOrderView = (row: SellOrderRow): SellOrderView => ({
   feeBasisPoints: row.fee_basis_points,
   grossLkr: Number(row.gross_lkr),
   feeLkr: Number(row.fee_lkr),
+  bankChargeLkr: Number(row.bank_charge_lkr),
   btcLkrRate: Number(row.btc_lkr_buying_rate),
   amountLkr: Number(row.amount_lkr),
   expiresAt: new Date(row.expires_at).toISOString(),
@@ -248,14 +252,20 @@ export function ceyPayWebhookUrl(
 }
 
 /**
- * Prices the whole sale in LKR (rounded down), then takes the fee off it in
- * LKR (rounded up). `amountLkr` is what the user gets.
+ * Prices the whole sale in LKR (rounded down), takes the fee off it in LKR
+ * (rounded up), then the flat bank charge. `amountLkr` is what the user gets.
  */
 export function priceSale(
   sats: number,
   feeBasisPoints: number,
   btcLkrRate: number,
-): { grossLkr: string; feeLkr: string; amountLkr: string } {
+  bankChargeLkr = 0,
+): {
+  grossLkr: string;
+  feeLkr: string;
+  bankChargeLkr: string;
+  amountLkr: string;
+} {
   const grossLkr = new Big(sats)
     .div(SATS_PER_BTC)
     .times(btcLkrRate)
@@ -267,7 +277,8 @@ export function priceSale(
   return {
     grossLkr: grossLkr.toFixed(2),
     feeLkr: feeLkr.toFixed(2),
-    amountLkr: grossLkr.minus(feeLkr).toFixed(2),
+    bankChargeLkr: new Big(bankChargeLkr).toFixed(2),
+    amountLkr: grossLkr.minus(feeLkr).minus(bankChargeLkr).toFixed(2),
   };
 }
 
@@ -306,6 +317,11 @@ export class SellService {
 
   private static feeBasisPoints(): number {
     return parseInt(process.env.BITCOINDEEPA_SELL_FEE_BASIS_POINTS || '0', 10);
+  }
+
+  /** Flat LKR bank transfer charge per sale (default 30) */
+  private static bankChargeLkr(): number {
+    return Number(process.env.SELL_BANK_CHARGE_LKR ?? '30');
   }
 
   private static quoteTtlSeconds(): number {
@@ -362,6 +378,8 @@ export class SellService {
   async getPrice(): Promise<{
     btcLkrRate: number;
     feeBasisPoints: number;
+    /** Flat LKR charge per sale, taken after the fee */
+    bankChargeLkr: number;
     /** Smallest and largest single sale, so the app's form uses the same rules */
     minSats: number;
     maxSats: number;
@@ -370,6 +388,7 @@ export class SellService {
     return {
       btcLkrRate: rate.btcLkr,
       feeBasisPoints: SellService.feeBasisPoints(),
+      bankChargeLkr: SellService.bankChargeLkr(),
       minSats: SellService.minSats(),
       maxSats: SellService.maxSats(),
     };
@@ -403,7 +422,12 @@ export class SellService {
 
     const rate = await this.sellRate();
     const feeBasisPoints = SellService.feeBasisPoints();
-    const priced = priceSale(sats, feeBasisPoints, rate.btcLkr);
+    const priced = priceSale(
+      sats,
+      feeBasisPoints,
+      rate.btcLkr,
+      SellService.bankChargeLkr(),
+    );
     if (Number(priced.amountLkr) <= 0) {
       throw new BadRequestException('Amount is too small to sell');
     }
@@ -423,6 +447,7 @@ export class SellService {
           fee_basis_points: feeBasisPoints,
           gross_lkr: priced.grossLkr,
           fee_lkr: priced.feeLkr,
+          bank_charge_lkr: priced.bankChargeLkr,
           btc_lkr_buying_rate: String(rate.btcLkr),
           btc_usd_price: String(rate.btcUsd),
           ceypay_rate_usdt_lkr: String(rate.usdtLkr),
