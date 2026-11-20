@@ -5,6 +5,8 @@ import {
   UseGuards,
   Get,
   Param,
+  Patch,
+  Query,
   UsePipes,
   ValidationPipe,
   HttpException,
@@ -15,6 +17,8 @@ import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { SetAvatarDto } from './dto/set-avatar.dto';
+import { ClaimUsernameDto, UsernameQueryDto } from './dto/claim-username.dto';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { DiditService } from '../didit/didit.service';
 import { KycStatus } from './enums/kyc-status.enum';
@@ -44,35 +48,57 @@ export class UserController {
     @CurrentUser() user: JwtPayload,
     @Body() updateProfileDto: UpdateProfileDto,
   ) {
-    const userExists = await this.userService.userExists(user.id);
-    if (!userExists) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
+    await this.userService.getUserOrThrow(user.id);
 
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    return this.telegramLoggerService.trackAction(
       'User Profile Completed',
       user,
+      async () => {
+        await this.userService.updateProfileDetails(user.id, updateProfileDto);
+        return { success: true };
+      },
     );
-
-    await this.userService.updateProfileDetails(user.id, updateProfileDto);
-
-    await this.telegramLoggerService.setMessageReaction(logMessage);
-
-    return { success: true };
   }
 
   @Get('me')
   @UseGuards(ConditionalAuthGuard)
   async getMe(@CurrentUser() user: JwtPayload) {
-    const currentUser = await this.userService.getUserById(user.id);
-    if (!currentUser) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
+    const currentUser = await this.userService.getUserOrThrow(user.id);
 
     return {
       ...currentUser,
       is_profile_complete: this.userService.isProfileComplete(currentUser),
     };
+  }
+
+  /** Save the user's avatar seed (the app draws the picture). Returns the profile like GET /user/me. */
+  @Patch('avatar')
+  @UseGuards(ConditionalAuthGuard)
+  async setAvatar(@CurrentUser() user: JwtPayload, @Body() body: SetAvatarDto) {
+    await this.userService.getUserOrThrow(user.id);
+    await this.userService.setAvatarSeed(user.id, body.seed);
+    return this.getMe(user);
+  }
+
+  /** Whether a username can be claimed, and if not why (for the hint while typing) */
+  @Get('username/availability')
+  @UseGuards(ConditionalAuthGuard)
+  async usernameAvailability(@Query() query: UsernameQueryDto) {
+    const reason = await this.userService.usernameUnavailableReason(
+      query.username,
+    );
+    return { username: query.username, available: !reason, reason };
+  }
+
+  /** Claim the user's Bitcoin Deepa @username (once, permanent). Returns the profile like GET /user/me. */
+  @Post('username')
+  @UseGuards(ConditionalAuthGuard)
+  async claimUsername(
+    @CurrentUser() user: JwtPayload,
+    @Body() body: ClaimUsernameDto,
+  ) {
+    await this.userService.claimUsername(user.id, body.username);
+    return this.getMe(user);
   }
 
   @Get('exists/:telegramId')
@@ -84,71 +110,80 @@ export class UserController {
   @Post('kyc/initiate')
   @UseGuards(ConditionalAuthGuard)
   async initiateKyc(@CurrentUser() user: JwtPayload) {
-    // Check if user exists
-    const userExists = await this.userService.userExists(user.id);
-    if (!userExists) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
-
-    // Check if user already has approved KYC or verification in progress
-    const currentStatus = await this.userService.getKycStatus(user.id);
-    if (currentStatus?.status === KycStatus.APPROVED) {
+    const currentStatus = this.userService.toKycStatus(
+      await this.userService.getUserOrThrow(user.id),
+    );
+    if (currentStatus.status === KycStatus.APPROVED) {
       throw new HttpException('KYC already verified', HttpStatus.BAD_REQUEST);
     }
 
-    if (
-      currentStatus?.status === KycStatus.IN_PROGRESS ||
-      currentStatus?.status === KycStatus.IN_REVIEW
-    ) {
+    if (currentStatus.status === KycStatus.IN_REVIEW) {
       throw new HttpException(
-        'KYC verification already in progress',
+        'KYC verification is under review',
         HttpStatus.BAD_REQUEST,
       );
     }
 
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    // IN_PROGRESS can get stuck if Didit's final webhook never arrives. Resume
+    // the existing session if Didit says it is still open; otherwise start a
+    // new one instead of blocking the user forever.
+    if (
+      currentStatus.status === KycStatus.IN_PROGRESS &&
+      currentStatus.session_id
+    ) {
+      const existing = await this.diditService
+        .getSession(currentStatus.session_id)
+        .catch(() => null);
+      if (
+        existing?.url &&
+        (existing.status === 'Not Started' || existing.status === 'In Progress')
+      ) {
+        return { session_id: currentStatus.session_id, url: existing.url };
+      }
+
+      // Didit already finished this session but its webhook never reached
+      // us. Record the result; a new session would throw away a passed (or
+      // pending) verification, and Didit's retried webhook for the old
+      // session would no longer find the user.
+      if (existing?.status === 'Approved' || existing?.status === 'In Review') {
+        await this.userService.applyDiditResult(user.id, currentStatus.status, {
+          status: existing.status,
+          verifiedName: existing.verifiedName,
+        });
+        throw new HttpException(
+          existing.status === 'Approved'
+            ? 'KYC already verified'
+            : 'KYC verification is under review',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
+
+    return this.telegramLoggerService.trackAction(
       'KYC Initiation',
       user,
+      async () => {
+        const session = await this.diditService.createVerificationSession(
+          user.id,
+        );
+        await this.userService.updateKycSessionId(user.id, session.session_id);
+        return { session_id: session.session_id, url: session.url };
+      },
     );
-
-    try {
-      // Create verification session with Didit
-      const session = await this.diditService.createVerificationSession(
-        user.id,
-      );
-
-      // Update user with session ID
-      await this.userService.updateKycSessionId(user.id, session.session_id);
-
-      await this.telegramLoggerService.setMessageReaction(logMessage);
-
-      return {
-        session_id: session.session_id,
-        url: session.url,
-      };
-    } catch (error) {
-      await this.telegramLoggerService.setMessageReaction(logMessage);
-      throw error;
-    }
   }
 
   @Get('kyc/status')
   @UseGuards(ConditionalAuthGuard)
   async getKycStatus(@CurrentUser() user: JwtPayload) {
     const status = await this.userService.getKycStatus(user.id);
-    if (!status) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
 
     let url: string | null = null;
 
     if (status.session_id) {
-      try {
-        const sessionDetails = await this.diditService.getSessionDetails(
-          status.session_id,
-        );
-        url = sessionDetails?.url || null;
-      } catch (error) {}
+      const session = await this.diditService
+        .getSession(status.session_id)
+        .catch(() => null);
+      url = session?.url ?? null;
     }
 
     return {

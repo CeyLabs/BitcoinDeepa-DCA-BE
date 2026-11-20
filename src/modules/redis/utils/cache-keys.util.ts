@@ -12,16 +12,17 @@ export class CacheKeys {
 
   // User-related cache keys
   static user = {
-    profile: (userId: string): string =>
-      `${CacheKeys.PREFIX}:user:profile:${userId}`,
     subscription: (userId: string): string =>
       `${CacheKeys.PREFIX}:subscription:user:${userId}`,
   };
 
   // Transaction-related cache keys
   static transaction = {
+    // /transaction/list. `history` (was `transactions`) since pages hold
+    // BUY and SELL items: a new build never serves a page cached in the
+    // old shape, and an old build never serves one in the new shape.
     list: (userId: string, page: number, limit: number): string =>
-      `${CacheKeys.PREFIX}:transactions:user:${userId}:page:${page}:limit:${limit}`,
+      `${CacheKeys.PREFIX}:history:user:${userId}:page:${page}:limit:${limit}`,
     latest: (userId: string): string =>
       `${CacheKeys.PREFIX}:transaction:latest:user:${userId}`,
     dcaSummary: (userId: string): string =>
@@ -30,24 +31,34 @@ export class CacheKeys {
 
   // Bitcoin price cache keys
   static bitcoin = {
-    price: (currency: string): string =>
-      `${CacheKeys.PREFIX}:btc:price:${currency}`,
-    usdLkr: (): string => `${CacheKeys.PREFIX}:exchange:usd:lkr`,
-    price24HrChange: (): string => `${CacheKeys.PREFIX}:btc:24hr_change`,
+    ceylonCashBtcUsd: (): string => `${CacheKeys.PREFIX}:btc:usd:ceyloncash`,
+    ceypayUsdtLkr: (): string => `${CacheKeys.PREFIX}:btc:usdt-lkr:ceypay`,
+    cmc24hChange: (): string => `${CacheKeys.PREFIX}:btc:change-24h:cmc`,
+    // Not under btc:* - clearing the price cache must not release the claim
+    rateLogClaim: (): string => `${CacheKeys.PREFIX}:rate-log:claim`,
   };
 
-  // PayHere-related cache keys
-  static payhere = {
-    token: (): string => `${CacheKeys.PREFIX}:payhere:token`,
+  // Sell flow cache keys
+  static sell = {
+    banks: (): string => `${CacheKeys.PREFIX}:sell:banks`,
+    // An order read asks the bot about its collect request at most this often
+    collectSync: (orderId: string): string =>
+      `${CacheKeys.PREFIX}:sell:collect-sync:${orderId}`,
+    // "Collect is failing because of our setup" alert, at most hourly
+    collectUnavailableAlert: (): string =>
+      `${CacheKeys.PREFIX}:alert:sell-collect-unavailable`,
+  };
+
+  // P2P relay
+  static p2p = {
+    webIdToken: (userId: string): string =>
+      `${CacheKeys.PREFIX}:p2p:id-token:${userId}`,
   };
 
   // Pattern generators for bulk operations
   static patterns = {
-    userAll: (userId: string): string =>
-      `${CacheKeys.PREFIX}:*:user:${userId}*`,
-    userTransactions: (userId: string): string =>
-      `${CacheKeys.PREFIX}:transaction*:user:${userId}*`,
-    allPackages: (): string => `${CacheKeys.PREFIX}:packages:*`,
+    userTransactionLists: (userId: string): string =>
+      `${CacheKeys.PREFIX}:history:user:${userId}:*`,
     allBitcoinPrices: (): string => `${CacheKeys.PREFIX}:btc:*`,
   };
 }

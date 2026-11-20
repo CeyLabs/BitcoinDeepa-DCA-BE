@@ -77,7 +77,8 @@ docker compose down -v
 ### 5. Database Setup
 
 ```bash
-# Run migrations
+# Run migrations (locally; deployed production apps migrate themselves on startup,
+# see RUN_MIGRATIONS_ON_STARTUP in .env.template)
 pnpm migrate
 
 # Seed the database with initial data
@@ -177,7 +178,27 @@ Authorization: Bearer <jwt_token>
 PayHere will POST payment notifications to this endpoint 
 
 #### GET /transaction/list
-List all transactions for the current authenticated user.
+The current user's history: purchases and sales together, newest first. Paged with `?page=` (default 1) and `?limit=` (default 10, max 100) across both.
+
+Every item in `transactions` has a `type`:
+
+- `BUY` - a purchase: the transaction row (PayHere ids, `status`, BTC price, `satoshis_purchased`, fees...) with its package, plus `type: "BUY"`.
+- `SELL` - a sale: `{ "type": "SELL", "created_at": ..., "sell_order": { ... } }`. `sell_order` has the same shape as `GET /sell/orders/:id` (`id`, `status`, `sats`, `amountLkr`, `feeLkr`, `bankRef`, `completedAt`...). It has none of the transaction fields. Quotes that were never confirmed or that expired are not listed.
+
+```json
+{
+  "transactions": [
+    { "type": "SELL", "created_at": "2026-11-19T10:00:00.000Z", "sell_order": { "id": "...", "status": "COMPLETED", "sats": 50000, "amountLkr": 14700 } },
+    { "type": "BUY", "payhere_pay_id": "320...", "status": "SUCCESS", "satoshis_purchased": 3400, "created_at": "2026-11-18T08:00:00.000Z" }
+  ],
+  "total_count": 2,
+  "total_pages": 1,
+  "current_page": 1,
+  "has_more": false
+}
+```
+
+Clients should branch on `type` and treat an item without one as `BUY`.
 
 **Headers:**
 ```

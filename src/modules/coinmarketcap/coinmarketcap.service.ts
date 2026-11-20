@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosResponse } from 'axios';
+import { errorMessage } from '../../common/error-message';
 
 interface CoinMarketCapPriceResponse {
   data: Array<{
@@ -9,10 +10,12 @@ interface CoinMarketCapPriceResponse {
   }>;
   status: {
     timestamp: string;
-    error_code: string;
+    error_code: number | string;
     error_message: string;
   };
 }
+
+export type CoinMarketCapFailure = 'PERSISTENT' | 'TRANSIENT';
 
 export interface BitcoinMarketData {
   price: number;
@@ -31,6 +34,20 @@ export class CoinMarketCapService {
   }
 
   async fetchBitcoinData(): Promise<BitcoinMarketData | null> {
+    const result = await this.fetchBitcoinDataResult();
+    return 'data' in result ? result.data : null;
+  }
+
+  /**
+   * BTC price and 24h change, or why not:
+   * - PERSISTENT: won't fix itself soon - bad/missing key or plan (401/403),
+   *   rate limit (429), or an API error code in the body
+   * - TRANSIENT: timeout, connection reset, 5xx, or a bad payload
+   * so callers can wait longer before retrying a persistent failure.
+   */
+  async fetchBitcoinDataResult(): Promise<
+    { data: BitcoinMarketData } | { failure: CoinMarketCapFailure }
+  > {
     try {
       const response: AxiosResponse<CoinMarketCapPriceResponse> =
         await axios.get(`${this.BASE_URL}/v1/simple/price`, {
@@ -42,11 +59,25 @@ export class CoinMarketCapService {
           timeout: 10000,
         });
 
-      if (response.data.status.error_code !== '0') {
+      // CMC documents error_code as a number; accept a numeric string too.
+      // A body without a usable code is malformed, not an API error.
+      const code = response.data.status?.error_code as unknown;
+      const errorCode =
+        typeof code === 'number' ||
+        (typeof code === 'string' && code.trim() !== '')
+          ? Number(code)
+          : NaN;
+      if (!Number.isFinite(errorCode)) {
         this.logger.warn(
-          `CoinMarketCap API error: ${response.data.status.error_message}`,
+          'CoinMarketCap returned a response without a status code',
         );
-        return null;
+        return { failure: 'TRANSIENT' };
+      }
+      if (errorCode !== 0) {
+        this.logger.warn(
+          `CoinMarketCap API error: ${response.data.status?.error_message}`,
+        );
+        return { failure: 'PERSISTENT' };
       }
 
       const entry = response.data.data?.[0];
@@ -56,13 +87,27 @@ export class CoinMarketCapService {
         this.logger.warn(
           `Invalid BTC/USD price received from CoinMarketCap: ${price}`,
         );
-        return null;
+        return { failure: 'TRANSIENT' };
       }
 
-      return { price, percent_change_24h };
+      return { data: { price, percent_change_24h } };
     } catch (error) {
-      this.logger.error('CoinMarketCap API error:', error);
-      return null;
+      // One line: logging the AxiosError object dumps its sockets, TLS state
+      // and agents (thousands of lines), which hit Railway's log rate limit
+      const status = axios.isAxiosError(error)
+        ? error.response?.status
+        : undefined;
+      const persistent = status === 401 || status === 403 || status === 429;
+      const hint =
+        status === 401 || status === 403
+          ? ' - check COINMARKETCAP_API_KEY'
+          : status === 429
+            ? ' - rate limited'
+            : '';
+      this.logger.error(
+        `CoinMarketCap request failed${status ? ` (HTTP ${status})` : ''}: ${errorMessage(error)}${hint}`,
+      );
+      return { failure: persistent ? 'PERSISTENT' : 'TRANSIENT' };
     }
   }
 }

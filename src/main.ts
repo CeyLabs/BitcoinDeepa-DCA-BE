@@ -1,7 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { configureApp } from './app.setup';
 import { DatabaseSystemLogger } from './modules/knex/database-system-logger.service';
 import { randomUUID, webcrypto } from 'crypto';
+import { runMigrationsOnStartup } from './utils/run-migrations';
+import { installExternalApiLogging } from './common/dev-logging';
 
 // Polyfill global.crypto if not available (older Node runtimes). Falls back
 // to Node's real WebCrypto implementation rather than an empty object —
@@ -16,9 +19,14 @@ if (typeof global.crypto.randomUUID === 'undefined') {
 }
 
 async function bootstrap() {
+  // Apply pending migrations before any module touches the DB
+  await runMigrationsOnStartup();
+
   // Create the app with custom logger
+  // rawBody is needed to verify HMAC signatures on incoming webhooks (Didit)
   const app = await NestFactory.create(AppModule, {
     bufferLogs: true,
+    rawBody: true,
   });
 
   // Get the custom logger from the DI container
@@ -27,11 +35,11 @@ async function bootstrap() {
   // Use the custom logger for the application
   app.useLogger(databaseLogger);
 
-  // Enable CORS for production deployment
-  app.enableCors({
-    origin: process.env.CORS_ORIGIN || '*',
-    credentials: true,
-  });
+  // NODE_ENV=development only: log every external API call (request and
+  // response, secrets redacted) before crons or requests start making them
+  installExternalApiLogging(databaseLogger);
+
+  configureApp(app);
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
@@ -40,4 +48,8 @@ async function bootstrap() {
   databaseLogger.log(`📊 Health check available at: /health`);
 }
 
-void bootstrap();
+bootstrap().catch((error) => {
+  console.error('Error during application bootstrap:', error);
+  // Exit non-zero so Railway's ON_FAILURE restart policy kicks in
+  process.exit(1);
+});

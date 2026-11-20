@@ -3,70 +3,127 @@ import {
   Post,
   Res,
   HttpStatus,
+  HttpException,
   Get,
   UseGuards,
   Body,
   NotFoundException,
   Query,
+  Param,
+  Logger,
+  HttpCode,
+  Headers,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Response } from 'express';
-import {
-  PayHereNotificationParams,
-  TransactionService,
-} from './transaction.service';
+import { TransactionService } from './transaction.service';
+import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 import { ConditionalAuthGuard } from '../auth/conditional-auth.guard';
+import { AdminKeyGuard } from '../auth/admin-key.guard';
 import { CurrentUser } from '../auth/user.decorator';
 import { JwtPayload } from '../auth/auth.service';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
+import { errorMessage } from '../../common/error-message';
+
+/** Parse a positive integer query param, clamped to [min, max]. */
+function parseIntParam(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = value === undefined ? NaN : parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
 
 @Controller('transaction')
 export class TransactionController {
+  private readonly logger = new Logger(TransactionController.name);
+
   constructor(
     private readonly transactionService: TransactionService,
-    private readonly dbLogger: DatabaseLoggerService,
     private readonly telegramLoggerService: TelegramLoggerService,
+    private readonly bitcoinDeepaService: BitcoinDeepaService,
   ) {}
 
   @Post('payhere-webhook')
   async handlePayHereWebhook(
-    @Body() body: PayHereNotificationParams,
+    @Body() body: PayHereNotificationDto,
     @Res() res: Response,
   ) {
-    await this.dbLogger.info(
+    this.logger.log(
       `PayHere webhook received: order_id=${body.order_id}, status=${body.status_code}, amount=${body.payhere_amount} ${body.payhere_currency}`,
     );
 
+    // Reject forged requests before touching Telegram or the DB
+    if (!this.transactionService.isValidPayHereSignature(body)) {
+      this.logger.warn(
+        `PayHere webhook rejected (bad signature) for order_id ${body.order_id}`,
+      );
+      return res.status(HttpStatus.UNAUTHORIZED).send();
+    }
+
     try {
-      const mappedStatus = this.transactionService.getPayHereStatusMapped(
-        body.status_code,
+      // Owner from our records - custom_1 is payer-editable
+      const owner = await this.transactionService.getNotificationOwner(
+        body.order_id,
+        body.subscription_id,
       );
       const logMessage = await this.telegramLoggerService.logNewTransaction(
         body.payment_id,
         body.payhere_amount,
-        body.custom_1!, // user telegram ID
-        mappedStatus,
+        owner ?? 'unknown',
+        this.transactionService.getPayHereStatusMapped(body.status_code),
+        !body.subscription_id,
       );
 
       await this.transactionService.handlePayHereNotification(body);
-      await this.dbLogger.info(
-        `PayHere webhook processed successfully for order_id: ${body.order_id}`,
-      );
 
       await this.telegramLoggerService.setMessageReaction(logMessage);
-
       return res.status(HttpStatus.OK).send('OK');
     } catch (error) {
-      await this.dbLogger.error(
-        `PayHere webhook processing failed for order_id ${body.order_id}: ${error.message}`,
+      this.logger.error(
+        `PayHere webhook processing failed for order_id ${body.order_id}: ${errorMessage(error)}`,
       );
-      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send();
+      const status =
+        error instanceof HttpException
+          ? error.getStatus()
+          : HttpStatus.INTERNAL_SERVER_ERROR;
+      return res.status(status).send();
     }
   }
 
+  /**
+   * Called by the BitcoinDeepa bot (empty body) when the DCA wallet receives
+   * sats: payments that failed for low wallet balance are retried now. When
+   * BITCOINDEEPA_CALLBACK_SECRET is set, the X-Callback-Secret header must
+   * match; until the bot can send one, it is open but harmless to repeat
+   * (see resetLowBalanceRetries). Never moves funds.
+   */
   @Post('reset-retry-counts')
-  async resetRetryCounts() {
-    return this.transactionService.resetRetryCounts();
+  @HttpCode(HttpStatus.OK)
+  async resetLowBalanceRetries(
+    @Headers('x-callback-secret') secret: string | undefined,
+  ) {
+    if (!TransactionService.isBotCallbackAuthorized(secret)) {
+      throw new UnauthorizedException();
+    }
+    return this.transactionService.resetLowBalanceRetries();
+  }
+
+  @Post('reset-retry-count/:paymentId')
+  @UseGuards(AdminKeyGuard)
+  async resetRetryCount(@Param('paymentId') paymentId: string) {
+    return this.transactionService.resetRetryCount(paymentId);
+  }
+
+  /** Let settlement pay a held one-time buy, after a human checked it. */
+  @Post('release-hold/:paymentId')
+  @UseGuards(AdminKeyGuard)
+  async releaseHold(@Param('paymentId') paymentId: string) {
+    return this.transactionService.releaseHold(paymentId);
   }
 
   @Get('list')
@@ -76,74 +133,72 @@ export class TransactionController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    const pageNum = page ? parseInt(page, 10) : 1;
-    const limitNum = limit ? parseInt(limit, 10) : 10;
+    const pageNum = parseIntParam(page, 1, 1, 10_000);
+    const limitNum = parseIntParam(limit, 10, 1, 100);
 
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    return this.telegramLoggerService.trackAction(
       'Transaction List (/transaction/list)',
       user,
+      () =>
+        this.transactionService.getTransactionsByUserIdPaginated(
+          user.id,
+          pageNum,
+          limitNum,
+        ),
     );
-
-    await this.dbLogger.info(
-      `User ${user.id} requesting transaction history (page: ${pageNum}, limit: ${limitNum})`,
-    );
-
-    const result =
-      await this.transactionService.getTransactionsByUserIdPaginated(
-        user.id,
-        pageNum,
-        limitNum,
-      );
-
-    await this.dbLogger.info(
-      `Returned ${result.transactions.length} transactions for user ${user.id} (page ${pageNum}/${result.total_pages})`,
-    );
-    await this.telegramLoggerService.setMessageReaction(logMessage);
-    return result;
   }
 
   @Get('latest')
   @UseGuards(ConditionalAuthGuard)
   async getLatestTransaction(@CurrentUser() user: JwtPayload) {
-    await this.dbLogger.info(`User ${user.id} requesting latest transaction`);
     const transaction =
       await this.transactionService.getLatestTransactionForUser(user.id);
 
-    if (transaction) {
-      await this.dbLogger.info(
-        `Latest transaction found for user ${user.id}: ${transaction.payhere_pay_id}, status: ${transaction.status}`,
-      );
-      return transaction;
-    } else {
-      await this.dbLogger.warn(
-        `No transactions found for user ${user.id} with active subscription`,
-      );
+    if (!transaction) {
       throw new NotFoundException('No transactions found');
     }
+    return transaction;
+  }
+
+  @Get('bot-history')
+  @UseGuards(ConditionalAuthGuard)
+  async getBotTransactionHistory(
+    @CurrentUser() user: JwtPayload,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const limitNum = parseIntParam(limit, 100, 1, 250);
+    const offsetNum = parseIntParam(offset, 0, 0, Number.MAX_SAFE_INTEGER);
+
+    const history = await this.bitcoinDeepaService.getUserTransactions(
+      Number(user.id),
+      limitNum,
+      offsetNum,
+    );
+    if (!history.success || !Array.isArray(history.transactions)) {
+      return history;
+    }
+    return {
+      ...history,
+      transactions: await this.transactionService.markCounterparties(
+        await this.transactionService.markSalePayments(
+          user.id,
+          await this.transactionService.markPurchaseSettlements(
+            user.id,
+            history.transactions,
+          ),
+        ),
+      ),
+    };
   }
 
   @Get('dca-summary')
   @UseGuards(ConditionalAuthGuard)
   async getDCASummary(@CurrentUser() user: JwtPayload) {
-    const logMessage = await this.telegramLoggerService.logGenericAction(
+    return this.telegramLoggerService.trackAction(
       'Main balance (/transaction/dca-summary)',
       user,
+      () => this.transactionService.getDCASummaryForUser(user.id),
     );
-
-    await this.dbLogger.info(`User ${user.id} requesting DCA summary`);
-    const summary = await this.transactionService.getDCASummaryForUser(user.id);
-
-    if (summary) {
-      await this.dbLogger.info(
-        `DCA summary calculated for user ${user.id}: ${summary.dca.balance} sats, total balance: ${summary.total_balance}`,
-      );
-    } else {
-      await this.dbLogger.info(
-        `No DCA summary data available for user ${user.id}`,
-      );
-    }
-
-    await this.telegramLoggerService.setMessageReaction(logMessage);
-    return summary;
   }
 }

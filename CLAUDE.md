@@ -7,22 +7,28 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
 **Key Technologies:**
 - Framework: NestJS with TypeScript
 - Database: PostgreSQL with Knex.js ORM
-- Authentication: JWT tokens with Telegram WebApp InitData validation
+- Authentication: server-side sessions (`user_session`), from Telegram Mini App initData or Log In with Telegram (OIDC)
 - Payment Gateway: PayHere (Sri Lankan payment processor)
-- Bitcoin Integration: CoinMarketCap API for real-time BTC prices and DCA calculations
+- Bitcoin Integration: BTC/LKR = Ceylon Cash BTC/USD × CeyPay USDT/LKR (buy, DCA, sell, wallet)
 - Time Management: dayjs for date/time operations
-- Development: pnpm, ESLint, Prettier
+- Development: bun (package manager; app runs on Node), ESLint, Prettier
 
 ## Architecture & Module Structure
 
 ### Core Modules
 
-1. **Auth Module** (`src/modules/auth/`)
-   - Telegram WebApp InitData validation using HMAC-SHA256 with timestamp verification (24-hour max age)
-   - JWT token generation and verification (7-day expiration)
-   - Single guard strategy: `ConditionalAuthGuard` (supports both authenticated and development modes)
+1. **Auth Module** (`src/modules/auth/`). `AuthModule` = who is calling (sessions, guard, verifiers; import it to use the guard). `LoginModule` = the `/auth/*` routes (it also needs the P2P relay, so it's separate to avoid an import cycle)
+   - **Sessions** (`session.service.ts`, table `user_session`): a 32-byte random token (base64url) given to the client once; only its SHA-256 is stored. `web`: 30 days idle (slid at most once a day) / 180 days absolute. `miniapp`: 24 h idle (slid at most hourly) / 7 days absolute. Revoked by `POST /auth/logout` (this one) and `POST /auth/logout-all` (every device). A daily cron (`session-cleanup.service.ts`, one instance via Redis claim) deletes expired sessions and login attempts
+   - **Web login** (`telegram-oidc.service.ts`): OIDC authorization code + PKCE S256, redirect only. `GET /auth/telegram/start?return_to=&ref=` saves a `telegram_login_attempt` (state hash, code verifier, `return_to` = a same-app path only, referral code; 10 min) and sets the attempt cookie; `GET /auth/telegram/callback` deletes the attempt first (single use), checks expiry and state (constant time), exchanges the code server-side (Basic `client_id:client_secret` + `code_verifier`), verifies the id_token, and sets the session cookie. Failures redirect to `APP_URL/?login_error=<code>` (`missing_telegram_id`, `invalid_id_token`, `bad_state`, `attempt_expired`, `exchange_failed`, `cancelled`, `not_configured`). Scope `openid profile` (`TELEGRAM_OIDC_SCOPE` to change; it must keep `profile`)
+   - **Mini App login**: `POST /auth/telegram/miniapp { initData, referral_code? }` at launch → `{ token, expiresAt, absoluteExpiresAt, user, isRegistered, walletLinked, canMessage }`; the app keeps the token in memory/sessionStorage and sends it as Bearer. On a 401 it re-exchanges (or asks the user to reopen the app)
+   - Verifiers, kept separate: `verifyTelegramMiniAppInitData` (HMAC-SHA256 with `HMAC("WebAppData", botToken)`, constant-time, `auth_date` ≤ 15 min, under the bot's 1 h) and `verifyTelegramOidcIdToken` (Telegram JWKS, RS256, `iss`, `aud` = client ID, `exp`; the numeric `id` claim is the user id - without it `missing_telegram_id`, never a fallback to `sub`). `user.telegram_sub` records the web `sub` (nullable, unique); accounts link on `user.id`
+   - **Each login links the wallet**: right after verifying, the credential goes once to the bot's `/api/v1/init` (`P2pService.init`), then is dropped (never stored). A bot outage doesn't block login (`walletLinked: false`)
+   - **`ConditionalAuthGuard`**: `Authorization: Bearer` first (a session token, or a legacy 7-day JWT until they expire); when present it decides alone (no fallback to the cookie). Otherwise the session cookie (`__Host-sid` in production, `sid` elsewhere: HttpOnly, Secure in production, SameSite=Lax, Path=/, no Domain); cookie-authenticated non-GET/HEAD/OPTIONS requests need an `Origin` from `APP_URL` (CSRF). `ENABLE_AUTH=false` (mock user) is refused in production by env validation
+   - No proxy: the app calls this API directly with credentials; `APP_URL` origins get credentialed CORS (like `ADMIN_APP_URL`). Production shares a site (`app.`/`api.bitcoindeepa.com`), so the `SameSite=Lax` cookie is sent. Dev/staging on two sites (vercel.app + railway.app): `APP_COOKIE_SAME_SITE=none` makes it `SameSite=None; Secure` (refused in production; Safari and the iOS Telegram WebView block it, the Mini App's Bearer isn't affected). The OIDC callback is `BASE_URL/auth/telegram/callback` (register it in BotFather) and returns to `APP_URL` + `return_to`. `TRUST_PROXY` (hops or proxy IPs) makes `req.ip` the real client
+   - `AuthRateLimiter` (Redis fixed window, fails open without Redis) on the login routes only - never `/auth/me` or logout: `start`/`callback` 20/min per IP (over the limit redirects to `?login_error=rate_limited`), `miniapp` 120/min per IP (mobile CGNAT) and 10/min per Telegram user (counted after initData is verified). `TRUST_PROXY` is required in production, or every client shares the proxy's IP
+   - Login waits for the bot's `/init` at most 3 s (`LOGIN_INIT_TIMEOUT_MS`), then goes on with `walletLinked: false`. A web login revokes the browser's previous session cookie
+   - Legacy `POST /auth/telegram` and `POST /auth/telegram-oidc` still mint 7-day JWTs until `LEGACY_JWT_ISSUE=false`, then answer 410. A legacy JWT is `sessionKind: 'legacy'`: it can read, but `SessionRequiredGuard` (on `/p2p/*` and `POST /sell/orders/:id/pay`) refuses it with 403 `relogin_required`, since it can't be revoked and never needed to spend before. Remove them, the legacy JWT path in the guard and `JWT_SECRET` 7 days after that flip
    - `@CurrentUser()` decorator for extracting user context
-   - Replay attack protection through timestamp validation using dayjs
 
 2. **User Module** (`src/modules/user/`)
    - User profile management and creation
@@ -53,61 +59,127 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - Connection monitoring and keep-alive mechanisms
 
 8. **Bitcoin Price Module** (`src/modules/bitcoin-price/`)
-   - CoinMarketCap API integration for real-time Bitcoin prices
-   - Automatic satoshi calculation for DCA transactions
-   - Price caching with configurable TTL (20 seconds default)
-   - Support for multiple currencies (LKR, USD, etc.)
+   - One price everywhere: `getBtcLkrRate()` = Ceylon Cash BTC/USD (`fx.ceyloncash.com/currency/BTC` `usd_price`) × CeyPay's USDT/LKR (`getQuote('1')`), rounded down to cents. Redis cache: BTC/USD 30s, USDT/LKR 5 min (each CeyPay fetch is a quote row in its `aggregator_fx_quote`, and the rate only moves every ~10 min). Fetches time out after 3s and a failure is remembered for 10s, so an outage costs one slow call per window. Returns null (never throws) when either is down; quote/price endpoints answer 503, and a payment is priced from the rate log below or, without a recent logged rate, left for the backfill cron
+   - Automatic satoshi calculation for buys and DCA payments (`calculateSatoshis`, LKR only)
+   - **Rate log** (`exchange_rate_log`): a 1-min cron (`recordExchangeRate`, one instance per minute via a Redis claim) appends the live rate as the single `is_active` row and deactivates the previous one; nothing is written while the price is down, and it doesn't run (no rate API calls) when `ENABLE_BITCOIN_TRACKING=false`. `calculateSatoshis` falls back to the active row when the live price is unavailable and the row is at most `EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS` old (default 180, max 900, 0 = off; empty or invalid = the default), so a payment made during a short outage is priced at once instead of waiting for the backfill cron. Set `is_active = false` by hand to take a bad rate out of use. Quotes, sell and displayed prices (`getBtcLkrRate`) never use it
+   - Which price a payment got: `calculateSatoshis` returns `source` (`live` | `log`) and `priced_at`. `transaction.coingecko_timestamp` stores `priced_at` - the time of the payment for a live price, the logged row's `created_at` for a logged one - and the "Bitcoin buy calculation for <payment id>" log line names the `exchange_rate_log` row (warn level when it was the log)
+   - CoinMarketCap (`COINMARKETCAP_API_KEY`) is display only: the wallet's `24_hr_change` (`getBitcoin24HrChange()`, cached `BTC_PRICE_CACHE_TTL`, 0 when unavailable). Never use it for a price
 
 9. **Didit KYC Module** (`src/modules/didit/`)
    - KYC (Know Your Customer) verification integration via Didit API
    - Verification session management and webhook handling
    - ID verification, liveness detection, face matching, and AML screening
-   - Automatic user KYC status updates via webhooks
+   - Automatic user KYC status updates via webhooks: `X-Signature` (HMAC of raw body), `X-Timestamp` must be within 5 minutes; `DIDIT_WEBHOOK_SECRET` required in production
+   - Sessions API v3 (`/v3/session/`); late `Not Started`/`In Progress` webhooks never overwrite a final KYC result; `Resubmitted` → `IN_PROGRESS`
    - Uses strongly typed KYC status enum for database consistency
+
+10. **Admin Module** (`src/modules/admin/`) - everything behind the admin dashboard. `AdminModule` bundles one Nest module per area: `auth/`, `analytics/`, `transactions/`, `members/`. List endpoints share `common/pagination.ts` (`PaginationQueryDto`, `@SearchQuery()`, `toPage`, `likeEscape`). Add new admin areas as sibling folders and import them in `admin.module.ts`
+   - **auth/**: Better Auth (email + password) for the admin dashboard (BitcoinDeepa-Admin-FE), mounted on Express at `/api/admin-auth/*` in `app.setup.ts` (before Nest's body parsers)
+   - Tables `admin_user`, `admin_session`, `admin_account`, `admin_verification` (snake_case; mapping in `admin-auth.config.ts`). Separate from the Telegram `user` table; the analytics role has no access
+   - Only `role = 'admin'` users can get a session (`databaseHooks.session.create.before`); public sign-up is disabled
+   - Create admins with `bun run admin:create --email <email> --name "<name>"` (prod build: `node dist/src/scripts/create-admin.js ...`; password prompted or `ADMIN_PASSWORD`)
+   - Protect admin endpoints with `@UseGuards(AdminSessionGuard)` and read the session with `@CurrentAdmin()`
+   - better-auth is ESM-only: it's loaded with a real dynamic `import()` (same trick as jose), so never import it statically outside `import type`
+   - CORS: origins in `ADMIN_APP_URL` get an exact-match credentialed response; other origins keep `CORS_ORIGIN`, without credentials. Cookies are `SameSite=Lax` (`Secure` in production), so **sign-in only works when the dashboard and the API share a registrable domain** (`admin.<domain>` / `api.<domain>`). A dashboard on another site (a `vercel.app` preview against a `railway.app` API; `*.up.railway.app` and `*.vercel.app` are public suffixes, so even two Railway subdomains are different sites) signs in and then gets 401s. For dev/staging only, `ADMIN_COOKIE_SAME_SITE=none` makes it `SameSite=None; Secure` (HTTPS required; refused in production; Safari still blocks it). Admin requests other than GET/HEAD/OPTIONS must carry an `Origin` from `ADMIN_APP_URL` (CSRF)
+   - **bank-reviews/**: admin review of users' payout bank accounts (uses `BankAccountService`)
+
+11. **Bank Account Module** (`src/modules/bank-account/`) - users' payout bank accounts and their admin verification
+   - User uploads a statement to R2 via a temporary presigned PUT (`POST /bank-accounts/statement-upload`), then submits the account (`POST /bank-accounts`). The backend `HEAD`s the object (exists, under the user's prefix, PDF/JPEG/PNG, <= 8 MB)
+   - Every account starts `PENDING_REVIEW` (one in review/verified per user). `name_match_score` (ported CeyFi `name-match.util.ts`, account name vs **`user.kyc_full_name`**, the name Didit read from the ID) is only a reviewer hint. Never compare against `first_name`/`last_name`: those are the Telegram profile name, which the member controls. If `kyc_full_name` is missing it is fetched from Didit; without it submission is refused (503)
+   - Admin approve re-checks KYC is still `APPROVED` (409 otherwise), registers it with CeyPay (aggregator user + bank account) inside the row lock, then sets `VERIFIED`; CeyPay failure leaves it pending (502). Reject needs a reason; the same account can be resubmitted. The user gets a Telegram DM either way
+   - `BankVerifiedGuard` (exported) gates anything that pays out to the account. Removing an account is blocked while a sell order on it is in flight
+
+12. **Sell Module** (`src/modules/sell/`) - users sell sats for LKR paid to their verified bank account by CeyPay
+   - **Switch:** off unless `SELL_ENABLED=true` (`SellEnabledGuard`, `src/common/sell-enabled.ts`): price, quote, confirm, bank list/upload/submit and admin approve answer 503; order views, the webhook and the crons keep working so in-flight sales finish. CeyPay + R2 env are only required in production when it is on
+   - **Limits:** `SELL_MIN_SATS` (1,000), `SELL_MAX_SATS` per sale (5,000,000), `SELL_DAILY_MAX_SATS` per member over a rolling 24h (20,000,000; counts `COUNTED_SELL_STATUSES`). Checked at quote and again at confirm under a lock on the member's `user` row
+   - **No collect mock:** a sale only pays out once the bot's collect request is `approved` and `paid` (staging uses the staging bot). `BITCOINDEEPA_COLLECT_MOCK` was removed; if still set it only logs a warning
+   - **Who can sell:** KYC `APPROVED` (`KycVerifiedGuard`) **and** a verified bank account (`BankVerifiedGuard` from bank-account). Both are re-checked at confirm, and the account again at payout time
+   - **Pricing:** BTC/LKR from `BitcoinPriceService.getBtcLkrRate()` (see Bitcoin Price Module), so our LKR matches what CeyPay pays for the same USDT. Both rates are stored on the order. The whole sale is priced in LKR (`gross_lkr`, rounded down), then the fee `BITCOINDEEPA_SELL_FEE_BASIS_POINTS` comes off it in LKR (`fee_lkr`, rounded up); `amount_lkr` is what the user gets. All sats collected stay with us. Quotes live `SELL_QUOTE_TTL_SECONDS`
+   - **Confirm:** commits `QUOTED` → `COLLECTING` first with the approval deadline `collect_expires_at` (`SELL_COLLECT_WINDOW_SECONDS`, default 300, max 900), then, with no lock held, asks the user to pay via the bot's collect API (bot `dev` `docs/collect-api.md`; `BitcoinDeepaService.createCollect`, signed with the send key, `external_id` = order id so asking again returns the same request). The wallet needs `can_collect: true` on the bot; a refusal for our setup (`collect_not_allowed`, `collector_not_allowed`, auth) alerts and answers 503. **Nothing moves until the user approves**: Pay in the bot chat, or in the app via `POST /sell/orders/:id/pay` (P2P relay `/p2p/collect/{id}/approve` as the session user; needs P2P on). `SellService.syncCollect` follows the request (10s cron `syncCollects` with `waitForCompletion`, and `GET /sell/orders/:id` while `COLLECTING`, at most once per 3s per order via Redis): no request yet (confirm got no answer) → create again; `pending` past the deadline → cancel (a 409 `request_closed` means the user answered first: follow that); approved + `paid` → `SATS_COLLECTED` → payout (only if the request's `amount` and `external_id` match the order, else `NEEDS_REVIEW`); transfer `failed`/`cancelled`/`expired`, `declined`, request `cancelled`/`expired` → `EXPIRED` (nothing moved). `bot_collect_id` and `collect_state` (pending, awaiting_confirmation, processing, ...) are stored; the order view's `collect` shows them with `payInApp`. A refusal caused by our setup (`auth`, `collect_not_allowed`, `collector_not_allowed`) leaves the order `COLLECTING` with one hourly alert; only a 404 for our request parks it in `NEEDS_REVIEW`. `POST /sell/orders/:id/cancel` closes the window at once. Then the payout locks a CeyPay USDT quote sized so CeyPay's `amountLkr` >= ours and creates the off-ramp (`externalRef` = order id, CeyPay dedupes on it). The update to `SATS_COLLECTED` also counts payout attempt 1 (`retry_count = 1`, `last_retry_at`), so the retry cron can't start a second payout next to confirm's; every later attempt is claimed with the backoff in its `WHERE` (`payoutAttemptDue`). The member's `user` row is locked `FOR NO KEY UPDATE` (a plain `FOR UPDATE` deadlocks with a new quote's insert). The user always gets the LKR we quoted; CeyPay's USDT numbers are bookkeeping (it pays from our prefunded LKR float)
+   - **Statuses** (`sell_order.status`, forward-only conditional updates): `QUOTED` → `COLLECTING` → `SATS_COLLECTED` → `PAYOUT_PENDING` → `COMPLETED`; `QUOTED`/`COLLECTING` → `EXPIRED` (nothing moved); payout failure → `REFUNDING` → `REFUNDED` (full sats back, memo `sell-refund:<id>`); any unknown transfer outcome (refund timeout or 5xx, payout retries exhausted, a collect request the bot no longer knows, `COLLECTING` 30 min past its deadline (2 min for orders from before collect requests) or `REFUNDING` > 5 min, `SATS_COLLECTED` with no attempts left > 5 min) → `NEEDS_REVIEW` + Telegram alert, never retried automatically. A payout **refused** after an earlier attempt that got no answer is also `NEEDS_REVIEW`, not refunded: that attempt may have created the payout, and the refusal can come before CeyPay looks at the `externalRef` (our bank-account check, the quote call, its auth guards). `fx_lock_id` is stored just before the off-ramp request, so an order that still has one from an earlier attempt is such an order. A `COMPLETED` webhook for a refunded order alerts (member may have both)
+   - **CeyPay webhook** `POST /sell/ceypay-webhook`: ED25519 (`CEYPAY_WEBHOOK_PUBLIC_KEY`) over `X-Webhook-Timestamp` (ms, ±5 min) + raw body. Bound to the order by `externalRef` + `paymentId`. Crons: expire quotes (1 min), sync collect requests (10s), retry payout creation with 2^n min backoff up to 5 attempts (30s), poll CeyPay for `PAYOUT_PENDING` older than 10 min (5 min), stuck `COLLECTING`/`REFUNDING`/out-of-attempts `SATS_COLLECTED` → `NEEDS_REVIEW` (1 min), alert once on a payout pending > 2 h (10 min). Unknown webhook event types are acknowledged and ignored
+   - **CeyPay client** (`src/modules/ceypay/`): aggregator API, `x-api-key` (key id) + `x-timestamp` (ms) + `x-signature` = hex HMAC-SHA256 with key `sha256hex(secret)` over `ts + METHOD + path?query + body`. `CeyPayError.outcomeUnknown` = no response/5xx/429
+   - **R2** (`src/modules/storage/`): private bucket; statements are only ever reached through 5-minute presigned URLs (bucket CORS must allow PUT from the TMA origin)
+
+13. **Buy Module** (`src/modules/buy/`) - one-time BTC buys: one PayHere checkout (no recurrence) for a custom whole-LKR amount
+   - `POST /buy/payhere-link` stores a `buy_order` with `kind = ONE_TIME`, `amount`, `currency` (no package) and returns a one-off checkout link (no `recurrence`/`duration`). KYC + complete profile required; allowed alongside an active subscription
+   - **Limits** (`src/common/buy-limits.ts`): `BUY_MIN_LKR` (100), `BUY_MAX_LKR` (100,000) per buy, `BUY_DAILY_MAX_LKR` (250,000) per member over a rolling 24h = paid ONE_TIME PENDING/SUCCESS/CHARGEBACK payments **plus unpaid checkouts that haven't expired** (reserved). Each checkout expires after `BUY_ORDER_TTL_MINUTES` (30); PayHere has no link expiry, so this is ours. `BUY_LINKS_PER_HOUR` (10) checkouts per member per hour, else 429 (counted from `buy_order`)
+   - **Holds:** PayHere can't stop a checkout being paid late or twice, so when a one-time payment becomes SUCCESS the webhook re-checks: paid twice, paid after `expires_at` + 10 min, or the member's 24h total over the limit → `transaction.hold_reason` is set and a Telegram alert goes out. The member's `user` row is locked first (`FOR NO KEY UPDATE`), so two payments arriving together can't both skip these checks. Settlement skips held rows; `POST /transaction/release-hold/:paymentId` (`x-admin-key`) releases one (or refund it in PayHere). The order view shows `held: true`
+   - Same fees as subscriptions (`src/common/buy-fees.ts`, used by the webhook too). The webhook, pricing, backfill and settlement are shared: a notification **without `subscription_id`** goes to `handleOneTimeNotification`, which requires a ONE_TIME order and the signed amount/currency to equal the order's; a ONE_TIME order with a `subscription_id` (payer added recurrence) is rejected and alerted; it is never cancelled automatically (`subscription_id` isn't signed, so it could be someone else's) - a human checks it in PayHere and cancels/refunds
+   - Settlement confirms one-time payments with PayHere's Retrieval API (`getPaymentsByOrderId`, `GET /merchant/v1/payment/search?order_id=`); memo `One-time BTC purchase (Ref: <payment_id>)`
+
+14. **P2P Module** (`src/modules/p2p/`) - users send sats from their **own** bot wallet to another bot user, relayed to the bot's `/api/v1/p2p` (bot `dev`: `docs/dca-backend-integration.md` §5-6, `docs/p2p-api.md`). The bot's `/api/v1/init` (creates the wallet, links the user for X-BDB-User for a year) is called by every login (see Auth Module), not by the app
+   - **Switch:** on by default; `P2P_ENABLED=false` is the off-switch, and without `BITCOINDEEPA_PRIVATE_KEY_PEM` it's off too (`isP2pEnabled`/`P2pEnabledGuard`, 503; a startup warning says so). Any signed-in user (no KYC): it's their own wallet; the bot checks they have one and enforces its limits (100k/transfer, 500k/day, Confirm in the bot chat above 50k/day, 10 sends/min)
+   - **Routes:** `GET /p2p/me` (balance, limits), `POST /p2p/resolve { to }` (our DB, not the bot: a Bitcoin Deepa @username → `{ telegram_id, username, name (masked "Nimal S.", from `kyc_full_name` or the Telegram name), avatar_seed }`; 404 `recipient_not_found`, 400 `invalid_username` / `cannot_send_to_self`; no Telegram credential needed), `POST /p2p/send { to_telegram_id, amount, memo?, idempotency_key }` (200 completed/failed, 202 awaiting_confirmation/processing/in_flight), `GET /p2p/transfers/:id` (`p2p-<hex>`)
+   - **Who:** the session user (`@CurrentUser()`), sent as `X-BDB-User: <telegram id>`. No Telegram credential after login and no login-age limit: our session decides. The bot key signs these calls too, so if it leaks it can pay from any linked user's wallet up to the bot's `daily_limit` (passkeys are planned on the bot), as well as from the DCA wallet: keep it in the secret store, one per environment. The `ENABLE_AUTH=false` mock user can't use P2P
+   - **Signing:** `P2pBotClient` with `BITCOINDEEPA_PRIVATE_KEY_PEM`, the same key as the send API (so its public key must be both the wallet's `ed25519_public_key` and the bot's `api.p2p.service_public_key`). `/api/v1/init`: `BDB-P2P-ED25519-V1` with `sha256(credential)` and the `X-Telegram-Init-Data`/`X-Telegram-ID-Token` header. Everything else: `BDB-P2P-ED25519-V2` with the Telegram ID on line 7 and `X-BDB-User`, no Telegram header (`bot-signer.ts`, shared with the send API). The bot rejects V1 on `/p2p/*`, so the bot and this backend deploy together. Bodies are built from the documented fields only (the bot rejects unknown fields)
+   - **Errors:** the bot's `403 login_required` (user not linked) → our `403 relogin_required` (not 401: our session is fine; the app logs in again, which links them). 401 is only ever our own session. A 401 on an X-BDB-User call, `bad_service_signature`, `forbidden` or a plain-text 403 is our config → 502 `p2p_unavailable` + hourly alert. On init, the bot refusing the credential is 403 `credential_rejected`. The bot's other `{code, message}` 4xx pass through (messages are user-facing). No answer/5xx on send → 502 `outcome_unknown` (retry with the same key is safe); on reads → 503
 
 ### Database Schema
 
 **Tables:**
 - `package`: Subscription packages (UUID PK, name, frequency, amount, currency)
-- `user`: User profiles (Telegram ID as PK, personal info, address, KYC status and verification data)
+- `user_session`: user-app sessions (SHA-256 of the token, `kind` web/miniapp, idle + absolute expiry, `revoked_at`)
+- `telegram_login_attempt`: web logins in progress (state hash, PKCE verifier, return path; single use, 10 min)
+- `user`: User profiles (Telegram ID as PK, `telegram_sub` (web OIDC sub, nullable unique), personal info, address, KYC status and verification data, `avatar_seed`, `username`: the member's own Bitcoin Deepa @username, unique, lower-case, CHECK `^[a-z][a-z0-9_]{2,19}$`, claimed once)
 - `subscription`: Active subscriptions (PayHere sub ID as PK, user ID, package ID, is_active)
-- `transaction`: Payment records (PayHere pay ID as PK, subscription ID, status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
+- `transaction`: Payment records (PayHere pay ID as PK, `kind` RECURRING/ONE_TIME, `transfer_memo` (the bot memo its sats are sent with), `user_id` (owner - read paths, settlement and admin use this, not the subscription), subscription ID (recurring only), `payhere_order_id` (one-time only), status, Bitcoin price, satoshis purchased, fee tracking, timestamps)
+- `buy_order`: Every checkout we start (order_id → user; `kind`; package for RECURRING, amount + currency for ONE_TIME)
+- `user_bank_account`: Payout bank accounts (status PENDING_REVIEW/VERIFIED/REJECTED, statement R2 key, name-match score, reviewer, CeyPay bank id). `user.ceypay_user_id` links the user to CeyPay
+- `exchange_rate_log`: BTC/LKR rate history (BTC/USD, USDT/LKR, BTC/LKR, `is_active` = the current row, at most one)
+- `sell_order`: Sell orders (sats, gross LKR, fee LKR, BTC/LKR rate, promised LKR, CeyPay quote/payment ids, bank ref, status, retries)
 
 **Relationships:**
 - Users → Subscriptions (1:many)
 - Packages → Subscriptions (1:many)
-- Subscriptions → Transactions (1:many)
+- Subscriptions → Transactions (1:many, recurring)
+- Users → Transactions (1:many, `transaction.user_id`)
 
 ## Development Workflow
 
 ### Setup Commands
 ```bash
 # Install dependencies
-pnpm install
+bun install
 
 # Database setup
-pnpm migrate          # Run migrations
-pnpm seed            # Seed initial data
-pnpm db:reset        # Full database reset (rollback + migrate + seed)
+bun run migrate          # Run migrations
+bun run seed            # Seed initial data
+bun run db:reset        # Full database reset (rollback + migrate + seed)
 
 # Environment setup
 cp .env.template .env  # Configure environment variables
 ```
 
+### Tests
+```bash
+bun run test            # unit tests (src/**/*.spec.ts), no dependencies
+TEST_DATABASE_URL=postgresql://bd_test:bd_test@localhost:5433/bitcoindeepa_dca \
+TEST_REDIS_URL=redis://localhost:6380 \
+bun run test:e2e        # e2e against a disposable Postgres/Redis (see test/README.md)
+```
+- Jest + `@nestjs/testing` + supertest. E2E boots the real `AppModule` via `configureApp()` (`src/app.setup.ts`, shared with `main.ts`) and stubs external services in `test/support/test-app.ts`.
+- E2E tests truncate tables and refuse to run against the `.env` database. Put new unit tests next to the code (`*.spec.ts`), new flows in `test/*.e2e-spec.ts`.
+- CI: `.github/workflows/test.yml` runs tsc, unit and e2e (Postgres + Redis services) on every PR.
+
 ### Development Commands
 ```bash
 # Start development server
-pnpm start:dev       # Watch mode
+bun run start:dev       # Watch mode
 
 # Production
-pnpm start:prod      # Production mode
+bun run start:prod      # Production mode
 
 # Code quality
-pnpm lint           # ESLint with auto-fix
-pnpm prettier       # Format code
+bun run lint           # ESLint with auto-fix
+bun run prettier       # Format code
 
 # Database operations
-pnpm migrate:rollback  # Rollback all migrations
+bun run migrate:rollback  # Rollback all migrations
+
+# One-off backfills (dry run by default, --execute writes)
+bun run backfill:payhere-orders  # bind old subscriptions to their PayHere order_id
+bun run backfill:kyc-names       # store the verified ID name for already-approved members
 ```
 
 ## Environment Variables
@@ -119,7 +191,19 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/dbname
 
 # Telegram Authentication
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-JWT_SECRET=your_jwt_secret_key
+APP_URL=https://app.example.com  # user app origin (credentialed CORS, cookie Origin check, login return); required in production
+APP_COOKIE_SAME_SITE=  # dev/staging only: 'none' when the app and API are on different sites
+TELEGRAM_OIDC_CLIENT_ID=8219648988  # bot ID; required in production
+TELEGRAM_OIDC_CLIENT_SECRET=...  # BotFather > Login Widget; required in production
+TRUST_PROXY=1  # proxy hops (or IPs/CIDRs) in front of us, for req.ip; required in production
+LEGACY_JWT_ISSUE=true  # false = legacy JWT logins answer 410
+JWT_SECRET=your_jwt_secret_key  # Required until the legacy JWT path is removed
+ADMIN_API_KEY=your_admin_key  # Required for internal endpoints (x-admin-key header)
+BETTER_AUTH_SECRET=...  # Admin dashboard auth, >= 32 chars (required in production)
+BASE_URL=https://api.example.com  # Public URL of this API (required in production)
+BETTER_AUTH_URL=  # Optional, defaults to BASE_URL
+ADMIN_APP_URL=https://admin.example.com  # Admin dashboard origin(s), comma-separated (required in production)
+ADMIN_COOKIE_SAME_SITE=  # Optional, dev/staging only: 'none' for a dashboard on another site (default lax)
 ENABLE_AUTH=true  # Set to 'false' for development (bypasses auth)
 
 # PayHere Integration
@@ -127,21 +211,43 @@ PAYHERE_MERCHANT_ID=your_merchant_id
 PAYHERE_MERCHANT_SECRET=your_merchant_secret
 PAYHERE_APP_ID=your_app_id
 PAYHERE_APP_SECRET=your_app_secret
-PAYHERE_BASE_URL=https://sandbox.payhere.lk  # or production URL
+PAYHERE_ENV=sandbox  # or live
 
 # Bitcoin DCA Configuration
-COINGECKO_API_KEY=your_coingecko_pro_api_key  # Optional, for better rate limits
 ENABLE_BITCOIN_TRACKING=true  # Set to 'false' to disable Bitcoin calculations
-BITCOIN_PRICE_CACHE_TTL=20  # Cache duration in seconds (default: 20)
+COINMARKETCAP_API_KEY=your_cmc_api_key  # wallet 24h change only (display)
+BTC_PRICE_CACHE_TTL=300  # 24h change cache in seconds (default: 300)
+EXCHANGE_RATE_FALLBACK_MAX_AGE_SECONDS=180  # Optional: max age of the logged rate used when the live price is down (default 180, max 900, 0 = never)
 
 # Fee Configuration
-FEE_BASIS_POINTS=100  # Platform fee in basis points (1 bp = 0.01%, 100 = 1%, 250 = 2.5%)
+PAYHERE_FEE_BASIS_POINTS=100  # Payment processor fee (1 bp = 0.01%)
+BITCOINDEEPA_FEE_BASIS_POINTS=100  # Platform fee
 
 # Didit KYC Integration
 DIDIT_API_KEY=your_didit_api_key  # Required for KYC verification
-DIDIT_BASE_URL=https://api.didit.me  # Didit API base URL (sandbox: https://sandbox.api.didit.me)
-DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Optional, for webhook signature verification
+DIDIT_BASE_URL=https://verification.didit.me  # Didit API base URL (v3 sessions API)
+DIDIT_WEBHOOK_SECRET=your_webhook_secret  # Required in production; optional in dev
 DIDIT_CALLBACK_BASE_URL=https://your-app-domain.com  # Your application base URL for webhook callbacks
+
+# One-time buys (optional; defaults shown)
+BUY_MIN_LKR=100
+BUY_MAX_LKR=100000
+BUY_DAILY_MAX_LKR=250000
+BUY_ORDER_TTL_MINUTES=30
+BUY_LINKS_PER_HOUR=10
+
+# Sell flow (required in production)
+BITCOINDEEPA_SELL_FEE_BASIS_POINTS=100  # taken off the LKR amount
+SELL_QUOTE_TTL_SECONDS=60
+SELL_COLLECT_WINDOW_SECONDS=300  # Optional: time to approve the payment after confirming (60-900)
+SELL_MIN_SATS=1000
+CEYPAY_API_URL=https://api.ceypay.io  # CEYPAY_API_* required in production even with selling off (prices buys/DCA)
+CEYPAY_API_KEY_ID=ak_live_...  # BitcoinDeepa's CeyPay merchant must be account_type AGGREGATOR
+CEYPAY_API_SECRET=sk_live_...
+CEYPAY_WEBHOOK_PUBLIC_KEY=...  # ED25519 public key (PEM, or base64 DER)
+CEYPAY_WEBHOOK_URL=  # Optional, defaults to BASE_URL/sell/ceypay-webhook
+R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=...
+ADMIN_DASHBOARD_URL=  # Optional, Telegram alert links; defaults to the first ADMIN_APP_URL
 
 # Server
 PORT=3000
@@ -155,11 +261,18 @@ PORT=3000
 - Protected endpoints: User creation, subscription management, transaction history
 
 ### Authentication
-- `POST /auth/telegram` - Validate Telegram InitData, return JWT token. Also auto-registers/refreshes a minimal user row (`id`, `first_name`, `last_name`) from the Telegram profile.
+- `GET /auth/telegram/start`, `GET /auth/telegram/callback` - web login (OIDC redirect), sets the session cookie
+- `POST /auth/telegram/miniapp` - Mini App login: initData → session token. Both logins auto-register/refresh a minimal user row (`id`, `first_name`, `last_name`) and link the bot wallet
+- `GET /auth/me` - current user and session kind (authenticated)
+- `POST /auth/logout`, `POST /auth/logout-all` - revoke this session / every session (authenticated)
+- Legacy: `POST /auth/telegram`, `POST /auth/telegram-oidc` - 7-day JWT; 410 once `LEGACY_JWT_ISSUE=false`
 
 ### User Management
 - `POST /user` - Complete profile (email, phone, address, city, country) for the already-registered user (authenticated)
-- `GET /user/me` - Get current user profile, including `is_profile_complete` (authenticated)
+- `GET /user/me` - Get current user profile, including `is_profile_complete` and `avatar_seed` (authenticated)
+- `GET /user/username/availability?username=` - `{ username, available, reason }` (normalized: trim, leading `@` stripped, lower-case; reasons: format, reserved, taken). Rules in `src/modules/user/username.ts` (same as CeyFi's handles)
+- `POST /user/username` - `{ username }` claims the member's Bitcoin Deepa @username (separate from the Telegram username). Anyone signed in, **once**: 409 when they already have one, or it's reserved/taken (the unique index settles a race). There is no change endpoint. Returns the profile like `/user/me`
+- `PATCH /user/avatar` - `{ seed }` (1-64 of `[A-Za-z0-9_-]`) saves the seed of the user's DiceBear avatar (the app draws it; null until set, when the app draws it from the Telegram id); returns the profile like `/user/me` (authenticated)
 - `GET /user/exists/:telegramId` - Check if a user has been registered (public)
 - `POST /user/kyc/initiate` - Initiate KYC verification process (authenticated)
 - `GET /user/kyc/status` - Get current KYC verification status (authenticated)
@@ -175,9 +288,45 @@ PORT=3000
 ### KYC Verification
 - `POST /didit/webhook` - Didit webhook for KYC status updates (public)
 
+### Admin dashboard
+- `/api/admin-auth/*` - Better Auth endpoints (`sign-in/email`, `sign-out`, `get-session`, ...)
+- `GET /admin/me` - Current admin (admin session cookie)
+- `GET /admin/analytics/summary` - Users, KYC, subscriptions and settled SUCCESS-payment totals (LKR, fees, sats), plus `unsettled` (SUCCESS payments whose sats weren't sent: count, LKR, sats)
+- `GET /admin/analytics/daily?days=7|30|90` - Zero-filled daily settled LKR, payment count, unsettled LKR and new users (Asia/Colombo days)
+- `GET /admin/transactions?page=&pageSize=10|20|50|100&status=&kind=RECURRING|ONE_TIME&from=&to=&q=` - Paginated transactions, newest first, with member, plan (null for one-time buys) and `kind`. `from`/`to` are inclusive YYYY-MM-DD days in Sri Lanka time; `q` matches payment id, member id or name. Returns `{ items, total, page, pageSize, pageCount }`
+- `GET /admin/members?page=&pageSize=&kyc=&subscription=active|none&q=` - Paginated members, newest first, with active plan, settled SUCCESS-payment totals (LKR, sats) and unsettled LKR. `q` matches Telegram id, name, email or phone
+
+### Bank accounts
+- `GET /bank-accounts/banks` - Supported banks (CeyPay list, cached 1h)
+- `GET /bank-accounts` - User's active bank accounts with review status (account number masked)
+- `POST /bank-accounts/statement-upload` - `{ contentType: application/pdf|image/jpeg|image/png, size <= 8MB }` → temporary presigned PUT URL + `key` (KYC required)
+- `POST /bank-accounts` - `{ bankCode, accountNumber, accountName, statementKey }` → PENDING_REVIEW (KYC required)
+- `DELETE /bank-accounts/:id` - Soft delete (409 while a sale on it is in flight)
+
+### Sell (sats → LKR)
+- `GET /sell/price` - Live BTC/LKR buying rate, fee, `minSats` and `maxSats` (estimate only)
+- `POST /sell/quote` - `{ sats }` → `QUOTED` order (KYC + verified bank account)
+- `POST /sell/orders/:id/confirm` - Ask the user to pay the sats (collect request); `COLLECTING` until they approve, then the CeyPay payout (KYC + verified bank account; 410 if expired)
+- `POST /sell/orders/:id/pay` - Pay a `COLLECTING` sale from the app (P2P on; a real session, not a legacy JWT; 403 `relogin_required` like `/p2p/send`; 410 after the deadline)
+- `POST /sell/orders/:id/cancel` - Cancel a sale not paid yet
+- `GET /sell/orders`, `GET /sell/orders/:id` - User's sell orders
+- `POST /sell/ceypay-webhook` - CeyPay off-ramp result (public, ED25519-signed)
+- Admin: `GET /admin/bank-reviews?status=&page=&pageSize=&q=` (default PENDING_REVIEW, oldest first), `GET /admin/bank-reviews/pending-count`, `GET /admin/bank-reviews/:id/statement` (5-min link), `POST /admin/bank-reviews/:id/approve`, `POST /admin/bank-reviews/:id/reject { reason }`
+
+### Buy (one-time)
+- `GET /buy/price` - Live BTC/LKR, fee basis points and buy limits (estimate only)
+- `POST /buy/payhere-link` - `{ amount_lkr }` (whole LKR) → `{ link, order_id }` (KYC required)
+- `GET /buy/orders/:orderId` - The user's one-time order: `AWAITING_PAYMENT` or the payment status, sats, settled
+
 ### Transactions
-- `POST /transaction/payhere-webhook` - PayHere webhook handler (public)
-- `GET /transaction/list` - Get user's transaction history with Bitcoin data (authenticated)
+- `POST /transaction/payhere-webhook` - PayHere webhook handler (public, MD5-signed)
+- `POST /transaction/reset-retry-count/:paymentId` - Re-enable settlement for one payment after checking it on BitcoinDeepa (internal, requires `x-admin-key`)
+- `POST /transaction/release-hold/:paymentId` - Let settlement pay a held one-time buy after a human checked it (internal, requires `x-admin-key`; 404 unless held and unsettled)
+- `GET /transaction/list?page=&limit=` - The member's history, purchases and sales together, newest first (`created_at DESC, id DESC`; paging is across both). Returns `{ transactions, total_count, total_pages, current_page, has_more }`. Each item has a `type` (authenticated):
+  - `BUY`: the `transaction` row with its package columns (as before), plus `type: 'BUY'`
+  - `SELL`: `{ type: 'SELL', created_at, sell_order }`, where `sell_order` is the same view the `/sell/orders` endpoints return. No transaction fields (`payhere_pay_id`, `status`, `satoshis_purchased`...). `QUOTED` and `EXPIRED` orders are left out (nothing was sold)
+  - Cached per member (`dca:history:user:<id>:*`, 120s); cleared on payment webhooks, on sale confirm and on every sell status change. Clients should treat an item with no `type` as `BUY`
+- `GET /transaction/bot-history?limit=&offset=` - The user's bot transfers (from the bot, paged by its count). Each row gets `purchase_settlement: true` when it is the transfer that settled one of the user's own SUCCESS payments (incoming, memo `... (Ref: <payment id>)`, amount = its `satoshis_purchased`; a successful transfer only once the payment is `settled`), so the app shows that purchase once `counterparty_username` / `counterparty_avatar_seed` are the other party's Bitcoin Deepa @username and avatar seed (null if none)
 - `GET /transaction/dca-summary` - Get DCA performance summary with total satoshis and average price (authenticated)
 
 ## Development Guidelines
@@ -225,9 +374,10 @@ try {
 
 ### KYC Integration (Didit)
 - KYC verification is required before creating new subscriptions
-- Webhook signatures should be verified when `DIDIT_WEBHOOK_SECRET` is configured
+- Webhook signatures (`X-Signature` + `X-Timestamp`) are always verified when `DIDIT_WEBHOOK_SECRET` is set (missing/stale = 401); in production the secret is required
 - Handle various verification statuses: pending, verified, rejected, expired
 - Store Didit session IDs for tracking verification progress
+- On approval, store the name on the ID in `user.kyc_full_name` (webhook `decision.id_verifications[0]`, else `GET /v3/session/{id}/decision/`); it is cleared when KYC is no longer approved. Members approved before this: `bun run backfill:kyc-names` (dry run; `--execute` writes)
 - Use ID verification + liveness detection as minimum requirements
 
 ### Error Handling
@@ -241,12 +391,29 @@ try {
 1. Import `ConditionalAuthGuard` and `@CurrentUser` decorator
 2. Apply `@UseGuards(ConditionalAuthGuard)` to controller method
 3. Use `@CurrentUser() user: JwtPayload` parameter for user context
+4. Type every `@Body()` with a class DTO using class-validator decorators (not an interface) - the global `ValidationPipe` (`whitelist`, `transform`) only validates classes and strips unknown fields
+
+### Shared helpers (use these instead of re-writing the pattern)
+- Logging: `private readonly logger = new Logger(MyService.name)`. `DatabaseSystemLogger` (set via `app.useLogger`) already writes log/warn/error to the `log` table; `debug`/`verbose` stay console-only. Don't inject `DatabaseLoggerService` in features.
+- Development logging (`src/common/dev-logging.ts`, `NODE_ENV=development` only): every call through the default axios instance or global `fetch` (CeyPay, BitcoinDeepa bot, PayHere, Ceylon Cash, CoinMarketCap, Telegram, Didit) is logged with its request and response under context `ExternalAPI` (2xx INFO, 4xx WARN, 5xx/no response ERROR). Headers are never logged; secret-looking keys, query params and Telegram's bot token are redacted; bodies are cut at 4,000 chars; these lines skip the DB `log` table. On Railway the logger writes JSON lines (`level` info/debug/warn/error, all on stdout) so the log view shows badges and filters (`@level:error`, `@context:SettlementService`, `@api:CeyPay`, `@status:500`). `LOG_FORMAT=json|pretty` overrides. Use axios's default instance or `fetch` for new external calls so they're covered.
+- Errors: `errorMessage(error)` from `src/common/error-message.ts`.
+- Caching: `redisService.getOrSet(key, ttlSeconds, loader)` (null results aren't cached).
+- Telegram ops log: `telegramLoggerService.trackAction(action, user, fn)` posts the action, runs `fn`, and reacts on success.
+- Users: `userService.getUserOrThrow(id)` throws 404.
+- DB pool settings live only in `knexfile.ts`.
+
+### Configuration
+- `ConfigModule.forRoot({ isGlobal: true, validate })` loads `.env` and validates it at startup (`src/config/env.validation.ts`). Add new env vars there; the app refuses to boot on missing/invalid values.
+- Production additionally requires `TELEGRAM_BOT_TOKEN`, `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET`, `DIDIT_WEBHOOK_SECRET`, the CeyPay API (`CEYPAY_API_URL`, `CEYPAY_API_KEY_ID`, `CEYPAY_API_SECRET`, it prices every buy), and with `SELL_ENABLED=true` the CeyPay webhook key + R2.
+- `app.enableShutdownHooks()` is on, so `onModuleDestroy` (DB pool, Redis) runs on SIGTERM.
 
 ### Database Migrations
 1. Create migration file: `npx knex migrate:make migration_name`
 2. Implement `up()` and `down()` methods
-3. Run migration: `pnpm migrate`
+3. Run migration: `bun run migrate`
 4. Create corresponding seed file if needed
+- Production applies pending migrations on startup (`src/utils/run-migrations.ts`, before Nest boots); elsewhere only with `RUN_MIGRATIONS_ON_STARTUP=true` (`false` turns it off in production). Keep each migration compatible with the previous release: it keeps serving while the new one migrates, and a rollback starts an older build against the newer schema.
+- Long or non-transactional (`transaction: false`) migrations: run them by hand with the CLI. Killed mid-run, they leave knex's lock set and the app won't start until `npx knex migrate:unlock`.
 
 ### PayHere Webhook Testing
 1. Use ngrok or similar tool to expose local endpoint
@@ -261,13 +428,29 @@ try {
 - `FAILED`: Payment failed
 - `CHARGEBACK`: Payment reversed
 
+**Webhook rules (PayHere):**
+- PayHere's md5sig (and the checkout hash) only cover merchant_id, order_id, amount, currency (and status_code). `custom_1`/`custom_2` are payer-editable and never trusted: `POST /subscription/payhere-link` stores a `buy_order` row (order_id → user, package), and the webhook creates subscriptions only from that row. Unknown order_ids are rejected with a Telegram alert. Each subscription is bound to its `payhere_order_id`.
+- Status transitions: SUCCESS can only become CHARGEBACK, CHARGEBACK is final, nothing goes back to PENDING. Out-of-order notifications are ignored.
+- A new subscription is `is_active = true` only if its first payment is SUCCESS; otherwise it is activated by its first SUCCESS.
+- `item_rec_status` -1/1 or `message_type` RECURRING_STOPPED/RECURRING_COMPLETE marks the subscription inactive.
+- SUCCESS payments saved without BTC price data (price API down and no recent rate in `exchange_rate_log`) are backfilled by a cron every minute.
+- **BitcoinDeepa bot API** (`src/modules/bitcoindeepa/`): every call is Ed25519-signed (`X-Wallet-ID`, `X-Timestamp`, `X-Nonce`, `X-Signature` over `BDB-SEND-ED25519-V1\nMETHOD\nPATH\nQUERY\nTS\nNONCE\nsha256hex(body)`; sign the exact bytes sent, new nonce per call). Env `BITCOINDEEPA_API_URL`, `BITCOINDEEPA_WALLET_ID`, `BITCOINDEEPA_PRIVATE_KEY_PEM`; `/send` timeout `BITCOINDEEPA_SEND_TIMEOUT` (95s). A 401/403 alerts at once (key/wallet/clock/IP).
+- The transfer memo is the bot's idempotency key (unique per payment, same on every retry). It is stored in `transaction.transfer_memo` when the payment is created; rows without one (created by an earlier release) keep that release's memo, `<package> DCA plan (Ref: <id>)`, so a send it already made is still deduped. A timeout/5xx is an unknown outcome (`settlement_failure = 'UNKNOWN'`), and so is an earlier attempt with no recorded outcome: the next attempt first looks in the user's bot history for an incoming transfer ending in `(Ref: <payment id>)` with the payment's sats (`findSettlementTransfer`, either memo format), then resends with the same memo (the bot answers "already completed" if it went through). If that history can't be read for an attempt with no recorded outcome, nothing is sent and the attempt is given back.
+- `/send` above the bot's approval threshold answers 202 awaiting approval: `transaction.bot_send_id` holds the bot's id and a 1-min cron polls `/send/status/{id}` (executed = settled; rejected/expired = retries stop + alert). `transaction.settlement_failure` records why the last send failed.
+- `POST /transaction/reset-retry-counts` is the bot's callback when the DCA wallet receives sats (empty body). Requires `X-Callback-Secret` when `BITCOINDEEPA_CALLBACK_SECRET` is set (the bot doesn't send one yet). Only `LOW_BALANCE` payments not attempted in the last 2 min: it skips the backoff and allows at most one more attempt (never gives attempts back), throttled to once per 30s (Redis, plus a per-instance fallback).
+- Settlement races: the claim also requires `bot_send_id IS NULL` and `hold_reason IS NULL`, and clears `settlement_failure` while the attempt is in flight; post-send writes are guarded by `retry_count = <this attempt>`. A status 404 for an approval stops as `UNKNOWN`; an approval not final after 25h is reported once a day.
+- Production requires `BITCOINDEEPA_API_URL`, `BITCOINDEEPA_WALLET_ID` and an Ed25519 `BITCOINDEEPA_PRIVATE_KEY_PEM` (env validation). `scripts/test-fund-transfer.sh` sends one signed transfer (`DRY_RUN=1` to only sign).
+- Settlement re-reads the payment after the PayHere lookup and sends nothing if it is no longer an unheld, unsettled SUCCESS (a chargeback that arrived after the claim); if an earlier send had no answer it still looks for the memo, and alerts if it can't tell. A chargeback arriving during the transfer itself can't be stopped: `markSettled` marks the payment settled and a second alert says the sats were sent.
+- **Reminder** (`settlement/review-reminder.service.ts`, every 3 h, once across instances): alerts are sent once and best effort, so this repeats what still waits for a human - sales in `NEEDS_REVIEW` (until their status changes), held one-time buys and SUCCESS payments whose settlement used all attempts (both for 7 days). Items newer than 30 min are left out.
+- Money math uses big.js, never floats: `satoshisFor` (sats for an amount, rounded down), `parseAmount` (PayHere's amount string; never `parseFloat`).
+
 ### Fee System
 
 The platform implements a dual-fee system with separate payment processor and platform fees using basis points:
 
 **Configuration:**
 - Fees are configured via environment variables (each in basis points)
-- `PAYHERE_FEE_BASIS_POINTS`: Fee charged by payment processor (PayHere, CeyPay)
+- `PAYHERE_FEE_BASIS_POINTS`: Fee charged by the payment processor (PayHere)
 - `BITCOINDEEPA_FEE_BASIS_POINTS`: Platform fee charged by BitcoinDeepa
 - 1 basis point (bp) = 0.01%
 - Default: 100 basis points = 1% for each fee
@@ -275,7 +458,7 @@ The platform implements a dual-fee system with separate payment processor and pl
 
 **Payment Processors:**
 - `PAYHERE`: Default payment processor (Sri Lankan payment gateway)
-- `CEYPAY`: Alternative processor (to be implemented)
+- `CEYPAY`: enum value on `subscription` only - not used for buying. CeyPay is used for the sell flow's LKR payouts (see Sell Module)
 
 **Fee Calculation:**
 ```typescript
@@ -304,8 +487,6 @@ satoshis_purchased = (net_amount ÷ btc_price) × 100,000,000
 - Net amount: 980 LKR
 - Bitcoin purchased: 980 LKR worth of satoshis
 
-**Testing:**
-Run `npx ts-node scripts/test-fee-calculation.ts` to see fee calculations with different scenarios.
 
 ## File Organization
 
@@ -320,6 +501,11 @@ src/
 │   ├── subscription/      # Subscription logic
 │   ├── transaction/       # Payment processing
 │   ├── payhere/          # PayHere integration
+│   ├── bank-account/     # Payout bank accounts + admin verification
+│   ├── sell/             # Sell sats for LKR (quotes, CeyPay payouts, refunds)
+│   ├── ceypay/           # CeyPay aggregator off-ramp client
+│   ├── storage/          # Cloudflare R2 (presigned URLs)
+│   ├── admin/            # Admin dashboard API: auth/, analytics/, transactions/, members/, bank-reviews/
 │   └── knex/             # Database connection
 ├── migrations/           # Database schema migrations
 └── seeds/               # Initial data seeding
@@ -330,8 +516,7 @@ src/
 ```typescript
 // Authentication
 interface JwtPayload {
-  user_id: string;
-  telegram_id: string;
+  id: string; // Telegram user ID
   username?: string;
 }
 
@@ -357,10 +542,9 @@ enum Status {
 
 ## Development Notes
 
-- When `ENABLE_AUTH=false`, all protected endpoints use mock user data (development only)
+- When `ENABLE_AUTH=false`, all protected endpoints use mock user data (development only; env validation refuses it in production)
 - PayHere webhooks must be publicly accessible (no authentication)
-- Telegram InitData validation requires proper HMAC-SHA256 verification with 24-hour timestamp limit
-- Replay attack protection: InitData must be less than 24 hours old
+- Telegram InitData validation requires proper HMAC-SHA256 verification; the Mini App login takes initData at most 15 minutes old (legacy `/auth/telegram`: 1 hour)
 - Production environments always enforce authentication regardless of ENABLE_AUTH setting
 - Database uses UUID for packages, string IDs for users (Telegram ID)
 - All timestamps use PostgreSQL's automatic timestamp handling

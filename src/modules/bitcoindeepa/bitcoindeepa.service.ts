@@ -1,7 +1,22 @@
-import { Injectable } from '@nestjs/common';
-import { createHmac } from 'crypto';
-import axios from 'axios';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { Injectable, Logger } from '@nestjs/common';
+import type { KeyObject } from 'crypto';
+import axios, { AxiosResponse, Method } from 'axios';
+import {
+  COLLECT_SIGNING_VERSION,
+  loadEd25519Key,
+  SEND_SIGNING_VERSION,
+  sha256hex,
+  signBotRequest,
+} from './bot-signer';
+
+/**
+ * Why a send didn't go through. Settlement uses it to decide what to do next:
+ * - LOW_BALANCE: the DCA wallet lacked funds (retried when the bot reports a deposit)
+ * - REJECTED: the bot refused it, nothing was sent (bad recipient, limits, ...)
+ * - AUTH: signing, timestamp, nonce or IP problem (401/403) - a config issue
+ * - UNKNOWN: no answer or a 5xx - it may have gone through; retry with the SAME memo
+ */
+export type TransferFailure = 'LOW_BALANCE' | 'REJECTED' | 'AUTH' | 'UNKNOWN';
 
 export interface FundTransferRequest {
   amount: number; // satoshis
@@ -14,7 +29,49 @@ export interface FundTransferResponse {
   message?: string;
   transaction_id?: string;
   already_completed?: boolean; // True if transfer was already completed in a previous attempt
+  outcome_unknown?: boolean; // True if we got no response (timeout/network) - the transfer may have happened
+  failure?: TransferFailure;
+  /** 202: above the bot's approval threshold, waiting for a human in Telegram. Poll getSendStatus(). */
+  awaiting_approval_id?: string;
 }
+
+/** A collect request: we ask a user to pay the DCA wallet (sell flow). */
+export type CollectRequestStatus =
+  | 'pending'
+  | 'approved'
+  | 'declined'
+  | 'cancelled'
+  | 'expired';
+
+export interface CollectRequest {
+  id: string;
+  status: CollectRequestStatus;
+  /** true once the approved payment completed */
+  paid: boolean;
+  amount: number;
+  external_id?: string;
+  /** false: the bot couldn't message the user (blocked it); the app can still pay */
+  notified?: boolean;
+  expires_at?: string;
+  /** Set once approved: the user's P2P payment to us */
+  transfer?: {
+    id: string;
+    status: string;
+    error?: string;
+    confirm_by?: string;
+  };
+}
+
+/**
+ * - ok: the bot's answer
+ * - unknown: no answer, a 5xx, 429 or 409 in_progress. Safe to ask again:
+ *   create is idempotent on external_id, the others don't move anything
+ * - refused: a definite 4xx ({code, message} from the bot)
+ */
+export type CollectResult =
+  | { kind: 'ok'; request: CollectRequest }
+  | { kind: 'unknown'; message: string }
+  | { kind: 'refused'; status: number; code: string; message: string };
 
 export interface UserBalanceRequest {
   telegram_id: number;
@@ -32,32 +89,207 @@ export interface UserBalanceResponse {
   created_at?: string;
 }
 
+export interface UserTransactionsRequest {
+  telegram_id: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BotTransaction {
+  id: number;
+  time: string;
+  direction: 'incoming' | 'outgoing';
+  from_id: number;
+  to_id: number;
+  from_user?: string;
+  to_user?: string;
+  type: string;
+  amount: number;
+  amount_lkr: string;
+  memo?: string;
+  success: boolean;
+}
+
+export interface UserTransactionsResponse {
+  success: boolean;
+  telegram_id: number;
+  count: number;
+  limit: number;
+  offset: number;
+  transactions: BotTransaction[];
+  message?: string;
+}
+
+/** GET /api/v1/send/status/{id}: an approval-gated send */
+export type SendApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'executed'
+  | 'rejected'
+  | 'expired'
+  | 'in_flight';
+
+export interface SendStatusResponse {
+  id?: string;
+  status: SendApprovalStatus;
+  amount?: number;
+  memo?: string;
+  payment_hash?: string;
+}
+
+// The bot's 400 message for a sending wallet without enough sats
+const LOW_BALANCE_PATTERN =
+  /insufficient|low balance|not enough|balance too low/i;
+const APPROVAL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const MAX_HISTORY_PAGE = 250; // the bot's max `limit` for /usertransactions
+const MEMO_LOOKUP_PAGES = 4;
+
 @Injectable()
 export class BitcoinDeepaService {
-  private readonly apiUrl: string;
-  private readonly hmacSecret: string;
-  private readonly timeout: number;
-  private readonly sendEndpoint = '/api/v1/send';
-  private readonly balanceEndpoint = '/api/v1/userbalance';
+  private readonly logger = new Logger(BitcoinDeepaService.name);
 
-  constructor(private readonly dbLogger: DatabaseLoggerService) {
+  private readonly apiUrl: string;
+  private readonly walletId: string;
+  private readonly privateKey: KeyObject | null;
+  private readonly timeout: number;
+  /** An invoice payment can wait up to 60s before /send answers (doc: >= 95s) */
+  private readonly sendTimeout: number;
+  private readonly sendEndpoint = '/api/v1/send';
+  private readonly sendStatusEndpoint = '/api/v1/send/status';
+  private readonly collectEndpoint = '/api/v1/collect';
+  private readonly balanceEndpoint = '/api/v1/userbalance';
+  private readonly userTransactionsEndpoint = '/api/v1/usertransactions';
+
+  constructor() {
     this.apiUrl = process.env.BITCOINDEEPA_API_URL || '';
-    this.hmacSecret = process.env.BITCOINDEEPA_HMAC_SECRET || '';
+    this.walletId = process.env.BITCOINDEEPA_WALLET_ID || '';
+    this.privateKey = loadEd25519Key(
+      process.env.BITCOINDEEPA_PRIVATE_KEY_PEM,
+      'BITCOINDEEPA_PRIVATE_KEY_PEM',
+      this.logger,
+    );
     this.timeout = parseInt(process.env.BITCOINDEEPA_TIMEOUT || '10000', 10);
+    this.sendTimeout = parseInt(
+      process.env.BITCOINDEEPA_SEND_TIMEOUT || '95000',
+      10,
+    );
+    if (process.env.BITCOINDEEPA_COLLECT_MOCK === 'true') {
+      // The mock is gone: a sale only pays out once the bot says it was paid
+      this.logger.warn(
+        'BITCOINDEEPA_COLLECT_MOCK is set but no longer does anything: sell debits always go to the bot. Remove it.',
+      );
+    }
+  }
+
+  isConfigured(): boolean {
+    return !!(this.apiUrl && this.walletId && this.privateKey);
   }
 
   /**
-   * Generate HMAC signature for API authentication
-   * Combines: METHOD + PATH + TIMESTAMP + BODY
+   * A request to the bot, signed with Ed25519 over
+   *   BDB-SEND-ED25519-V1 \n METHOD \n PATH \n QUERY \n TIMESTAMP \n NONCE \n sha256hex(body)
+   * The body is serialized once and those exact bytes are hashed and sent.
+   * Every call (retries included) gets a fresh timestamp and nonce: the bot
+   * rejects a reused nonce.
+   *
+   * With `collectPayerId` (creating a collect request) the user to charge is
+   * named in X-BDB-User and signed, as the line before the body hash:
+   *   BDB-COLLECT-ED25519-V1 \n ... \n NONCE \n PAYER TELEGRAM ID \n sha256hex(body)
    */
-  private generateHmacSignature(
-    httpMethod: string,
-    urlPath: string,
-    timestamp: string,
-    body: string,
-  ): string {
-    const message = `${httpMethod}${urlPath}${timestamp}${body}`;
-    return createHmac('sha256', this.hmacSecret).update(message).digest('hex');
+  private signedRequest<T>(
+    method: Extract<Method, 'GET' | 'POST'>,
+    pathWithQuery: string,
+    body?: object,
+    timeoutMs = this.timeout,
+    collectPayerId?: string,
+  ): Promise<AxiosResponse<T>> {
+    if (!this.privateKey) {
+      return Promise.reject(new Error('BitcoinDeepa API is not configured'));
+    }
+    const raw = body ? JSON.stringify(body) : '';
+    const signed = signBotRequest({
+      version: collectPayerId ? COLLECT_SIGNING_VERSION : SEND_SIGNING_VERSION,
+      method,
+      pathWithQuery,
+      hashedLines: collectPayerId
+        ? [collectPayerId, sha256hex(raw)]
+        : [sha256hex(raw)],
+      key: this.privateKey,
+    });
+
+    return axios.request<T>({
+      method,
+      url: `${this.apiUrl}${pathWithQuery}`,
+      data: body ? raw : undefined,
+      // Keep axios from re-serializing: the signed bytes must be the sent bytes
+      transformRequest: [(data: unknown) => data],
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Wallet-ID': this.walletId,
+        ...(collectPayerId ? { 'X-BDB-User': collectPayerId } : {}),
+        ...signed,
+      },
+      timeout: timeoutMs,
+    });
+  }
+
+  private static errorMessage(error: any, fallback: string): string {
+    return String(
+      error?.response?.data?.error ||
+        error?.response?.data?.message ||
+        error?.message ||
+        fallback,
+    );
+  }
+
+  /**
+   * What a refused send means. Auth (401/403) is checked first: its message
+   * must never be read as a duplicate memo. "Already completed" (the memo is
+   * the bot's idempotency key) only counts on a plain rejection (400/409).
+   */
+  private static classifyRejection(
+    httpStatus: number,
+    message: string,
+  ): FundTransferResponse {
+    if (httpStatus === 401 || httpStatus === 403) {
+      return { success: false, message, failure: 'AUTH' };
+    }
+    const lower = String(message).toLowerCase();
+    const duplicateMemo =
+      (httpStatus === 400 || httpStatus === 409 || httpStatus === 200) &&
+      (lower.includes('already completed') || lower.includes('already exists'));
+    if (duplicateMemo) {
+      return { success: false, message, already_completed: true };
+    }
+    return {
+      success: false,
+      message,
+      failure: LOW_BALANCE_PATTERN.test(message) ? 'LOW_BALANCE' : 'REJECTED',
+    };
+  }
+
+  /**
+   * Turn a failed send/collect into a result:
+   * - no HTTP response (timeout, connection reset) or a 5xx: it may still have
+   *   gone through (outcome_unknown). Resending with the SAME memo is safe: a
+   *   memo that already completed comes back as "already completed".
+   * - otherwise the bot refused it (see classifyRejection)
+   */
+  private static toFailedTransfer(
+    error: unknown,
+    message: string,
+  ): FundTransferResponse {
+    const httpStatus = (error as { response?: { status?: number } })?.response
+      ?.status;
+    if (httpStatus === undefined || Number(httpStatus) >= 500) {
+      return {
+        success: false,
+        message,
+        outcome_unknown: true,
+        failure: 'UNKNOWN',
+      };
+    }
+    return BitcoinDeepaService.classifyRejection(Number(httpStatus), message);
   }
 
   /**
@@ -68,133 +300,299 @@ export class BitcoinDeepaService {
     toTelegramId: string,
     memo: string,
   ): Promise<FundTransferResponse> {
+    const requestBody: FundTransferRequest = {
+      amount: Number(amount),
+      to: toTelegramId,
+      memo,
+    };
+
     try {
-      const url = `${this.apiUrl}${this.sendEndpoint}`;
-      const timestamp = Math.floor(Date.now() / 1000);
-      const httpMethod = 'POST';
+      const response = await this.signedRequest<
+        FundTransferResponse & {
+          status?: string;
+          payment_hash?: string;
+          id?: string;
+        }
+      >('POST', this.sendEndpoint, requestBody, this.sendTimeout);
+      const data = response.data ?? { success: false };
 
-      const requestBody: FundTransferRequest = {
-        amount: Number(amount),
-        to: toTelegramId,
-        memo,
-      };
+      if (response.status === 202) {
+        if (data.status === 'awaiting_approval') {
+          const id = BitcoinDeepaService.approvalId(data);
+          if (id) {
+            this.logger.warn(
+              `BitcoinDeepa transfer of ${amount} sats to user ${toTelegramId} is awaiting approval (bot transaction ${id})`,
+            );
+            return {
+              success: false,
+              message: data.message,
+              awaiting_approval_id: id,
+            };
+          }
+        }
+        // 202 "pending" is an invoice still routing - we never send invoices,
+        // so anything else accepted-but-not-done is an unknown outcome
+        this.logger.error(
+          `BitcoinDeepa transfer of ${amount} sats to user ${toTelegramId} returned 202 ${data.status ?? ''}: ${data.message ?? ''}`,
+        );
+        return {
+          success: false,
+          message:
+            data.message ?? `Accepted but not completed (${data.status})`,
+          outcome_unknown: true,
+          failure: 'UNKNOWN',
+        };
+      }
 
-      const bodyString = JSON.stringify(requestBody);
-      const signature = this.generateHmacSignature(
-        httpMethod,
-        this.sendEndpoint,
-        timestamp.toString(),
-        bodyString,
+      if (!data.success) {
+        return BitcoinDeepaService.classifyRejection(
+          response.status,
+          data.message ?? 'Fund transfer failed',
+        );
+      }
+      this.logger.log(
+        `BitcoinDeepa transfer OK: ${amount} sats to user ${toTelegramId} (status ${response.status})`,
       );
-
-      const headers = {
-        'Content-Type': 'application/json',
-        'X-HMAC-Signature': signature,
-        'X-Timestamp': timestamp.toString(),
-      };
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.transferFunds: Attempting fund transfer of ${amount} satoshis to user ${toTelegramId} at ${this.sendEndpoint}`,
-      );
-
-      const response = await axios.post<FundTransferResponse>(
-        url,
-        requestBody,
-        {
-          headers,
-          timeout: this.timeout,
-        },
-      );
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.transferFunds: Fund transfer successful - ${amount} satoshis to user ${toTelegramId}, status: ${response.status}`,
-      );
-
-      return response.data;
+      return data;
     } catch (error: any) {
-      // Extract error message from response (BitcoinDeepa uses 'error' field, not 'message')
-      const errorMessage =
-        error.response?.data?.error ||
-        error.response?.data?.message ||
-        error.message ||
-        'Fund transfer failed';
-
-      // Log full error details for debugging
-      await this.dbLogger.error(
-        `BitcoinDeepaService.transferFunds: Fund transfer failed for ${amount} satoshis to user ${toTelegramId}: ${errorMessage} (status: ${error.response?.status})`,
+      const message = BitcoinDeepaService.errorMessage(
+        error,
+        'Fund transfer failed',
       );
-
-      // Check if this is an "already completed" error (transfer actually succeeded)
-      const isAlreadyCompleted =
-        errorMessage.toLowerCase().includes('already completed') ||
-        errorMessage.toLowerCase().includes('already exists');
-
-      // Return a standardized error response
-      return {
-        success: false,
-        message: errorMessage,
-        already_completed: isAlreadyCompleted,
-      };
+      this.logger.error(
+        `BitcoinDeepa transfer failed: ${amount} sats to user ${toTelegramId}: ${message} (status: ${error.response?.status})`,
+      );
+      return BitcoinDeepaService.toFailedTransfer(error, message);
     }
   }
 
   /**
-   * Validate configuration on service initialization
+   * The approval id of a 202: a structured field if the bot sends one,
+   * otherwise the id after "Transaction ID: " in the message (the documented
+   * way). Only the id's own characters, so trailing punctuation isn't taken.
    */
-  async getUserBalance(telegramId: number): Promise<UserBalanceResponse> {
+  private static approvalId(data: {
+    id?: string;
+    transaction_id?: string;
+    message?: string;
+  }): string | undefined {
+    const structured = data.transaction_id ?? data.id;
+    if (structured && APPROVAL_ID_PATTERN.test(structured)) return structured;
+    return /Transaction ID:\s*([A-Za-z0-9_-]+)/i.exec(data.message ?? '')?.[1];
+  }
+
+  /**
+   * Status of a send that was held for approval. 'NOT_FOUND' when the bot
+   * doesn't know the id (404); null when it can't be read now (network, 5xx).
+   */
+  async getSendStatus(
+    transactionId: string,
+  ): Promise<SendStatusResponse | 'NOT_FOUND' | null> {
     try {
-      const url = `${this.apiUrl}${this.balanceEndpoint}`;
-      const timestamp = Math.floor(Date.now() / 1000);
-      const httpMethod = 'POST';
-
-      const requestBody: UserBalanceRequest = {
-        telegram_id: telegramId,
-      };
-
-      const bodyString = JSON.stringify(requestBody);
-      const signature = this.generateHmacSignature(
-        httpMethod,
-        this.balanceEndpoint,
-        timestamp.toString(),
-        bodyString,
+      const response = await this.signedRequest<SendStatusResponse>(
+        'GET',
+        `${this.sendStatusEndpoint}/${encodeURIComponent(transactionId)}`,
       );
-
-      const headers = {
-        'Content-Type': 'application/json',
-        'X-HMAC-Signature': signature,
-        'X-Timestamp': timestamp.toString(),
-      };
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.getUserBalance: Fetching balance for user ${telegramId} at ${this.balanceEndpoint}`,
-      );
-
-      const response = await axios.post<UserBalanceResponse>(url, requestBody, {
-        headers,
-        timeout: this.timeout,
-      });
-
-      await this.dbLogger.info(
-        `BitcoinDeepaService.getUserBalance: Balance fetch successful for user ${telegramId}, status: ${response.status}`,
-      );
-
-      return response.data;
+      return response.data?.status ? response.data : null;
     } catch (error: any) {
-      await this.dbLogger.error(
-        `BitcoinDeepaService.getUserBalance: Balance fetch failed for user ${telegramId}: ${error.message}`,
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return 'NOT_FOUND';
+      }
+      this.logger.error(
+        `BitcoinDeepa send status for ${transactionId} failed: ${BitcoinDeepaService.errorMessage(error, 'Status fetch failed')} (status: ${error.response?.status})`,
       );
-
-      return {
-        success: false,
-        message:
-          error.response?.data?.message ||
-          error.message ||
-          'Balance fetch failed',
-      };
+      return null;
     }
   }
 
-  isConfigured(): boolean {
-    return !!(this.apiUrl && this.hmacSecret);
+  /**
+   * Whether the user received the settlement transfer for this payment: a
+   * successful incoming transfer whose memo ends in `(Ref: <paymentId>)` and
+   * whose amount is the payment's sats (checks the latest MEMO_LOOKUP_PAGES
+   * pages of their bot history). Matched on the reference, not the whole
+   * memo, because the memo format changed between releases and either may
+   * have sent it. Null when the history can't be read - the caller must not
+   * assume either way.
+   */
+  async findSettlementTransfer(
+    telegramId: number,
+    paymentId: string,
+    sats: number | string,
+  ): Promise<boolean | null> {
+    const ref = `(Ref: ${paymentId})`;
+    for (let page = 0; page < MEMO_LOOKUP_PAGES; page++) {
+      const history = await this.getUserTransactions(
+        telegramId,
+        MAX_HISTORY_PAGE,
+        page * MAX_HISTORY_PAGE,
+      );
+      if (!history.success) return null;
+      const found = history.transactions.some(
+        (tx) =>
+          tx.direction === 'incoming' &&
+          tx.success &&
+          (tx.memo ?? '').endsWith(ref) &&
+          Number(tx.amount) === Number(sats),
+      );
+      if (found) return true;
+      if (history.transactions.length < MAX_HISTORY_PAGE) return false;
+    }
+    return false;
+  }
+
+  /**
+   * Ask a user to pay the DCA wallet (POST /api/v1/collect). The payer is not
+   * in the body: their Telegram id goes in X-BDB-User and the signed text
+   * (BDB-COLLECT-ED25519-V1). The bot must have linked them (a login through
+   * its /api/v1/init), else 403 payer_not_linked. external_id makes it
+   * idempotent: asking again returns the same request (200 instead of 201).
+   */
+  createCollect(
+    payerTelegramId: string,
+    amount: number,
+    memo: string,
+    externalId: string,
+  ): Promise<CollectResult> {
+    if (!/^[1-9][0-9]{0,19}$/.test(payerTelegramId)) {
+      // Never sign or send something that isn't a Telegram id
+      return Promise.resolve({
+        kind: 'refused',
+        status: 400,
+        code: 'invalid_payer',
+        message: 'The payer is not a Telegram id',
+      });
+    }
+    return this.collectCall(
+      'POST',
+      this.collectEndpoint,
+      { amount: Number(amount), memo, external_id: externalId },
+      payerTelegramId,
+    );
+  }
+
+  getCollect(id: string): Promise<CollectResult> {
+    return this.collectCall(
+      'GET',
+      `${this.collectEndpoint}/${encodeURIComponent(id)}`,
+    );
+  }
+
+  /** Withdraw a pending request. 409 request_closed: it was answered first. */
+  cancelCollect(id: string): Promise<CollectResult> {
+    return this.collectCall(
+      'POST',
+      `${this.collectEndpoint}/${encodeURIComponent(id)}/cancel`,
+      {},
+    );
+  }
+
+  private async collectCall(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: object,
+    payerTelegramId?: string,
+  ): Promise<CollectResult> {
+    try {
+      const response = await this.signedRequest<CollectRequest>(
+        method,
+        path,
+        body,
+        this.timeout,
+        payerTelegramId,
+      );
+      return { kind: 'ok', request: response.data };
+    } catch (error: unknown) {
+      const response = (
+        error as {
+          response?: {
+            status?: number;
+            data?: { code?: unknown; message?: unknown };
+          };
+        }
+      )?.response;
+      const status = response?.status;
+      const data = response?.data;
+      const code = typeof data?.code === 'string' ? data.code : '';
+      const message = BitcoinDeepaService.errorMessage(error, 'Collect failed');
+      const unknown =
+        status === undefined ||
+        status >= 500 ||
+        status === 429 ||
+        (status === 409 && code === 'in_progress');
+      this.logger[unknown ? 'warn' : 'error'](
+        `BitcoinDeepa ${method} ${path}: ${status ?? 'no answer'} ${code} ${message}`,
+      );
+      if (unknown) return { kind: 'unknown', message };
+      if (status === 401 || (status === 403 && !code)) {
+        // Our key, wallet id, clock or IP (a plain-text 403 is the allowlist)
+        return { kind: 'refused', status, code: 'auth', message };
+      }
+      return { kind: 'refused', status, code, message };
+    }
+  }
+
+  async getUserBalance(telegramId: number): Promise<UserBalanceResponse> {
+    const requestBody: UserBalanceRequest = { telegram_id: telegramId };
+    // No secrets here: the signature, timestamp and nonce are added per call
+    this.logger.log(
+      `BitcoinDeepa balance request: POST ${this.apiUrl}${this.balanceEndpoint} wallet=${this.walletId} body=${JSON.stringify(requestBody)}`,
+    );
+    try {
+      const response = await this.signedRequest<UserBalanceResponse>(
+        'POST',
+        this.balanceEndpoint,
+        requestBody,
+      );
+      return response.data;
+    } catch (error: any) {
+      const message = BitcoinDeepaService.errorMessage(
+        error,
+        'Balance fetch failed',
+      );
+      this.logger.error(
+        `BitcoinDeepa balance fetch failed for user ${telegramId}: ${message}`,
+      );
+      return { success: false, message };
+    }
+  }
+
+  /**
+   * Fetch a user's bot transaction (sats send/receive) history via BitcoinDeepa API
+   */
+  async getUserTransactions(
+    telegramId: number,
+    limit = 100,
+    offset = 0,
+  ): Promise<UserTransactionsResponse> {
+    const requestBody: UserTransactionsRequest = {
+      telegram_id: telegramId,
+      limit,
+      offset,
+    };
+    try {
+      const response = await this.signedRequest<UserTransactionsResponse>(
+        'POST',
+        this.userTransactionsEndpoint,
+        requestBody,
+      );
+      return response.data;
+    } catch (error: any) {
+      const message = BitcoinDeepaService.errorMessage(
+        error,
+        'Fetching transactions failed',
+      );
+      this.logger.error(
+        `BitcoinDeepa transactions fetch failed for user ${telegramId}: ${message} (status: ${error.response?.status})`,
+      );
+      return {
+        success: false,
+        telegram_id: telegramId,
+        count: 0,
+        limit,
+        offset,
+        transactions: [],
+        message,
+      };
+    }
   }
 }

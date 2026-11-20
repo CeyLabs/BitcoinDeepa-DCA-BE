@@ -5,6 +5,7 @@ export enum PaymentProcessor {
 
 export interface Subscription {
   payhere_sub_id: string; // Primary key
+  payhere_order_id?: string | null; // PayHere order_id the subscription was created with
   user_id: string;
   package_id: string;
   is_active: boolean;

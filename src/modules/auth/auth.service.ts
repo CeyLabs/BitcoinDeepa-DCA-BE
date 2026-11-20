@@ -1,9 +1,9 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as crypto from 'crypto';
 import * as dayjs from 'dayjs';
 import type { JWTPayload, JWTVerifyGetKey } from 'jose';
-import { DatabaseLoggerService } from '../knex/database-logger.service';
+import { errorMessage } from '../../common/error-message';
 
 const TELEGRAM_OIDC_ISSUER = 'https://oauth.telegram.org';
 const TELEGRAM_OIDC_JWKS_URL =
@@ -45,13 +45,19 @@ export interface TelegramInitData {
   hash: string;
 }
 
+/**
+ * The Mini App exchanges initData for a session once, at launch, so a short
+ * window limits how long a leaked initData can be replayed. Kept under the
+ * bot's 1 h init_data_max_age: the same initData goes on to its /init.
+ */
+export const MINIAPP_INITDATA_MAX_AGE_SECONDS = 15 * 60;
+
+/** Why a Telegram OIDC id_token was refused (the web login's ?error= code) */
+export type OidcRejection = 'missing_telegram_id' | 'invalid_id_token';
+
 export interface JwtPayload {
   id: string;
   username?: string;
-}
-
-export interface TelegramOidcAuthDto {
-  id_token: string;
 }
 
 // Claims Telegram puts in the id_token — see
@@ -71,22 +77,27 @@ export interface TelegramOidcClaims extends JWTPayload {
 
 @Injectable()
 export class AuthService {
-  constructor(
-    private readonly jwtService: JwtService,
-    private readonly dbLogger: DatabaseLoggerService,
-  ) {}
+  private readonly logger = new Logger(AuthService.name);
 
-  async verifyTelegramInitData(
+  constructor(private readonly jwtService: JwtService) {}
+
+  /**
+   * Mini App initData: HMAC-SHA256 keyed with HMAC("WebAppData", botToken)
+   * over the sorted key=value lines (all but hash), constant-time compare,
+   * and auth_date at most maxAgeSeconds old. Separate from the OIDC check.
+   */
+  verifyTelegramMiniAppInitData(
     initData: string,
     botToken: string,
-  ): Promise<boolean> {
+    maxAgeSeconds = MINIAPP_INITDATA_MAX_AGE_SECONDS,
+  ): boolean {
     try {
       const parsed = new URLSearchParams(initData);
       const hash = parsed.get('hash');
       const authDate = parsed.get('auth_date');
 
       if (!hash || !authDate) {
-        await this.dbLogger.warn(
+        this.logger.warn(
           'Missing hash or auth_date in Telegram init data verification',
         );
         return false;
@@ -95,19 +106,16 @@ export class AuthService {
       // Validate timestamp to prevent replay attacks
       const authTimestamp = parseInt(authDate, 10);
       if (isNaN(authTimestamp)) {
-        await this.dbLogger.warn(
-          'Invalid timestamp format in Telegram init data',
-        );
+        this.logger.warn('Invalid timestamp format in Telegram init data');
         return false;
       }
 
-      const authTime = dayjs.unix(authTimestamp);
-      const currentTime = dayjs();
-      const maxAge = 24; // 24 hours
+      const ageSeconds = dayjs().diff(dayjs.unix(authTimestamp), 'second');
+      const maxClockSkewSeconds = 60;
 
-      if (currentTime.diff(authTime, 'hour') > maxAge) {
-        await this.dbLogger.warn(
-          `Expired Telegram auth data - age: ${currentTime.diff(authTime, 'hour')} hours (max: ${maxAge})`,
+      if (ageSeconds > maxAgeSeconds || ageSeconds < -maxClockSkewSeconds) {
+        this.logger.warn(
+          `Rejected Telegram auth data - age: ${ageSeconds}s (allowed: -${maxClockSkewSeconds}s to ${maxAgeSeconds}s)`,
         );
         return false;
       }
@@ -130,17 +138,19 @@ export class AuthService {
         .update(dataCheckString)
         .digest('hex');
 
-      const isValid = computedHash === hash;
+      const computed = Buffer.from(computedHash, 'hex');
+      const received = Buffer.from(hash, 'hex');
+      const isValid =
+        received.length === computed.length &&
+        crypto.timingSafeEqual(computed, received);
       if (!isValid) {
-        await this.dbLogger.warn(
-          'Hash verification failed for Telegram init data',
-        );
+        this.logger.warn('Hash verification failed for Telegram init data');
       }
 
       return isValid;
     } catch (error) {
-      await this.dbLogger.error(
-        `Exception during Telegram init data verification: ${error.message}`,
+      this.logger.error(
+        `Exception during Telegram init data verification: ${errorMessage(error)}`,
       );
       return false;
     }
@@ -149,36 +159,43 @@ export class AuthService {
   /**
    * Verifies a Telegram Login (OIDC) id_token: signature against Telegram's
    * JWKS, issuer, and audience (must match this app's Client ID from
-   * BotFather). jwtVerify also rejects expired tokens.
+   * BotFather). jwtVerify also rejects expired tokens. The numeric `id`
+   * claim (scope `profile`) is the Telegram user ID and our user id; `sub` is
+   * not, and is never used in its place: a token without `id` is refused
+   * (missing_telegram_id) rather than creating a second account.
    * https://core.telegram.org/bots/telegram-login#validating-id-tokens
    */
-  async verifyTelegramOidcToken(
+  async verifyTelegramOidcIdToken(
     idToken: string,
     clientId: string,
   ): Promise<TelegramOidcClaims> {
+    let payload: JWTPayload;
     try {
       const { jwtVerify } = await importJose();
       const jwks = await getTelegramJwks();
-      const { payload } = await jwtVerify(idToken, jwks, {
+      ({ payload } = await jwtVerify(idToken, jwks, {
         issuer: TELEGRAM_OIDC_ISSUER,
         audience: clientId,
-      });
-
-      const rawId = payload.id;
-      const isNumericId =
-        typeof rawId === 'number' ||
-        (typeof rawId === 'string' && /^\d+$/.test(rawId));
-      if (!isNumericId) {
-        throw new Error('id_token missing numeric "id" claim');
-      }
-
-      return { ...payload, id: String(rawId) } as TelegramOidcClaims;
+        // Telegram's default; update if BotFather's Login Widget > Advanced
+        // signing algorithm is changed.
+        algorithms: ['RS256'],
+      }));
     } catch (error) {
-      await this.dbLogger.warn(
-        `Telegram OIDC id_token verification failed: ${error.message}`,
+      this.logger.warn(
+        `Telegram OIDC id_token verification failed: ${errorMessage(error)}`,
       );
-      throw new UnauthorizedException('Invalid Telegram login token');
+      throw oidcRejected('invalid_id_token');
     }
+
+    const rawId = payload.id;
+    const isNumericId =
+      (typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId > 0) ||
+      (typeof rawId === 'string' && /^[1-9]\d*$/.test(rawId));
+    if (!isNumericId) {
+      this.logger.warn('Telegram OIDC id_token has no numeric "id" claim');
+      throw oidcRejected('missing_telegram_id');
+    }
+    return { ...payload, id: String(rawId) } as TelegramOidcClaims;
   }
 
   parseTelegramInitData(initData: string): TelegramInitData | null {
@@ -202,22 +219,16 @@ export class AuthService {
     }
   }
 
-  async generateJwt(payload: JwtPayload): Promise<string> {
+  generateJwt(payload: JwtPayload): string {
     const token = this.jwtService.sign(payload);
-    await this.dbLogger.info(`JWT token generated for user: ${payload.id}`);
+    this.logger.log(`JWT token generated for user: ${payload.id}`);
     return token;
   }
+}
 
-  async verifyJwt(token: string): Promise<JwtPayload> {
-    try {
-      const payload = this.jwtService.verify(token);
-      await this.dbLogger.info(
-        `JWT token verified for user: ${payload.telegram_id}`,
-      );
-      return payload;
-    } catch (error) {
-      await this.dbLogger.warn(`JWT verification failed: ${error.message}`);
-      throw error;
-    }
-  }
+function oidcRejected(code: OidcRejection): UnauthorizedException {
+  return new UnauthorizedException({
+    code,
+    message: 'Invalid Telegram login token',
+  });
 }

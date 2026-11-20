@@ -6,8 +6,10 @@
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"
   },
-  "collectCoverageFrom": [
-    "src/**/*.(t|j)s"
+  "setupFiles": [
+    "<rootDir>/support/e2e-env.ts",
+    "<rootDir>/support/silence-logger.ts"
   ],
-  "coverageDirectory": "../coverage"
+  "testTimeout": 30000,
+  "maxWorkers": 1
 }

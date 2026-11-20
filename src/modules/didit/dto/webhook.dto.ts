@@ -1,28 +1,45 @@
-import { DiditStatusType } from '../../user/enums/kyc-status.enum';
+import { Type } from 'class-transformer';
+import {
+  IsInt,
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+} from 'class-validator';
 
-export interface WebhookDto {
+/**
+ * Only the fields we use. Unknown fields are stripped by the global
+ * ValidationPipe; the HMAC is checked against the raw body, so stripping
+ * doesn't affect signature verification.
+ */
+export class WebhookDto {
+  @IsString()
+  @IsNotEmpty()
   session_id: string;
-  status: DiditStatusType;
-  verification_results?: {
-    id_verification?: {
-      status: 'passed' | 'failed';
-      document_type?: string;
-      country?: string;
-      confidence_score?: number;
-    };
-    liveness_detection?: {
-      status: 'passed' | 'failed';
-      confidence_score?: number;
-    };
-    face_match?: {
-      status: 'passed' | 'failed';
-      confidence_score?: number;
-    };
-    aml_screening?: {
-      status: 'passed' | 'failed';
-      risk_level?: string;
-    };
-  };
+
+  // Kept as a plain string: unknown Didit statuses are logged and ignored
+  // rather than rejected (which would make Didit retry forever).
+  @IsString()
+  @IsNotEmpty()
+  status: string;
+
+  @IsOptional()
+  @IsString()
   failure_reason?: string;
-  timestamp: string;
+
+  /** Same on every retry of one event: used to apply each event once */
+  @IsOptional()
+  @IsString()
+  event_id?: string;
+
+  /** Unix seconds, inside the signed body (unlike the X-Timestamp header) */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  timestamp?: number;
+
+  /** Didit's result; on approval it holds the name read from the ID */
+  @IsOptional()
+  @IsObject()
+  decision?: Record<string, unknown>;
 }

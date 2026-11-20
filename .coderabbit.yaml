@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+reviews:
+  auto_review:
+    enabled: true
+    # By default only PRs into the default branch (main) are reviewed.
+    # Regexes matched against the target branch: review PRs into any branch (dev, ...)
+    base_branches:
+      - ".*"
