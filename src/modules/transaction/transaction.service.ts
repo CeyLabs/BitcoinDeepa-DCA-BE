@@ -1356,6 +1356,7 @@ export class TransactionService {
       memo?: string;
       amount: number;
       success: boolean;
+      payment_hash?: string;
     },
   >(
     userId: string,
@@ -1366,7 +1367,7 @@ export class TransactionService {
         ? TransactionService.SETTLEMENT_REF.exec(row.memo ?? '')?.[1]
         : undefined;
     const refs = [...new Set(rows.map(refOf).filter((r): r is string => !!r))];
-    const purchases = new Map<string, { settled: boolean; sats: number }>();
+    const purchases = new Map<string, SettledPurchase>();
     if (refs.length > 0) {
       const found = await this.knexService
         .knex('transaction')
@@ -1378,21 +1379,24 @@ export class TransactionService {
             payhere_pay_id: string;
             settled: boolean;
             satoshis_purchased: string | number | null;
+            bot_payment_hash: string | null;
           }[]
-        >('payhere_pay_id', 'settled', 'satoshis_purchased');
+        >('payhere_pay_id', 'settled', 'satoshis_purchased', 'bot_payment_hash');
       for (const p of found) {
         purchases.set(p.payhere_pay_id, {
           settled: p.settled,
           sats: Number(p.satoshis_purchased),
+          paymentHash: p.bot_payment_hash,
         });
       }
     }
     return rows.map((row) => {
       const ref = refOf(row);
       const p = ref === undefined ? undefined : purchases.get(ref);
-      const isSettlement =
-        !!p && Number(row.amount) === p.sats && (p.settled || !row.success);
-      return { ...row, purchase_settlement: isSettlement };
+      return {
+        ...row,
+        purchase_settlement: !!p && isPurchaseSettlement(row, p),
+      };
     });
   }
 
@@ -1652,6 +1656,33 @@ const SALE_PAID_STATUSES: SellStatus[] = [
   SellStatus.REFUNDING,
   SellStatus.NEEDS_REVIEW,
 ];
+
+export interface SettledPurchase {
+  settled: boolean;
+  sats: number;
+  /** The settling transfer's hash, once known (transaction.bot_payment_hash) */
+  paymentHash?: string | null;
+}
+
+/**
+ * Is this bot-history row (already found by its "(Ref: <payment id>)" memo)
+ * the transfer that settled that purchase? Same sats, and:
+ * - a successful row: the purchase is settled, and when its transfer's hash is
+ *   known the row must carry that hash, so a transfer from someone else with
+ *   the memo copied into it isn't hidden;
+ * - a failed attempt: hidden too (nothing arrived, the purchase is listed).
+ * Purchases without a hash (older ones, or settled by finding the memo) keep
+ * the memo-only rule.
+ */
+export function isPurchaseSettlement(
+  row: { amount: number; success: boolean; payment_hash?: string },
+  p: SettledPurchase,
+): boolean {
+  if (Number(row.amount) !== p.sats) return false;
+  if (!row.success) return true;
+  if (!p.settled) return false;
+  return !p.paymentHash || row.payment_hash === p.paymentHash;
+}
 
 export interface SaleMatchRow {
   direction: string;

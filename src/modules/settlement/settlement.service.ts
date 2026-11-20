@@ -313,7 +313,7 @@ export class SettlementService {
       );
 
       if (result.success || result.already_completed) {
-        await this.markSettled(payhere_pay_id);
+        await this.markSettled(payhere_pay_id, result.payment_hash);
         this.logger.log(
           result.already_completed
             ? `Settlement for ${payhere_pay_id} was already completed in a previous attempt`
@@ -379,10 +379,20 @@ export class SettlementService {
    * being sent (too late to stop it), its own alert said the payment would
    * not be settled: correct that.
    */
-  private async markSettled(payhere_pay_id: string): Promise<void> {
+  private async markSettled(
+    payhere_pay_id: string,
+    paymentHash?: string,
+  ): Promise<void> {
     const [row] = await this.knexService
       .knex('transaction')
-      .update({ settled: true, settlement_failure: null, bot_send_id: null })
+      .update({
+        settled: true,
+        settlement_failure: null,
+        bot_send_id: null,
+        // The transfer's hash links the purchase to its bot-history row
+        // exactly (markPurchaseSettlements); never cleared once known.
+        ...(paymentHash ? { bot_payment_hash: paymentHash } : {}),
+      })
       .where('payhere_pay_id', payhere_pay_id)
       .returning<
         {
@@ -484,7 +494,7 @@ export class SettlementService {
       }
 
       if (status.status === 'executed') {
-        await this.markSettled(row.payhere_pay_id);
+        await this.markSettled(row.payhere_pay_id, status.payment_hash);
         this.logger.log(
           `Settled ${row.payhere_pay_id}: approved send ${row.bot_send_id} executed`,
         );

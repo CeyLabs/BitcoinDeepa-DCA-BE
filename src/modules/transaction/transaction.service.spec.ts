@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import {
+  isPurchaseSettlement,
   matchSalePayments,
   parseAmount,
   TransactionService,
@@ -213,5 +214,41 @@ describe('matchSalePayments', () => {
       payment(20000, 5792, '2026-11-19T12:00:00Z'), // a third: no sale left
     ];
     expect([...matchSalePayments(rows, orders).keys()].sort()).toEqual([0, 1]);
+  });
+});
+
+describe('isPurchaseSettlement', () => {
+  const ok = { amount: 500, success: true, payment_hash: 'h1' };
+
+  it('needs the same sats', () => {
+    expect(
+      isPurchaseSettlement(
+        { ...ok, amount: 499 },
+        { settled: true, sats: 500 },
+      ),
+    ).toBe(false);
+  });
+
+  it('by memo alone when the purchase has no hash', () => {
+    expect(isPurchaseSettlement(ok, { settled: true, sats: 500 })).toBe(true);
+    expect(isPurchaseSettlement(ok, { settled: false, sats: 500 })).toBe(false);
+  });
+
+  it('by hash when the purchase has one: a copied memo is not enough', () => {
+    const p = { settled: true, sats: 500, paymentHash: 'h1' };
+    expect(isPurchaseSettlement(ok, p)).toBe(true);
+    expect(isPurchaseSettlement({ ...ok, payment_hash: 'other' }, p)).toBe(
+      false,
+    );
+    expect(isPurchaseSettlement({ amount: 500, success: true }, p)).toBe(false);
+  });
+
+  it('hides a failed attempt either way', () => {
+    expect(
+      isPurchaseSettlement(
+        { amount: 500, success: false },
+        { settled: false, sats: 500 },
+      ),
+    ).toBe(true);
   });
 });
