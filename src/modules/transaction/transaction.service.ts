@@ -19,6 +19,7 @@ import { PayHereService } from '../payhere/payhere.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 import { errorMessage } from '../../common/error-message';
 import { computeBuyFees } from '../../common/buy-fees';
+import { transferMemo } from '../settlement/transfer-memo';
 import { saleCollectMemo, SellStatus } from '../sell/sell.constants';
 import {
   BUY_ORDER_EXPIRY_GRACE_MINUTES,
@@ -53,6 +54,8 @@ export interface Transaction {
   payhere_order_id?: string | null;
   /** Set = settlement skips it until a human releases it */
   hold_reason?: string | null;
+  /** The memo its sats are sent with (null = created by an earlier release) */
+  transfer_memo?: string | null;
   status: Status;
   btc_price_at_purchase?: number;
   satoshis_purchased?: number;
@@ -211,9 +214,9 @@ export class TransactionService {
    * a timeout) may already have been paid, so each needs checking on
    * BitcoinDeepa before it is retried.
    *
-   * Payments attempted before the memo became `DCA purchase (Ref: <id>)` were
-   * sent as `<package> DCA plan (Ref: <id>)`. The bot dedupes on the memo, so
-   * it won't recognise a retry of one of those: check those by hand first.
+   * Payments created by an earlier release (no `transfer_memo`) are still sent
+   * with that release's memo, `<package> DCA plan (Ref: <id>)`, so the bot
+   * recognises a retry of a send it already made.
    */
   async resetRetryCount(
     payhere_pay_id: string,
@@ -740,6 +743,8 @@ export class TransactionService {
         status,
         retry_count: 0,
         gross_amount: p.gross_amount,
+        // Fixed for the life of the payment: it is the bot's idempotency key
+        transfer_memo: transferMemo(payment_id, link.kind),
         ...(bitcoinData ?? {}),
       };
       await trx('transaction').insert(row);
