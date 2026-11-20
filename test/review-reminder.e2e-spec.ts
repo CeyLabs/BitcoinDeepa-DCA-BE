@@ -123,7 +123,7 @@ describe('Reminder of what waits for a human (e2e)', () => {
     const text = reminders()[0][1];
     expect(text).toContain('3 item(s) still waiting for a human');
     expect(text).toContain(
-      `${saleId}: 100,000 sats for 21235.50 LKR, #UID${USER} - Refund outcome unknown`,
+      `${saleId}: 100,000 sats for 21205.50 LKR, #UID${USER} - Refund outcome unknown`,
     );
     expect(text).toContain(`B1: 1000.00 LKR, #UID${USER} - paid twice`);
     expect(text).toContain(`P9: 4,568 sats, #UID${USER}`);

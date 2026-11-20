@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AdminAdminsModule } from './admins/admin-admins.module';
 import { AdminAnalyticsModule } from './analytics/admin-analytics.module';
 import { AdminAuthModule } from './auth/admin-auth.module';
 import { AdminBankReviewsModule } from './bank-reviews/admin-bank-reviews.module';
@@ -16,6 +17,7 @@ import { AdminTransactionsModule } from './transactions/admin-transactions.modul
     AdminTransactionsModule,
     AdminMembersModule,
     AdminBankReviewsModule,
+    AdminAdminsModule,
   ],
 })
 export class AdminModule {}
