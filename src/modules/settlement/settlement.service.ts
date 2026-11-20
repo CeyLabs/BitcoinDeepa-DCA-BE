@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import axios from 'axios';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
 import {
@@ -13,29 +12,20 @@ import { errorMessage } from '../../common/error-message';
 import { legacyTransferMemo, transferMemo } from './transfer-memo';
 import {
   MAX_SETTLEMENT_ATTEMPTS,
-  sameAmount,
   type PurchaseKind,
 } from '../transaction/transaction.service';
 
 // The bot expires an approval after 24h; past this, a send still not final is stuck
 const APPROVAL_OVERDUE_MS = 25 * 60 * 60_000;
-// PayHere lookup failures don't use attempts, so they need their own alert:
-// once a waiting payment is this old (or at once on 401/403), at most hourly.
-const LOOKUP_FAILURE_ALERT_AFTER_MS = 30 * 60_000;
-const LOOKUP_FAILURE_ALERT_INTERVAL_MS = 60 * 60_000;
 
 interface UnsettledTransaction {
   payhere_pay_id: string;
-  gross_amount: string | number | null;
   kind: PurchaseKind;
   /** Recurring charges */
   payhere_sub_id: string | null;
-  /** One-time buys */
-  payhere_order_id: string | null;
   satoshis_purchased: number;
   retry_count: number;
   telegram_id: string;
-  created_at: Date;
   /** Why the last send didn't go through (UNKNOWN = may have gone, check the memo first) */
   settlement_failure: string | null;
   /** Null = created by an earlier release: sent with the legacy memo */
@@ -55,13 +45,11 @@ interface AwaitingApprovalTransaction {
 @Injectable()
 export class SettlementService {
   private readonly logger = new Logger(SettlementService.name);
-  private lastLookupFailureAlertAt = 0;
 
   constructor(
     private readonly knexService: KnexService,
     private readonly bitcoinDeepaService: BitcoinDeepaService,
     private readonly telegramLogger: TelegramLoggerService,
-    private readonly payHereService: PayHereService,
     private readonly redisService: RedisService,
   ) {}
 
@@ -81,11 +69,8 @@ export class SettlementService {
             't.payhere_pay_id',
             't.kind',
             't.payhere_sub_id',
-            't.payhere_order_id',
             't.satoshis_purchased',
-            't.gross_amount',
             't.retry_count',
-            't.created_at',
             't.settlement_failure',
             't.transfer_memo',
             'u.id as telegram_id',
@@ -121,9 +106,6 @@ export class SettlementService {
   private async tryTransactionSettlement(transaction: UnsettledTransaction) {
     const {
       payhere_pay_id,
-      kind,
-      payhere_sub_id,
-      payhere_order_id,
       telegram_id,
       satoshis_purchased,
       retry_count = 0,
@@ -174,7 +156,6 @@ export class SettlementService {
       return;
     }
 
-    let confirmed: boolean;
     try {
       confirmed = await this.isConfirmedByPayHere(transaction);
     } catch (error) {
@@ -217,8 +198,8 @@ export class SettlementService {
       const mayHaveGoneThrough =
         SettlementService.mayHaveGoneThrough(transaction);
 
-      // The claim and the PayHere lookup took a while. A chargeback that
-      // arrived meanwhile was told "it will not be settled": keep that true.
+      // A chargeback that arrived since the claim was told "it will not be
+      // settled": keep that true.
       const current = await this.knexService
         .knex('transaction')
         .select('status', 'settled', 'hold_reason')

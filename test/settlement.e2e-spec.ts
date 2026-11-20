@@ -1,5 +1,4 @@
 import * as request from 'supertest';
-import { AxiosError } from 'axios';
 import {
   createTestApp,
   resetData,
@@ -42,6 +41,22 @@ describe('Settlement (e2e)', () => {
       )
       .expect(200);
 
+  /**
+   * Makes the chargeback land between settlement's claim and its transfer
+   * (memoFor runs right after the claim is committed).
+   */
+  const chargebackAfterClaim = () => {
+    const target = settlement as unknown as {
+      memoFor: (t: unknown) => Promise<string>;
+    };
+    const original: (t: unknown) => Promise<string> =
+      target.memoFor.bind(settlement);
+    jest.spyOn(target, 'memoFor').mockImplementationOnce(async (t) => {
+      await chargeback();
+      return original(t);
+    });
+  };
+
   beforeAll(async () => {
     ctx = await createTestApp();
     settlement = ctx.app.get(SettlementService);
@@ -50,10 +65,6 @@ describe('Settlement (e2e)', () => {
 
   beforeEach(async () => {
     await resetData(ctx);
-    // the lookup-failure alert throttle lives on the (shared) service
-    (
-      settlement as unknown as { lastLookupFailureAlertAt: number }
-    ).lastLookupFailureAlertAt = 0;
     // the deposit-callback fallback throttle also lives on a shared service
     resetDepositThrottle();
     const res = await request(ctx.app.getHttpServer())
@@ -642,138 +653,6 @@ describe('Settlement (e2e)', () => {
     await reset('P1').expect(404); // settled payments can't be reset
   });
 
-  it("doesn't pay when PayHere's amount differs from the recorded one", async () => {
-    ctx.payHerePayments.mockResolvedValueOnce([
-      { payment_id: 'P1', status: 'RECEIVED', amount: '1.00', order_id: null },
-    ]);
-    await settlement.retryUnsettledTransactions();
-    expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
-    expect(await tx()).toMatchObject({ settled: false, retry_count: 1 });
-  });
-
-  it('pays on id and status when PayHere lists no amount, and says so (daily)', async () => {
-    const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
-    ctx.payHerePayments.mockResolvedValue([
-      { payment_id: 'P1', status: 'RECEIVED', amount: null, order_id: null },
-    ]);
-    await settlement.retryUnsettledTransactions();
-    expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
-    const missing = () =>
-      alert.mock.calls.filter(([, text]) =>
-        String(text).includes('amount check is not running'),
-      );
-    expect(missing()).toHaveLength(1);
-
-    // a second such payment the same day: paid, no second alert
-    await ctx.knex('transaction').where({ payhere_pay_id: 'P1' }).update({
-      settled: false,
-      retry_count: 0,
-      last_retry_at: null,
-    });
-    await settlement.retryUnsettledTransactions();
-    expect(missing()).toHaveLength(1);
-    alert.mockRestore();
-  });
-
-  it('pays only payment ids PayHere confirms (stops replayed notifications)', async () => {
-    const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
-    ctx.payHerePayments.mockResolvedValueOnce([]); // PayHere never took P1
-    await settlement.retryUnsettledTransactions();
-    expect(ctx.payHerePayments).toHaveBeenCalledWith('S1');
-    expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
-    expect(await tx()).toMatchObject({ settled: false, retry_count: 1 });
-
-    // still unknown on the last attempt: give up and alert
-    await ctx
-      .knex('transaction')
-      .where({ payhere_pay_id: 'P1' })
-      .update({ retry_count: 4, last_retry_at: new Date(0) });
-    ctx.payHerePayments.mockResolvedValueOnce([
-      {
-        payment_id: 'P1',
-        status: 'CHARGEBACK',
-        amount: '1000',
-        order_id: null,
-      },
-    ]);
-    await settlement.retryUnsettledTransactions();
-    expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
-    expect(alert).toHaveBeenCalledWith(
-      'Settlement',
-      expect.stringContaining('Possibly a forged/replayed notification'),
-    );
-    alert.mockRestore();
-  });
-
-  it('a PayHere API outage delays settlement without using up attempts', async () => {
-    // far more failures than the 5-attempt budget
-    for (let i = 0; i < 7; i++) {
-      ctx.payHerePayments.mockRejectedValueOnce(new Error('PayHere 503'));
-      await settlement.retryUnsettledTransactions();
-      expect(await tx()).toMatchObject({ settled: false, retry_count: 0 });
-      await ctx
-        .knex('transaction')
-        .where({ payhere_pay_id: 'P1' })
-        .update({ last_retry_at: new Date(0) });
-    }
-    expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
-
-    // PayHere is back: paid normally
-    await settlement.retryUnsettledTransactions();
-    expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
-    expect(await tx()).toMatchObject({ settled: true });
-  });
-
-  it('alerts at once when PayHere rejects our credentials (401/403)', async () => {
-    const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
-    ctx.payHerePayments.mockRejectedValueOnce(
-      new AxiosError('Forbidden', '403', undefined, undefined, {
-        status: 403,
-      } as never),
-    );
-    await settlement.retryUnsettledTransactions();
-    expect(alert).toHaveBeenCalledWith(
-      'Settlement',
-      expect.stringContaining('PayHere rejected our credentials (HTTP 403)'),
-    );
-    alert.mockRestore();
-  });
-
-  it('alerts (at most hourly) when lookups keep failing for 30 min', async () => {
-    const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
-    const failOnce = async () => {
-      ctx.payHerePayments.mockRejectedValueOnce(new Error('PayHere 503'));
-      await settlement.retryUnsettledTransactions();
-      await ctx
-        .knex('transaction')
-        .where({ payhere_pay_id: 'P1' })
-        .update({ last_retry_at: new Date(0) });
-    };
-
-    await failOnce(); // fresh payment: just a delay, no alert
-    expect(alert).not.toHaveBeenCalled();
-
-    await ctx
-      .knex('transaction')
-      .where({ payhere_pay_id: 'P1' })
-      .update({ created_at: new Date(Date.now() - 31 * 60_000) });
-    await failOnce();
-    await failOnce();
-    expect(alert).toHaveBeenCalledTimes(1);
-    expect(alert).toHaveBeenCalledWith(
-      'Settlement',
-      expect.stringContaining('Payouts are paused'),
-    );
-    alert.mockRestore();
-  });
-
-  it('a failed PayHere lookup still waits for backoff before retrying', async () => {
-    ctx.payHerePayments.mockRejectedValueOnce(new Error('PayHere 503'));
-    await settlement.retryUnsettledTransactions();
-    await settlement.retryUnsettledTransactions(); // inside the backoff window
-    expect(ctx.payHerePayments).toHaveBeenCalledTimes(1);
-  });
-
   it('never settles a payment that is not SUCCESS', async () => {
     await ctx
       .knex('transaction')
@@ -785,18 +664,8 @@ describe('Settlement (e2e)', () => {
 
   it("doesn't settle when a chargeback lands after the claim, before the transfer", async () => {
     const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
-    // The claim is committed; the chargeback arrives during the PayHere lookup
-    ctx.payHerePayments.mockImplementationOnce(async () => {
-      await chargeback();
-      return [
-        {
-          payment_id: 'P1',
-          status: 'RECEIVED',
-          amount: '1000.00',
-          order_id: null,
-        },
-      ];
-    });
+    // The claim is committed; the chargeback arrives before the transfer
+    chargebackAfterClaim();
 
     await settlement.retryUnsettledTransactions();
     expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
@@ -823,18 +692,8 @@ describe('Settlement (e2e)', () => {
         .knex('transaction')
         .where({ payhere_pay_id: 'P1' })
         .update({ last_retry_at: new Date(0) });
-      // The next attempt is claimed; the chargeback arrives during the lookup
-      ctx.payHerePayments.mockImplementationOnce(async () => {
-        await chargeback();
-        return [
-          {
-            payment_id: 'P1',
-            status: 'RECEIVED',
-            amount: '1000.00',
-            order_id: null,
-          },
-        ];
-      });
+      // The next attempt is claimed; the chargeback arrives before the transfer
+      chargebackAfterClaim();
       alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
     });
     afterEach(() => alert.mockRestore());

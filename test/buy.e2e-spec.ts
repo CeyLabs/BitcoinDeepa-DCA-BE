@@ -475,7 +475,7 @@ describe('One-time buy (e2e)', () => {
         .expect(404);
     });
 
-    it('settles only after PayHere lists the payment, with a one-time memo', async () => {
+    it('settles a signed one-time payment with a one-time memo', async () => {
       const settlement = ctx.app.get(SettlementService);
       const { order_id, amount } = await newBuy(1000);
       await notify({
@@ -484,16 +484,6 @@ describe('One-time buy (e2e)', () => {
         payhere_amount: amount,
       }).expect(200);
 
-      ctx.payHereOrderPayments.mockResolvedValueOnce([]);
-      await settlement.retryUnsettledTransactions();
-      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
-      expect(ctx.payHereOrderPayments).toHaveBeenCalledWith(order_id);
-
-      // past the 2-minute backoff
-      await ctx
-        .knex('transaction')
-        .where({ payhere_pay_id: 'B1' })
-        .update({ last_retry_at: ctx.knex.raw("now() - interval '1 hour'") });
       await settlement.retryUnsettledTransactions();
       expect(ctx.bitcoinDeepa.transferFunds).toHaveBeenCalledTimes(1);
       const [sent, to, memo] = ctx.bitcoinDeepa.transferFunds.mock.calls[0];
