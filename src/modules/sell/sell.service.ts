@@ -562,9 +562,11 @@ export class SellService {
         );
       }
       throw new BadRequestException(
-        result.code === 'recipient_not_found'
-          ? 'Open the Bitcoin Deepa bot once, then try again.'
-          : result.message || 'Could not start the payment',
+        result.code === 'payer_not_linked'
+          ? 'Please log in again, then try again.'
+          : result.code === 'recipient_not_found'
+            ? 'Open the Bitcoin Deepa bot once, then try again.'
+            : result.message || 'Could not start the payment',
       );
     }
     // Unknown: stays COLLECTING and the sync cron asks again (same external_id)

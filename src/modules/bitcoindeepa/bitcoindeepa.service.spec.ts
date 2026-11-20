@@ -12,18 +12,25 @@ const call = (n = 0) => request.mock.calls[n][0] as AxiosRequestConfig;
 const headersOf = (config: AxiosRequestConfig) =>
   config.headers as Record<string, string>;
 
-/** Rebuild the signing string from what was sent and verify it with the public key */
-function verifySigned(config: AxiosRequestConfig): boolean {
+/**
+ * Rebuild the signing string from what was sent and verify it with the public
+ * key. With `collectPayer`: the collect-create string, which adds the payer.
+ */
+function verifySigned(
+  config: AxiosRequestConfig,
+  collectPayer?: string,
+): boolean {
   const h = headersOf(config);
   const url = new URL(config.url!);
   const raw = (config.data as string | undefined) ?? '';
   const message = [
-    'BDB-SEND-ED25519-V1',
+    collectPayer ? 'BDB-COLLECT-ED25519-V1' : 'BDB-SEND-ED25519-V1',
     config.method,
     url.pathname,
     url.search.replace(/^\?/, ''),
     h['X-Timestamp'],
     h['X-Nonce'],
+    ...(collectPayer ? [collectPayer] : []),
     createHash('sha256').update(raw).digest('hex'),
   ].join('\n');
   return verify(
@@ -369,7 +376,7 @@ describe('BitcoinDeepaService', () => {
         response: { status, data: { code, message: `msg ${code}` } },
       });
 
-    it('creates a signed request with the order id as external_id', async () => {
+    it('creates a request for the payer in X-BDB-User, signed with the collect string', async () => {
       request.mockResolvedValue({
         status: 201,
         data: { id: 'col-1', status: 'pending', paid: false, amount: 5000 },
@@ -383,13 +390,22 @@ describe('BitcoinDeepaService', () => {
       const config = call();
       expect(config.method).toBe('POST');
       expect(config.url).toBe('https://bd.test/api/v1/collect');
+      // The payer is not in the body: the header and the signed text name them
       expect(JSON.parse(config.data as string)).toEqual({
-        to: '42',
         amount: 5000,
         memo: 'Sell 5,000 sats',
         external_id: 'order-uuid-1',
       });
-      expect(verifySigned(config)).toBe(true);
+      expect(headersOf(config)['X-BDB-User']).toBe('42');
+      expect(verifySigned(config, '42')).toBe(true);
+      expect(verifySigned(config)).toBe(false);
+    });
+
+    it('never signs or sends a payer that is not a Telegram id', async () => {
+      await expect(
+        service.createCollect('dev-user-123', 5000, 'm', 'order-uuid-1'),
+      ).resolves.toMatchObject({ kind: 'refused', code: 'invalid_payer' });
+      expect(request).not.toHaveBeenCalled();
     });
 
     it('reads and cancels by id', async () => {
@@ -404,8 +420,11 @@ describe('BitcoinDeepaService', () => {
         method: 'POST',
         url: 'https://bd.test/api/v1/collect/col-1/cancel',
       });
+      // Send-signed, with no user header
       expect(verifySigned(call(0))).toBe(true);
       expect(verifySigned(call(1))).toBe(true);
+      expect(headersOf(call(0))['X-BDB-User']).toBeUndefined();
+      expect(headersOf(call(1))['X-BDB-User']).toBeUndefined();
     });
 
     it.each([

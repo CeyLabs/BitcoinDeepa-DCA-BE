@@ -11,10 +11,13 @@ import {
  * Ed25519 request signing shared by the bot's APIs. Each API signs its own
  * first line, so a signature for one can't be replayed on the other:
  * - send API (our DCA wallet): BDB-SEND-ED25519-V1 ... sha256hex(body)
+ * - collect create (our DCA wallet charges a user, named in X-BDB-User):
+ *   BDB-COLLECT-ED25519-V1 ... payer telegramId, sha256hex(body)
  * - P2P login (POST /api/v1/init only): BDB-P2P-ED25519-V1 ... sha256hex(credential), sha256hex(body)
  * - P2P calls for a linked user: BDB-P2P-ED25519-V2 ... telegramId, sha256hex(body)
  */
 export const SEND_SIGNING_VERSION = 'BDB-SEND-ED25519-V1';
+export const COLLECT_SIGNING_VERSION = 'BDB-COLLECT-ED25519-V1';
 export const P2P_SIGNING_VERSION = 'BDB-P2P-ED25519-V1';
 export const P2P_SIGNING_VERSION_V2 = 'BDB-P2P-ED25519-V2';
 
