@@ -7,7 +7,7 @@ import {
   type FundTransferResponse,
 } from '../bitcoindeepa/bitcoindeepa.service';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
-import { PayHereService } from '../payhere/payhere.service';
+import { PayHereService, payHereErrorDetail } from '../payhere/payhere.service';
 import { RedisService } from '../redis/redis.service';
 import { errorMessage } from '../../common/error-message';
 import { legacyTransferMemo, transferMemo } from './transfer-memo';
@@ -188,7 +188,7 @@ export class SettlementService {
         .where('payhere_pay_id', payhere_pay_id)
         .where('retry_count', currentRetryCount);
       this.logger.warn(
-        `Settlement of ${payhere_pay_id} postponed: PayHere payment lookup failed (${errorMessage(error)})`,
+        `Settlement of ${payhere_pay_id} postponed: PayHere payment lookup failed (${payHereErrorDetail(error)})`,
       );
       await this.alertLookupFailure(transaction, error);
       return;
@@ -579,12 +579,12 @@ export class SettlementService {
     this.lastLookupFailureAlertAt = Date.now();
 
     const reason = credentialsProblem
-      ? `PayHere rejected our credentials (HTTP ${status}) - check PAYHERE_APP_ID/PAYHERE_APP_SECRET, the app's API permissions (Subscription Manager / Retrieval) and PAYHERE_ENV`
+      ? `PayHere rejected our credentials (HTTP ${status}) - check PAYHERE_APP_ID/PAYHERE_APP_SECRET, the API key's permissions, its allowed domains and PayHere's IP allow-list for this server, and PAYHERE_ENV`
       : `PayHere payment lookups are still failing after ${Math.round(waitedMs / 60_000)} min`;
     await this.telegramLogger
       .logAlert(
         'Settlement',
-        `Payouts are paused: ${reason}. Latest error for ${transaction.payhere_pay_id}: ${errorMessage(error)}. Settlement resumes by itself once lookups succeed.`,
+        `Payouts are paused: ${reason}. Latest error for ${transaction.payhere_pay_id}: ${payHereErrorDetail(error)}. Settlement resumes by itself once lookups succeed.`,
       )
       .catch(() => undefined);
   }

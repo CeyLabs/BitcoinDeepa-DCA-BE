@@ -53,6 +53,35 @@ const PAYHERE_API_TIMEOUT_MS = 10000;
 // Refresh the OAuth token this long before PayHere says it expires
 const TOKEN_EXPIRY_MARGIN_MS = 60_000;
 
+const PAYHERE_ERROR_BODY_MAX_CHARS = 300;
+
+/**
+ * `errorMessage` plus what PayHere answered. Axios's own message is only
+ * "Request failed with status code 401", which can't tell a rejected token
+ * (`invalid_token`) from "Access denied for the domain" (the API key's
+ * domain / IP allow-list). PayHere echoes the access token in its
+ * `invalid_token` description, so that is cut out.
+ */
+export function payHereErrorDetail(error: unknown): string {
+  const message = errorMessage(error);
+  if (!axios.isAxiosError(error) || error.response === undefined) {
+    return message;
+  }
+  const data: unknown = error.response.data;
+  if (data === undefined || data === null || data === '') return message;
+  let body: string;
+  try {
+    body = typeof data === 'string' ? data : JSON.stringify(data);
+  } catch {
+    return message;
+  }
+  body = body
+    .replace(/(access token[^:"]*:\s*)[^\s"]+/gi, '$1[redacted]')
+    .replace(/("access_token"\s*:\s*")[^"]*/gi, '$1[redacted]')
+    .slice(0, PAYHERE_ERROR_BODY_MAX_CHARS);
+  return `${message}; PayHere answered: ${body}`;
+}
+
 /** `url` with `query` added; `url` unchanged when it isn't a valid URL. */
 function withQuery(url: string, query?: Record<string, string>): string {
   if (!query) return url;
@@ -174,8 +203,9 @@ export class PayHereService {
     }
     this.logger.log('Requesting PayHere OAuth token');
 
-    const appId = process.env.PAYHERE_APP_ID;
-    const appSecret = process.env.PAYHERE_APP_SECRET;
+    // Trimmed: a space or newline pasted with the value changes the Basic code
+    const appId = process.env.PAYHERE_APP_ID?.trim();
+    const appSecret = process.env.PAYHERE_APP_SECRET?.trim();
     if (!appId || !appSecret) {
       this.logger.error(
         'PayHere App ID/Secret not configured - OAuth token generation failed',
@@ -217,7 +247,7 @@ export class PayHereService {
       return response.data.access_token;
     } catch (error) {
       this.logger.error(
-        `PayHere OAuth token generation failed: ${errorMessage(error)}`,
+        `PayHere OAuth token generation failed: ${payHereErrorDetail(error)}`,
       );
       throw error;
     }
@@ -253,7 +283,7 @@ export class PayHereService {
     } catch (error) {
       this.forgetTokenIfRejected(error);
       this.logger.error(
-        `PayHere subscription cancellation failed for ${payhere_sub_id}: ${errorMessage(error)}`,
+        `PayHere subscription cancellation failed for ${payhere_sub_id}: ${payHereErrorDetail(error)}`,
       );
       throw error;
     }
