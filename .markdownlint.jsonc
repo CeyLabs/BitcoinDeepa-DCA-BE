@@ -1,0 +1,8 @@
+{
+  // Prose wraps at 120. Long URLs alone past the limit are fine (non-strict). Tables may run long.
+  "MD013": { "line_length": 120, "tables": false },
+  // HTML needed for light/dark <picture> images, pills, icons and the footer.
+  "MD033": {
+    "allowed_elements": ["a", "b", "br", "details", "em", "img", "p", "picture", "source", "strong", "sub", "summary"]
+  }
+}
