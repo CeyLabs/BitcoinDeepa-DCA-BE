@@ -27,6 +27,37 @@ describe('TelegramLoggerService.logAlert', () => {
       '⚠️ <b>ALERT (PayHere &lt;api&gt;)</b>\nError: &lt;html&gt;Bad Gateway&lt;/html&gt; &amp; retry',
     );
   });
+
+  describe('topic', () => {
+    const sentTopics = () =>
+      fetchMock.mock.calls.map(
+        (call) =>
+          (
+            JSON.parse((call as [string, { body: string }])[1].body) as {
+              message_thread_id?: string;
+            }
+          ).message_thread_id,
+      );
+    afterEach(() => {
+      delete process.env.LOG_TOPIC_ID;
+      delete process.env.ALERT_TOPIC_ID;
+    });
+
+    it('sends alerts to ALERT_TOPIC_ID and routine logs to LOG_TOPIC_ID', async () => {
+      process.env.LOG_TOPIC_ID = '7';
+      process.env.ALERT_TOPIC_ID = '9';
+      const service = new TelegramLoggerService();
+      await service.logAlert('Settlement', 'needs a human');
+      await service.logGenericAction('routine', { id: '42' });
+      expect(sentTopics()).toEqual(['9', '7']);
+    });
+
+    it('falls back to LOG_TOPIC_ID when ALERT_TOPIC_ID is unset', async () => {
+      process.env.LOG_TOPIC_ID = '7';
+      await new TelegramLoggerService().logAlert('Settlement', 'x');
+      expect(sentTopics()).toEqual(['7']);
+    });
+  });
 });
 
 describe('TelegramLoggerService log group limits', () => {
