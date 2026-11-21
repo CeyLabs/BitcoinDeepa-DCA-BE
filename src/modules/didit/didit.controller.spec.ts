@@ -14,7 +14,8 @@ const now = () => String(Math.floor(Date.now() / 1000));
 
 function setup(secret = SECRET, currentStatus: string = KycStatus.IN_PROGRESS) {
   // Real UserService (it owns the status logic), database calls stubbed
-  const realUserService = new UserService({} as never);
+  const telegramLogger = { logAlert: jest.fn().mockResolvedValue(undefined) };
+  const realUserService = new UserService({} as never, telegramLogger as never);
   const userService = {
     getUserByKycSessionId: jest
       .spyOn(realUserService, 'getUserByKycSessionId')
@@ -46,7 +47,7 @@ function setup(secret = SECRET, currentStatus: string = KycStatus.IN_PROGRESS) {
     redis,
     didit as unknown as DiditService,
   );
-  return { controller, userService, didit };
+  return { controller, userService, didit, telegramLogger };
 }
 
 function call(
@@ -185,6 +186,60 @@ describe('DiditController webhook', () => {
           kyc_rejection_reason: 'Document expired',
         }),
       );
+    });
+
+    it('Declined alerts the admins with the reason and issues', async () => {
+      const { controller, telegramLogger } = setup();
+      await call(controller, {
+        session_id: 's1',
+        status: 'Declined',
+        failure_reason: 'Document expired',
+        decision: {
+          id_verifications: [
+            {
+              status: 'Declined',
+              warnings: [
+                {
+                  risk: 'DOCUMENT_EXPIRED',
+                  short_description: 'Document has expired',
+                },
+              ],
+            },
+          ],
+          liveness_checks: [{ status: 'Approved', warnings: [] }],
+        },
+      });
+      expect(telegramLogger.logAlert).toHaveBeenCalledTimes(1);
+      const [source, text] = telegramLogger.logAlert.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(source).toBe('KYC');
+      expect(text).toContain('#UIDu1');
+      expect(text).toContain('Reason: Document expired');
+      expect(text).toContain('- ID: Document has expired');
+      expect(text).toContain('Didit session: s1');
+    });
+
+    it('does not alert again when the user is already declined', async () => {
+      const { controller, telegramLogger } = setup(SECRET, KycStatus.DECLINED);
+      await call(controller, { session_id: 's1', status: 'Declined' });
+      expect(telegramLogger.logAlert).not.toHaveBeenCalled();
+    });
+
+    it('a failing alert does not fail the webhook', async () => {
+      const { controller, userService, telegramLogger } = setup();
+      telegramLogger.logAlert.mockRejectedValue(new Error('telegram down'));
+      await expect(
+        call(controller, { session_id: 's1', status: 'Declined' }),
+      ).resolves.toEqual({ success: true });
+      expect(userService.updateKycStatus).toHaveBeenCalled();
+    });
+
+    it('does not alert for other results', async () => {
+      const { controller, telegramLogger } = setup();
+      await call(controller, { session_id: 's1', status: 'Abandoned' });
+      expect(telegramLogger.logAlert).not.toHaveBeenCalled();
     });
 
     it('Resubmitted maps to IN_PROGRESS', async () => {

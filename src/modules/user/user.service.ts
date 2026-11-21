@@ -6,6 +6,9 @@ import {
 } from '@nestjs/common';
 import { usernameUnavailableReason } from './username';
 import { KnexService } from '../knex/knex.service';
+import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
+import { kycIssuesFrom } from '../didit/kyc-issues.util';
+import { errorMessage } from '../../common/error-message';
 import {
   DiditStatusMapping,
   KycStatus,
@@ -88,7 +91,10 @@ export interface KycStatusInfo {
 export class UserService {
   private readonly logger = new Logger(UserService.name);
 
-  constructor(private readonly knexService: KnexService) {}
+  constructor(
+    private readonly knexService: KnexService,
+    private readonly telegramLogger: TelegramLoggerService,
+  ) {}
 
   async upsertTelegramUser(profile: TelegramProfile): Promise<void> {
     await this.knexService
@@ -237,6 +243,9 @@ export class UserService {
       failure_reason?: string | null;
       /** Name read from the ID; kept on approval, cleared otherwise */
       verifiedName?: string | null;
+      /** For the admin alert on a declined verification */
+      session_id?: string;
+      decision?: Record<string, unknown>;
     },
   ): Promise<KycStatus | null> {
     const dbStatus = DiditStatusMapping[didit.status];
@@ -281,7 +290,40 @@ export class UserService {
     this.logger.log(
       `Updated KYC status for user ${userId} to ${dbStatus} (Didit: ${didit.status}${rejectionReason ? `, reason: ${rejectionReason}` : ''})`,
     );
+
+    // Once per decline: a retried webhook for an already declined user
+    // doesn't alert again; a new attempt that is declined does
+    if (
+      dbStatus === KycStatus.DECLINED &&
+      currentStatus !== KycStatus.DECLINED
+    ) {
+      await this.alertKycDeclined(userId, rejectionReason, didit);
+    }
     return dbStatus;
+  }
+
+  /** Tell the admins a KYC attempt failed, and why (best effort, never throws). */
+  private async alertKycDeclined(
+    userId: string,
+    reason: string | null,
+    didit: { session_id?: string; decision?: Record<string, unknown> },
+  ): Promise<void> {
+    try {
+      const issues = kycIssuesFrom(didit.decision);
+      const lines = [
+        `KYC verification declined for user #UID${userId}`,
+        `Reason: ${reason ?? 'Verification declined'}`,
+        ...(issues.length > 0
+          ? ['Issues:', ...issues.map((issue) => `- ${issue}`)]
+          : []),
+        ...(didit.session_id ? [`Didit session: ${didit.session_id}`] : []),
+      ];
+      await this.telegramLogger.logAlert('KYC', lines.join('\n'));
+    } catch (error) {
+      this.logger.error(
+        `KYC decline alert for user ${userId} failed: ${errorMessage(error)}`,
+      );
+    }
   }
 
   async updateKycStatus(
