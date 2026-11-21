@@ -186,10 +186,16 @@ export class SettlementService {
       // PayHere's API failing says nothing about this payment, so it must not
       // use up settlement attempts (an outage would otherwise flag every
       // payment in it as forged). Give the attempt back; last_retry_at keeps
-      // the backoff, so it is retried later.
+      // the backoff, so it is retried later. The claim cleared
+      // settlement_failure: put it back (LOW_BALANCE is what the deposit
+      // callback looks for, UNKNOWN what makes the next attempt check the
+      // bot history first).
       await this.knexService
         .knex('transaction')
-        .update({ retry_count: retry_count })
+        .update({
+          retry_count: retry_count,
+          settlement_failure: transaction.settlement_failure,
+        })
         .where('payhere_pay_id', payhere_pay_id)
         .where('retry_count', currentRetryCount);
       this.logger.warn(
@@ -205,6 +211,49 @@ export class SettlementService {
           kind === 'ONE_TIME'
             ? `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for order ${payhere_order_id}`
             : `payment ${payhere_pay_id} is not listed as RECEIVED by PayHere for subscription ${payhere_sub_id}`;
+
+        // An earlier send that got no answer may already have paid the
+        // member: find out before treating this as never paid
+        if (SettlementService.mayHaveGoneThrough(transaction)) {
+          const found = await this.bitcoinDeepaService.findSettlementTransfer(
+            Number(telegram_id),
+            payhere_pay_id,
+            satoshis_purchased,
+          );
+          if (found) {
+            await this.markSettled(payhere_pay_id);
+            await this.telegramLogger.logAlert(
+              'Settlement',
+              `${satoshis_purchased} sats were already sent to user ${telegram_id} for ${payhere_pay_id} by an earlier attempt, but now ${message}. Check the PayHere dashboard - a manual reversal may be needed.`,
+            );
+            return;
+          }
+          // Keep the marker the claim cleared, so the next attempt checks
+          // the bot history again
+          await this.knexService
+            .knex('transaction')
+            .update({ settlement_failure: 'UNKNOWN' })
+            .where('payhere_pay_id', payhere_pay_id)
+            .where('retry_count', currentRetryCount);
+          if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
+            const alert = `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) stopped: ${message}. An earlier send got no answer and a transfer with "(Ref: ${payhere_pay_id})" ${found === null ? "couldn't be looked up" : "isn't in their bot history"}, so the sats may or may not have gone out - check the bot and the PayHere dashboard.`;
+            this.logger.error(alert);
+            await this.telegramLogger.logAlert('Settlement', alert);
+          } else {
+            this.logger.warn(
+              `Settlement of ${payhere_pay_id} deferred (attempt ${currentRetryCount}/${MAX_SETTLEMENT_ATTEMPTS}): ${message}`,
+            );
+          }
+          return;
+        }
+
+        // Put back what the claim cleared (e.g. LOW_BALANCE for the deposit
+        // callback)
+        await this.knexService
+          .knex('transaction')
+          .update({ settlement_failure: transaction.settlement_failure })
+          .where('payhere_pay_id', payhere_pay_id)
+          .where('retry_count', currentRetryCount);
         if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {
           const alert = `Settlement of ${payhere_pay_id} (${satoshis_purchased} sats to user ${telegram_id}) stopped: ${message}. Possibly a forged/replayed notification - check the PayHere dashboard.`;
           this.logger.error(alert);

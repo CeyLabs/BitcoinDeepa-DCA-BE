@@ -329,8 +329,16 @@ export class PayHereService {
         throw error;
       });
 
-    // PayHere reports its own errors as HTTP 200 with status -1. Reading that
-    // as "no payments" would make real payments look forged.
+    // -1 "No payments found" is a real (empty) answer, as for
+    // getPaymentsByOrderId. PayHere reports its errors as status -1 too, and
+    // reading those as "no payments" would make real payments look forged -
+    // so only that exact message counts as empty.
+    if (
+      response.data.status === -1 &&
+      /no payments found/i.test(response.data.msg ?? '')
+    ) {
+      return [];
+    }
     if (response.data.status !== 1) {
       throw new Error(
         `PayHere payment lookup for subscription ${payhere_sub_id} failed: ${response.data.msg}`,
@@ -402,5 +410,30 @@ export class PayHereService {
         p.amount === undefined || p.amount === null ? null : String(p.amount),
       order_id: p.order_id ?? null,
     }));
+  }
+
+  /**
+   * The payment PayHere lists under this payment_id, or null if it lists no
+   * such payment. Looks it up by order_id with the Retrieval API (a
+   * subscription's charges keep its checkout order_id), then, for a
+   * subscription not found there, with the Subscription Manager API. Used by
+   * the webhook and by settlement, since the md5sig doesn't cover
+   * payment_id. API errors throw: they say nothing about the payment.
+   */
+  async findPayment(
+    payment_id: string,
+    order_id: string | null,
+    payhere_sub_id?: string | null,
+  ): Promise<OrderPayment | null> {
+    const find = (payments: OrderPayment[]) =>
+      payments.find((p) => p.payment_id === String(payment_id)) ?? null;
+    if (order_id) {
+      const found = find(await this.getPaymentsByOrderId(order_id));
+      if (found) return found;
+    }
+    if (payhere_sub_id) {
+      return find(await this.getSubscriptionPayments(payhere_sub_id));
+    }
+    return null;
   }
 }

@@ -65,6 +65,37 @@ export class TransactionController {
       return res.status(HttpStatus.UNAUTHORIZED).send();
     }
 
+    // payment_id isn't signed: PayHere must know the payment before anything
+    // is logged or stored (a signed notification can be replayed with an
+    // invented payment_id)
+    let check: Awaited<ReturnType<TransactionService['checkWithPayHere']>>;
+    try {
+      check = await this.transactionService.checkWithPayHere(body);
+    } catch (error) {
+      this.logger.error(
+        `PayHere check failed for payment_id ${body.payment_id}: ${errorMessage(error)}`,
+      );
+      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send();
+    }
+    if (check.action === 'ignore') {
+      this.logger.warn(
+        `PayHere webhook ignored for order_id ${body.order_id}: ${check.reason}`,
+      );
+      return res.status(HttpStatus.OK).send('OK');
+    }
+    if (check.action === 'reject') {
+      this.logger.warn(
+        `PayHere webhook rejected for order_id ${body.order_id}: ${check.reason}`,
+      );
+      await this.telegramLoggerService
+        .logAlert(
+          'PayHere webhook',
+          `Refused a correctly signed SUCCESS notification: ${check.reason} (order_id ${body.order_id}, subscription_id ${body.subscription_id || '-'}, ${body.payhere_amount} ${body.payhere_currency}). Nothing was recorded. Most likely a replayed notification with an invented payment_id; if PayHere's dashboard does show this payment, it was refused because PayHere's API didn't list it yet - record it by hand.`,
+        )
+        .catch(() => undefined);
+      return res.status(HttpStatus.BAD_REQUEST).send();
+    }
+
     try {
       // Owner from our records - custom_1 is payer-editable
       const owner = await this.transactionService.getNotificationOwner(

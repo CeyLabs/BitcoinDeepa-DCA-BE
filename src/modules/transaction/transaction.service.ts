@@ -15,7 +15,7 @@ import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../telegram-logger/telegram-logger.service';
 import { BitcoinDeepaService } from '../bitcoindeepa/bitcoindeepa.service';
-import { PayHereService } from '../payhere/payhere.service';
+import { PayHereService, payHereErrorDetail } from '../payhere/payhere.service';
 import { PayHereNotificationDto } from './dto/payhere-notification.dto';
 import { errorMessage } from '../../common/error-message';
 import { computeBuyFees } from '../../common/buy-fees';
@@ -354,8 +354,8 @@ export class TransactionService {
    * A replay with an invented payment_id still passes this check, and
    * getting a genuine signed notification is easy: notify_url is an unsigned
    * checkout parameter, so a payer can point it at their own server. Such
-   * payments are recorded but never paid out - settlement only pays a
-   * payment_id that PayHere's API lists as RECEIVED.
+   * payments are refused before anything is recorded (checkWithPayHere), and
+   * settlement only pays a payment_id that PayHere's API lists as RECEIVED.
    */
   isValidPayHereSignature(data: PayHereNotificationParams): boolean {
     const merchantSecret = process.env.PAYHERE_MERCHANT_SECRET;
@@ -372,6 +372,95 @@ export class TransactionService {
       expected.length === received.length &&
       timingSafeEqual(Buffer.from(expected), Buffer.from(received))
     );
+  }
+
+  /**
+   * How long to wait before asking PayHere again when a SUCCESS
+   * notification's payment isn't listed yet (its API can lag the
+   * notification). Tests shorten it.
+   */
+  static payHereLookupRetryDelaysMs = [1500, 3000];
+
+  /**
+   * Checks a signed notification's payment_id with PayHere before anything is
+   * recorded. The md5sig doesn't cover payment_id, and a payer can point the
+   * unsigned notify_url at their own server, so a genuine signed notification
+   * can be re-posted with invented payment_ids: those are refused here.
+   *
+   * - SUCCESS: PayHere must list the payment as RECEIVED for the signed
+   *   amount, else `reject` (asked again with short waits first).
+   * - Any other status for a payment_id we don't have: PayHere must list it,
+   *   else `ignore` (nothing to record, and nothing it could pay out).
+   * - Any other status for a payment we already recorded (e.g. a chargeback
+   *   of a verified payment): no lookup.
+   * - The lookup itself failing: `process`. A PayHere outage must not lose
+   *   real payments; settlement checks SUCCESS payments with PayHere again
+   *   before paying, so an unverified one is never paid.
+   */
+  async checkWithPayHere(data: PayHereNotificationParams): Promise<{
+    action: 'process' | 'ignore' | 'reject';
+    reason?: string;
+  }> {
+    const { payment_id, order_id, subscription_id, payhere_amount } = data;
+    if (!payment_id) return { action: 'process' }; // refused later as invalid
+    const success = this.getPayHereStatusMapped(data.status_code) === 'SUCCESS';
+
+    if (!success) {
+      const known = await this.knexService
+        .knex('transaction')
+        .select('payhere_pay_id')
+        .where('payhere_pay_id', payment_id)
+        .first();
+      if (known) return { action: 'process' };
+    }
+
+    const delays = success ? TransactionService.payHereLookupRetryDelaysMs : [];
+    let reason = '';
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, delays[attempt - 1]));
+      }
+      let payment: Awaited<ReturnType<PayHereService['findPayment']>>;
+      try {
+        payment = await this.payHereService.findPayment(
+          payment_id,
+          order_id,
+          subscription_id || null,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `PayHere lookup for notification payment_id ${payment_id} failed (${payHereErrorDetail(error)}); recording it, settlement checks it again before paying`,
+        );
+        return { action: 'process' };
+      }
+
+      if (!success) {
+        return payment
+          ? { action: 'process' }
+          : {
+              action: 'ignore',
+              reason: `payment ${payment_id} is not listed by PayHere`,
+            };
+      }
+      if (!payment) {
+        reason = `payment ${payment_id} is not listed by PayHere`;
+      } else if (payment.status !== 'RECEIVED') {
+        reason = `PayHere lists payment ${payment_id} as ${payment.status}, not RECEIVED`;
+      } else if (
+        payment.amount !== null &&
+        payhere_amount !== undefined &&
+        !sameAmount(payment.amount, payhere_amount)
+      ) {
+        // The signed amount can't change, so PayHere won't change its mind
+        return {
+          action: 'reject',
+          reason: `PayHere lists payment ${payment_id} for ${payment.amount}, not ${payhere_amount}`,
+        };
+      } else {
+        return { action: 'process' };
+      }
+    }
+    return { action: 'reject', reason };
   }
 
   /**

@@ -788,6 +788,92 @@ describe('Settlement (e2e)', () => {
     expect(fakes.every((f: { settled: boolean }) => !f.settled)).toBe(true);
   });
 
+  describe('what the attempt leaves behind when PayHere does not confirm', () => {
+    const earlierAttempt = (settlement_failure: string) =>
+      ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'P1' })
+        .update({
+          retry_count: 1,
+          last_retry_at: new Date(0),
+          settlement_failure,
+        });
+
+    it('a failed lookup keeps LOW_BALANCE, so the deposit callback still finds it', async () => {
+      await earlierAttempt('LOW_BALANCE');
+      ctx.payHerePayments.mockRejectedValueOnce(new Error('PayHere 503'));
+      await settlement.retryUnsettledTransactions();
+      expect(await tx()).toMatchObject({
+        retry_count: 1,
+        settlement_failure: 'LOW_BALANCE',
+      });
+    });
+
+    it('a payment not listed yet keeps LOW_BALANCE', async () => {
+      await earlierAttempt('LOW_BALANCE');
+      ctx.payHerePayments.mockResolvedValueOnce([]);
+      ctx.payHereOrderPayments.mockResolvedValueOnce([]);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      expect(await tx()).toMatchObject({
+        retry_count: 2,
+        settlement_failure: 'LOW_BALANCE',
+      });
+    });
+
+    const chargedBack = [
+      {
+        payment_id: 'P1',
+        status: 'CHARGEBACK',
+        amount: '1000.00',
+        order_id: null,
+      },
+    ];
+
+    it('an earlier send with no answer that did go through: settled, and an alert says the sats went out', async () => {
+      const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
+      await earlierAttempt('UNKNOWN');
+      ctx.payHerePayments.mockResolvedValueOnce(chargedBack);
+      ctx.payHereOrderPayments.mockResolvedValueOnce(chargedBack);
+      ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(true);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      expect(await tx()).toMatchObject({ settled: true });
+      expect(alert).toHaveBeenCalledWith(
+        'Settlement',
+        expect.stringContaining('were already sent'),
+      );
+      alert.mockRestore();
+    });
+
+    it('an earlier send with no answer not found in the history: stays UNKNOWN, last attempt says it may have gone out', async () => {
+      const alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
+      await earlierAttempt('UNKNOWN');
+      await ctx
+        .knex('transaction')
+        .where({ payhere_pay_id: 'P1' })
+        .update({ retry_count: 4 });
+      ctx.payHerePayments.mockResolvedValueOnce(chargedBack);
+      ctx.payHereOrderPayments.mockResolvedValueOnce(chargedBack);
+      ctx.bitcoinDeepa.findSettlementTransfer.mockResolvedValueOnce(false);
+      await settlement.retryUnsettledTransactions();
+      expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
+      expect(await tx()).toMatchObject({
+        settled: false,
+        settlement_failure: 'UNKNOWN',
+      });
+      expect(alert).toHaveBeenCalledWith(
+        'Settlement',
+        expect.stringContaining('may or may not have gone out'),
+      );
+      expect(alert).not.toHaveBeenCalledWith(
+        'Settlement',
+        expect.stringContaining('Possibly a forged'),
+      );
+      alert.mockRestore();
+    });
+  });
+
   it('a PayHere API outage delays settlement without using up attempts', async () => {
     // far more failures than the 5-attempt budget
     for (let i = 0; i < 7; i++) {

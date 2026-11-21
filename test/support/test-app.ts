@@ -15,6 +15,7 @@ import {
   type CollectResult,
 } from '../../src/modules/bitcoindeepa/bitcoindeepa.service';
 import { PayHereService } from '../../src/modules/payhere/payhere.service';
+import { TransactionService } from '../../src/modules/transaction/transaction.service';
 import { DiditService } from '../../src/modules/didit/didit.service';
 import { CeyPayService } from '../../src/modules/ceypay/ceypay.service';
 import { R2StorageService } from '../../src/modules/storage/r2-storage.service';
@@ -86,6 +87,8 @@ export interface TestContext {
   /** PayHere's payment lookup used by settlement (see below) */
   payHerePayments: jest.SpyInstance;
   payHereOrderPayments: jest.SpyInstance;
+  /** The webhook's check (PayHereService.findPayment): knows every payment by default */
+  payHereFindPayment: jest.SpyInstance;
   /**
    * A Bearer token for the user: the fixture users' real session (from
    * resetData), any other id a legacy 7-day JWT (no wallet routes)
@@ -226,6 +229,21 @@ export async function createTestApp(): Promise<TestContext> {
       }));
     });
 
+  // The webhook checks each payment_id with PayHere before recording it.
+  // By default PayHere "took" every payment a test notifies; tests override
+  // it to simulate an invented payment_id. No waits between lookups.
+  const payHereFindPayment = jest
+    .spyOn(app.get(PayHereService), 'findPayment')
+    .mockImplementation(
+      async (payment_id: string, order_id: string | null) => ({
+        payment_id,
+        status: 'RECEIVED',
+        amount: null,
+        order_id,
+      }),
+    );
+  TransactionService.payHereLookupRetryDelaysMs = [0, 0];
+
   const jwt = app.get(JwtService);
   return {
     app,
@@ -239,6 +257,7 @@ export async function createTestApp(): Promise<TestContext> {
     payHereCancel,
     payHerePayments,
     payHereOrderPayments,
+    payHereFindPayment,
     tokenFor: (userId) =>
       FIXTURE_USERS.includes(userId)
         ? sessionTokenFor(userId)
