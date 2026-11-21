@@ -1,3 +1,4 @@
+import { toApiNumber } from '../../../common/money';
 import { Injectable } from '@nestjs/common';
 import type { Knex } from 'knex';
 import { KnexService } from '../../knex/knex.service';
@@ -133,9 +134,10 @@ export class AdminMembersService {
       kycStatus: row.kyc_status,
       joinedAt: new Date(row.created_at).toISOString(),
       activePlan: row.active_plan,
-      totalPaidLkr: Number(row.total_paid),
-      satoshis: Number(row.satoshis),
-      unsettledLkr: Number(row.unsettled),
+      // Summed in SQL (numeric); API serialization only
+      totalPaidLkr: toApiNumber(row.total_paid),
+      satoshis: toApiNumber(row.satoshis),
+      unsettledLkr: toApiNumber(row.unsettled),
     }));
     return toPage(items, Number(countRow?.count ?? 0), query);
   }

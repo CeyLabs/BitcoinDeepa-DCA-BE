@@ -1,3 +1,4 @@
+import { LKR_DP, ROUND_HALF_UP, toMoney } from '../../common/money';
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 import axios from 'axios';
@@ -138,10 +139,8 @@ export class PayHereService {
       String(process.env.PAYHERE_MERCHANT_SECRET),
     ).toUpperCase();
 
-    const amountFormatted = parseFloat(amount).toLocaleString('en-US', {
-      minimumFractionDigits: 2,
-      useGrouping: false,
-    });
+    // PayHere hashes the amount as "1000.00": exactly 2 dp, no grouping
+    const amountFormatted = toMoney(amount).toFixed(LKR_DP, ROUND_HALF_UP);
     const hash = md5String(
       String(process.env.PAYHERE_MERCHANT_ID) +
         order_id +

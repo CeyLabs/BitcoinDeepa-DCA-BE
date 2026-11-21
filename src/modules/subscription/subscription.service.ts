@@ -1,3 +1,4 @@
+import { toApiNumber } from '../../common/money';
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { KnexService } from '../knex/knex.service';
 import { PayHereService } from '../payhere/payhere.service';
@@ -116,7 +117,7 @@ export class SubscriptionService {
       created_at: result.created_at,
       updated_at: result.updated_at,
       subscription_start_date: subscriptionStartDate,
-      dca_price: result.dca_price,
+      dca_price: toApiNumber(result.dca_price), // package.amount, whole LKR
       next_billing_date: nextBillingDate,
       package_name: result.package_name,
       frequency: result.frequency,

@@ -1,3 +1,5 @@
+import { formatLkr } from '../../common/money';
+
 export enum SellStatus {
   /** Priced, waiting for the user to confirm before expires_at */
   QUOTED = 'QUOTED',
@@ -85,4 +87,4 @@ export const SATS_PER_BTC = 100_000_000;
  * (TransactionService.markSalePayments). Change it here only.
  */
 export const saleCollectMemo = (amountLkr: string | number): string =>
-  `Bitcoin Deepa sale: ${Number(amountLkr).toLocaleString('en-US', { minimumFractionDigits: 2 })} LKR to your bank account`;
+  `Bitcoin Deepa sale: ${formatLkr(amountLkr)} LKR to your bank account`;

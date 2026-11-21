@@ -7,7 +7,14 @@ import {
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { createHash, timingSafeEqual } from 'crypto';
 import type { Knex } from 'knex';
-import Big from 'big.js';
+import {
+  SATOSHIS_PER_BTC,
+  isAmount,
+  sameAmount,
+  toApiNumber,
+  toApiNumberOrNull,
+  toMoney,
+} from '../../common/money';
 import { KnexService } from '../knex/knex.service';
 import { Subscription } from '../../models/subscription';
 import { BitcoinPriceService } from '../bitcoin-price/bitcoin-price.service';
@@ -57,19 +64,20 @@ export interface Transaction {
   /** The memo its sats are sent with (null = created by an earlier release) */
   transfer_memo?: string | null;
   status: Status;
-  btc_price_at_purchase?: number;
-  satoshis_purchased?: number;
+  // decimal columns arrive from pg as strings; numbers are what we write
+  btc_price_at_purchase?: number | string;
+  satoshis_purchased?: number | string;
   price_currency?: string;
   coingecko_timestamp?: Date;
   settled?: boolean;
   retry_count?: number;
   last_retry_at?: Date;
-  gross_amount?: number;
+  gross_amount?: number | string;
   payment_processor_fee_basis_points?: number;
-  payment_processor_fee_amount?: number;
+  payment_processor_fee_amount?: number | string;
   bitcoindeepa_fee_basis_points?: number;
-  bitcoindeepa_fee_amount?: number;
-  net_amount?: number;
+  bitcoindeepa_fee_amount?: number | string;
+  net_amount?: number | string;
   created_at?: Date;
   updated_at?: Date;
 }
@@ -114,8 +122,16 @@ export interface DcaSummary {
  * `transaction` row with its plan) or a sale (`sell_order`, as the sell
  * endpoints show it).
  */
+/** A transaction row joined with its package (PACKAGE_COLUMNS) */
+export type TransactionWithPackage = Transaction & {
+  package_amount: number | string | null;
+  package_currency: string | null;
+  package_name: string | null;
+  package_frequency: string | null;
+};
+
 export type HistoryItem =
-  | (Transaction & { type: 'BUY' })
+  | (TransactionWithPackage & { type: 'BUY' })
   | { type: 'SELL'; created_at: Date; sell_order: SellOrderView };
 
 export interface PaginatedTransactions {
@@ -126,7 +142,6 @@ export interface PaginatedTransactions {
   has_more: boolean;
 }
 
-const SATOSHIS_PER_BTC = 100_000_000;
 /** Settlement attempts per payment before it waits for a human */
 export const MAX_SETTLEMENT_ATTEMPTS = 5;
 /** Longest a /send can be in flight (BITCOINDEEPA_SEND_TIMEOUT 95s) plus margin */
@@ -147,25 +162,17 @@ function md5Upper(input: string): string {
   return createHash('md5').update(input).digest('hex').toUpperCase();
 }
 
-/** Money amounts equal to the cent (PayHere sends e.g. "1000.00"). */
-export function sameAmount(a: string | number, b: string | number): boolean {
-  const x = Number(String(a).replace(/,/g, ''));
-  const y = Number(String(b).replace(/,/g, ''));
-  return Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) < 0.005;
-}
+export { sameAmount };
 
 /**
- * PayHere's amount ("1000.00") as a number. Parsed as a decimal, not with
- * parseFloat, which stops at the first character it doesn't like
- * ("1,000.00" would be 1). Null when it isn't an amount.
+ * PayHere's amount ("1000.00") as a decimal string. Parsed as a decimal, not
+ * with parseFloat, which stops at the first character it doesn't like
+ * ("1,000.00" would be 1). Null when it isn't a non-negative amount.
  */
-export function parseAmount(value: string | number): number | null {
-  try {
-    const amount = new Big(String(value).replace(/,/g, '').trim());
-    return amount.gte(0) ? amount.toNumber() : null;
-  } catch {
-    return null;
-  }
+export function parseAmount(value: string | number): string | null {
+  if (!isAmount(value)) return null;
+  const amount = toMoney(value);
+  return amount.gte(0) ? amount.toFixed() : null;
 }
 
 /** Where a payment came from: exactly one of the two is set */
@@ -641,9 +648,9 @@ export class TransactionService {
     // Includes this payment (already written in this transaction)
     const paid = await paidOneTimeLkr(trx, order.user_id);
     const max = buyLimits.dailyMaxLkr();
-    if (paid > max) {
+    if (paid.gt(max)) {
       reasons.push(
-        `member's one-time buys in 24h are ${paid} LKR, over the ${max} LKR limit`,
+        `member's one-time buys in 24h are ${paid.toFixed()} LKR, over the ${max} LKR limit`,
       );
     }
 
@@ -657,7 +664,7 @@ export class TransactionService {
   private async priceIfNeeded(
     payment_id: string,
     status: Status,
-    amount: number,
+    amount: number | string,
     currency: string,
   ): Promise<BitcoinData | null> {
     if (status !== 'SUCCESS') return null;
@@ -719,7 +726,7 @@ export class TransactionService {
     p: {
       payment_id: string;
       status: Status;
-      gross_amount: number;
+      gross_amount: number | string;
       bitcoinData: BitcoinData | null;
       user_id: string;
       link: PaymentLink;
@@ -1055,7 +1062,7 @@ export class TransactionService {
    * earlier than the payment, and the log line below names the row).
    */
   private async fetchBitcoinDataForTransaction(
-    amount: number,
+    amount: number | string,
     currency: string,
     paymentId: string,
   ): Promise<BitcoinData | null> {
@@ -1178,7 +1185,8 @@ export class TransactionService {
         .limit(50);
 
       for (const row of rows) {
-        const amount = Number(row.gross_amount ?? row.package_amount);
+        // DB decimal strings go straight in; no float in between
+        const amount = String(row.gross_amount ?? row.package_amount);
         const data = await this.fetchBitcoinDataForTransaction(
           amount,
           row.currency,
@@ -1299,13 +1307,13 @@ export class TransactionService {
     // Joined with package info so callers get the LKR amount and plan name
     // (null for one-time buys - see kind)
     const buyIds = idsOf('BUY');
-    const buys: Transaction[] =
+    const buys: TransactionWithPackage[] =
       buyIds.length === 0
         ? []
         : ((await this.transactionsWithPackage()
             .select('t.*', ...PACKAGE_COLUMNS)
             .where('t.user_id', user_id)
-            .whereIn('t.payhere_pay_id', buyIds)) as Transaction[]);
+            .whereIn('t.payhere_pay_id', buyIds)) as TransactionWithPackage[]);
     const sellIds = idsOf('SELL');
     const sells =
       sellIds.length === 0
@@ -1320,7 +1328,14 @@ export class TransactionService {
     for (const { type, id } of pageRows) {
       if (type === 'BUY') {
         const buy = buyById.get(id);
-        if (buy) transactions.push({ type: 'BUY', ...buy });
+        if (buy) {
+          transactions.push({
+            type: 'BUY',
+            ...buy,
+            // package.amount is a decimal now; keep the number the app got
+            package_amount: toApiNumberOrNull(buy.package_amount),
+          });
+        }
         continue;
       }
       const sell = sellById.get(id);
@@ -1387,7 +1402,7 @@ export class TransactionService {
       for (const p of found) {
         purchases.set(p.payhere_pay_id, {
           settled: p.settled,
-          sats: Number(p.satoshis_purchased),
+          sats: toApiNumber(p.satoshis_purchased), // whole sats: exact
           paymentHash: p.bot_payment_hash,
         });
       }
@@ -1459,7 +1474,7 @@ export class TransactionService {
       ...new Set(
         rows
           .filter((r) => r.direction === 'outgoing' && r.success)
-          .map((r) => Number(r.amount)),
+          .map((r) => toApiNumber(r.amount)), // whole sats: exact
       ),
     ];
     const orders =
@@ -1546,44 +1561,44 @@ export class TransactionService {
       .whereNotNull('satoshis_purchased')
       .where('status', 'SUCCESS');
 
-    let totalSatoshis = new Big(0);
+    let totalSatoshis = toMoney(0);
     // "Invested" excludes fees so Current Value vs Invested shows market
     // movement only; fees are reported separately.
-    let totalSpent = new Big(0); // net amount that bought BTC
-    let totalFees = new Big(0);
-    let totalBtcCost = new Big(0); // market value at purchase (for avg price)
+    let totalSpent = toMoney(0); // net amount that bought BTC
+    let totalFees = toMoney(0);
+    let totalBtcCost = toMoney(0); // market value at purchase (for avg price)
 
     for (const tx of transactions) {
       if (!tx.satoshis_purchased) continue;
-      const sats = new Big(tx.satoshis_purchased);
+      const sats = toMoney(tx.satoshis_purchased);
       totalSatoshis = totalSatoshis.plus(sats);
 
       const btcCost = tx.btc_price_at_purchase
-        ? sats.div(SATOSHIS_PER_BTC).times(tx.btc_price_at_purchase)
-        : new Big(0);
+        ? sats.div(SATOSHIS_PER_BTC).times(toMoney(tx.btc_price_at_purchase))
+        : toMoney(0);
       totalBtcCost = totalBtcCost.plus(btcCost);
       // Rows from before the fee columns lack net_amount - use the BTC cost
       totalSpent = totalSpent.plus(
-        tx.net_amount != null ? new Big(tx.net_amount) : btcCost,
+        tx.net_amount != null ? toMoney(tx.net_amount) : btcCost,
       );
       totalFees = totalFees
-        .plus(tx.payment_processor_fee_amount ?? 0)
-        .plus(tx.bitcoindeepa_fee_amount ?? 0);
+        .plus(toMoney(tx.payment_processor_fee_amount))
+        .plus(toMoney(tx.bitcoindeepa_fee_amount));
     }
 
     const averageBTCPrice =
       totalSatoshis.gt(0) && totalBtcCost.gt(0)
         ? totalBtcCost.div(totalSatoshis.div(SATOSHIS_PER_BTC))
-        : new Big(0);
+        : toMoney(0);
 
     const market = await this.fetchBalanceAndMarket(user_id);
 
     return {
       dca: {
-        balance: totalSatoshis.toNumber(),
-        spent: totalSpent.toNumber(),
-        fees: totalFees.toNumber(),
-        avg_btc_price: averageBTCPrice.toNumber(),
+        balance: toApiNumber(totalSatoshis),
+        spent: toApiNumber(totalSpent),
+        fees: toApiNumber(totalFees),
+        avg_btc_price: toApiNumber(averageBTCPrice),
       },
       currency: 'LKR',
       ...market,
@@ -1680,7 +1695,7 @@ export function isPurchaseSettlement(
   row: { amount: number; success: boolean; payment_hash?: string },
   p: SettledPurchase,
 ): boolean {
-  if (Number(row.amount) !== p.sats) return false;
+  if (!sameAmount(row.amount, p.sats, 0)) return false;
   if (!row.success) return true;
   if (!p.settled) return false;
   return !p.paymentHash || row.payment_hash === p.paymentHash;
@@ -1748,7 +1763,7 @@ export function matchSalePayments(
     .filter((o) => !hashed.has(o.id))
     .map((o) => ({
       id: o.id,
-      sats: Number(o.sats),
+      sats: toApiNumber(o.sats), // whole sats: exact
       memo: saleCollectMemo(o.amount_lkr),
       createdAt: new Date(o.created_at).getTime(),
     }))
@@ -1762,7 +1777,7 @@ export function matchSalePayments(
     if (matched.has(i) || !paidOut(row)) continue;
     const k = open.findIndex(
       (o) =>
-        o.sats === Number(row.amount) &&
+        sameAmount(o.sats, row.amount, 0) &&
         isSaleMemo(row.memo, o.memo) &&
         o.createdAt <= at,
     );

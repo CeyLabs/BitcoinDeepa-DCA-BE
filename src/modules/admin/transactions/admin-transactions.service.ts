@@ -1,3 +1,4 @@
+import { toApiNumberOrNull } from '../../../common/money';
 import { Injectable } from '@nestjs/common';
 import type { Knex } from 'knex';
 import { KnexService } from '../../knex/knex.service';
@@ -40,9 +41,6 @@ type Row = {
   last_name: string | null;
   package_name: string | null;
 };
-
-const toNumber = (value: string | null) =>
-  value === null ? null : Number(value);
 
 @Injectable()
 export class AdminTransactionsService {
@@ -122,9 +120,10 @@ export class AdminTransactionsService {
       kind: row.kind,
       settled: row.settled,
       holdReason: row.hold_reason,
-      grossLkr: toNumber(row.gross_amount),
-      netLkr: toNumber(row.net_amount),
-      satoshis: toNumber(row.satoshis_purchased),
+      // API serialization: 2-dp LKR and whole sats are exact as numbers
+      grossLkr: toApiNumberOrNull(row.gross_amount),
+      netLkr: toApiNumberOrNull(row.net_amount),
+      satoshis: toApiNumberOrNull(row.satoshis_purchased),
       user: row.user_id
         ? {
             id: row.user_id,

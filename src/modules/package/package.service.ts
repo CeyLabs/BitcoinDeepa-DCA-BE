@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { toApiNumber } from '../../common/money';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
@@ -7,6 +8,7 @@ export interface Package {
   id: string;
   name: string;
   frequency: 'weekly' | 'monthly';
+  /** Whole LKR (a decimal column: pg reads it as a string, see `fromRow`) */
   amount: number;
   currency: string;
   created_at?: string;
@@ -14,6 +16,14 @@ export interface Package {
 }
 
 const PACKAGE_CACHE_TTL_SECONDS = 3600;
+
+type PackageRow = Omit<Package, 'amount'> & { amount: number | string };
+
+/** API serialization point: package amounts are whole LKR, exact as numbers */
+const fromRow = (row: PackageRow): Package => ({
+  ...row,
+  amount: toApiNumber(row.amount),
+});
 
 @Injectable()
 export class PackageService {
@@ -23,25 +33,29 @@ export class PackageService {
   ) {}
 
   async getAllPackages(): Promise<Package[]> {
+    // fromRow runs on what the cache returns too, not only in the loader:
+    // an entry cached by an older build (or after a rollback) may hold the
+    // decimal column as a string for up to the TTL.
     const packages = await this.redisService.getOrSet(
       CacheKeys.packages.all(),
       PACKAGE_CACHE_TTL_SECONDS,
-      () =>
+      (): Promise<PackageRow[]> =>
         this.knexService
-          .knex<Package>('package')
+          .knex<PackageRow>('package')
           .select('*')
           .orderBy('frequency', 'desc')
           .orderBy('amount', 'asc'),
     );
-    return packages ?? [];
+    return (packages ?? []).map(fromRow);
   }
 
   async getPackageById(id: string): Promise<Package | undefined> {
     const package_ = await this.redisService.getOrSet(
       CacheKeys.packages.byId(id),
       PACKAGE_CACHE_TTL_SECONDS,
-      () => this.knexService.knex<Package>('package').where('id', id).first(),
+      (): Promise<PackageRow | undefined> =>
+        this.knexService.knex<PackageRow>('package').where('id', id).first(),
     );
-    return package_ ?? undefined;
+    return package_ ? fromRow(package_) : undefined;
   }
 }

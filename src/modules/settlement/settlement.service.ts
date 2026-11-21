@@ -1,3 +1,4 @@
+import { toApiNumber } from '../../common/money';
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { KnexService } from '../knex/knex.service';
@@ -22,7 +23,7 @@ interface UnsettledTransaction {
   kind: PurchaseKind;
   /** Recurring charges */
   payhere_sub_id: string | null;
-  satoshis_purchased: number;
+  satoshis_purchased: number | string; // bigint: pg returns a string
   retry_count: number;
   telegram_id: string;
   /** Why the last send didn't go through (UNKNOWN = may have gone, check the memo first) */
@@ -35,7 +36,7 @@ interface UnsettledTransaction {
 interface AwaitingApprovalTransaction {
   payhere_pay_id: string;
   bot_send_id: string;
-  satoshis_purchased: number;
+  satoshis_purchased: number | string; // bigint: pg returns a string
   telegram_id: string;
   /** When the send that got the 202 was made */
   last_retry_at: Date | null;
@@ -210,7 +211,7 @@ export class SettlementService {
 
       const logMessage = await this.telegramLogger.logSettlement(
         payhere_pay_id,
-        Number(satoshis_purchased),
+        toApiNumber(satoshis_purchased), // whole sats: exact
         telegram_id,
         currentRetryCount,
       );
