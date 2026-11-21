@@ -140,6 +140,14 @@ describe('BitcoinDeepaService', () => {
   });
 
   describe('transferFunds results', () => {
+    it('sends the amount as a JSON number even when given the bigint string', async () => {
+      request.mockResolvedValue({ status: 200, data: { success: true } });
+      // settlement passes satoshis_purchased straight from pg (a string)
+      await service.transferFunds('600', '42', 'm');
+      const body = JSON.parse(call(0).data as string) as { amount: unknown };
+      expect(body.amount).toBe(600);
+    });
+
     it('returns the API response on success', async () => {
       request.mockResolvedValue({
         status: 200,

@@ -33,33 +33,29 @@ export class PackageService {
   ) {}
 
   async getAllPackages(): Promise<Package[]> {
+    // fromRow runs on what the cache returns too, not only in the loader:
+    // an entry cached by an older build (or after a rollback) may hold the
+    // decimal column as a string for up to the TTL.
     const packages = await this.redisService.getOrSet(
       CacheKeys.packages.all(),
       PACKAGE_CACHE_TTL_SECONDS,
-      async () =>
-        (
-          await this.knexService
-            .knex<PackageRow>('package')
-            .select('*')
-            .orderBy('frequency', 'desc')
-            .orderBy('amount', 'asc')
-        ).map(fromRow),
+      (): Promise<PackageRow[]> =>
+        this.knexService
+          .knex<PackageRow>('package')
+          .select('*')
+          .orderBy('frequency', 'desc')
+          .orderBy('amount', 'asc'),
     );
-    return packages ?? [];
+    return (packages ?? []).map(fromRow);
   }
 
   async getPackageById(id: string): Promise<Package | undefined> {
     const package_ = await this.redisService.getOrSet(
       CacheKeys.packages.byId(id),
       PACKAGE_CACHE_TTL_SECONDS,
-      async () => {
-        const row = await this.knexService
-          .knex<PackageRow>('package')
-          .where('id', id)
-          .first();
-        return row ? fromRow(row) : undefined;
-      },
+      (): Promise<PackageRow | undefined> =>
+        this.knexService.knex<PackageRow>('package').where('id', id).first(),
     );
-    return package_ ?? undefined;
+    return package_ ? fromRow(package_) : undefined;
   }
 }
