@@ -1,0 +1,53 @@
+name: release
+
+# Push a vX.Y.Z tag to publish its GitHub release, with that version's
+# CHANGELOG.md section as the notes. Re-run (or run by hand) to update one.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish, e.g. v2.0.1
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Notes from CHANGELOG.md
+        run: |
+          version="${TAG#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && (/^## \[/ || /^\[[^]]+\]: /) { exit }
+            on { print }
+          ' CHANGELOG.md | sed -e 's/^### /## /' -e 's/^#### /### /' > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::No CHANGELOG.md section for $version"; exit 1
+          fi
+          prev=$(git ls-remote --tags origin 'v*' | sed 's#.*refs/tags/##; s#\^{}##' | sort -uV \
+            | awk -v t="$TAG" '$0 == t { print p; exit } { p = $0 }')
+          [ -n "$prev" ] && printf '\n**Full diff**: %s/compare/%s...%s\n' \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$prev" "$TAG" >> notes.md
+          cat notes.md
+
+      - name: Publish
+        run: |
+          latest=$(git ls-remote --tags origin 'v*' | sed 's#.*refs/tags/##; s#\^{}##' | sort -uV | tail -1)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md \
+              --latest=$([ "$TAG" = "$latest" ] && echo true || echo false)
+          fi
