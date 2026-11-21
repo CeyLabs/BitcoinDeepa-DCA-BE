@@ -71,6 +71,7 @@ This is a NestJS-based backend service for the BitcoinDeepa DCA (Dollar Cost Ave
    - ID verification, liveness detection, face matching, and AML screening
    - Automatic user KYC status updates via webhooks: `X-Signature` (HMAC of raw body), `X-Timestamp` must be within 5 minutes; `DIDIT_WEBHOOK_SECRET` required in production
    - Sessions API v3 (`/v3/session/`); late `Not Started`/`In Progress` webhooks never overwrite a final KYC result; `Resubmitted` → `IN_PROGRESS`
+   - A `Declined` result posts a Telegram alert (`logAlert('KYC', ...)`) with the reason, each check's warnings from the webhook `decision` (`kyc-issues.util.ts`) and the Didit session id; once per decline (not when the user was already `DECLINED`), best effort (never fails the webhook)
    - Uses strongly typed KYC status enum for database consistency
 
 10. **Admin Module** (`src/modules/admin/`) - everything behind the admin dashboard. `AdminModule` bundles one Nest module per area: `auth/`, `analytics/`, `transactions/`, `members/`. List endpoints share `common/pagination.ts` (`PaginationQueryDto`, `@SearchQuery()`, `toPage`, `likeEscape`). Add new admin areas as sibling folders and import them in `admin.module.ts`
