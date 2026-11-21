@@ -14,6 +14,7 @@ import {
 import { CacheKeys } from '../src/modules/redis/utils/cache-keys.util';
 import { TelegramLoggerService } from '../src/modules/telegram-logger/telegram-logger.service';
 import { TransactionService } from '../src/modules/transaction/transaction.service';
+import { SettlementService } from '../src/modules/settlement/settlement.service';
 
 describe('PayHere webhook (e2e)', () => {
   let ctx: TestContext;
@@ -82,6 +83,243 @@ describe('PayHere webhook (e2e)', () => {
       await notify({ order_id, payment_id: 'P1', subscription_id: '' }).expect(
         400,
       );
+    });
+  });
+
+  describe('payment_id checked with PayHere before recording', () => {
+    let alert: jest.SpyInstance;
+    beforeEach(() => {
+      alert = jest.spyOn(ctx.app.get(TelegramLoggerService), 'logAlert');
+    });
+    afterEach(() => alert.mockRestore());
+    const count = async () =>
+      Number(
+        (
+          (await ctx.knex('transaction').count('* as c').first()) as {
+            c: string;
+          }
+        ).c,
+      );
+
+    it('records a SUCCESS PayHere does not list yet, unpaid until PayHere lists it (no payment lost to its lag)', async () => {
+      const { order_id } = await newOrder();
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+      }).expect(200);
+      // FAKE2 isn't listed on any try: the last try also asks the
+      // Subscription Manager
+      ctx.payHereFindPayment
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null);
+      await notify({
+        order_id,
+        payment_id: 'FAKE2',
+        subscription_id: 'S1',
+      }).expect(200);
+      const calls = ctx.payHereFindPayment.mock.calls.slice(-3);
+      expect(calls.map((c) => c[2])).toEqual([null, null, 'S1']);
+      expect(calls.every((c) => c[0] === 'FAKE2' && c[1] === order_id)).toBe(
+        true,
+      );
+
+      // Recorded, never paid: settlement only pays what PayHere lists
+      expect(
+        await row('transaction', { payhere_pay_id: 'FAKE2' }),
+      ).toMatchObject({
+        status: 'SUCCESS',
+        settled: false,
+      });
+      // PayHere itself only ever took P1
+      const onlyP1 = [
+        { payment_id: 'P1', status: 'RECEIVED', amount: '1000.00', order_id },
+      ];
+      const subList = ctx.payHerePayments.getMockImplementation();
+      const orderList = ctx.payHereOrderPayments.getMockImplementation();
+      ctx.payHerePayments.mockImplementation(async () => onlyP1);
+      ctx.payHereOrderPayments.mockImplementation(async () => onlyP1);
+      try {
+        await ctx.app.get(SettlementService).retryUnsettledTransactions();
+      } finally {
+        ctx.payHerePayments.mockImplementation(subList);
+        ctx.payHereOrderPayments.mockImplementation(orderList);
+      }
+      const paid = ctx.bitcoinDeepa.transferFunds.mock.calls.map((c) => c[2]);
+      expect(paid.some((memo) => String(memo).includes('FAKE2'))).toBe(false);
+      expect(
+        await row('transaction', { payhere_pay_id: 'FAKE2' }),
+      ).toMatchObject({
+        settled: false,
+      });
+    });
+
+    it("doesn't ask PayHere about a notification our records already refuse (unknown order)", async () => {
+      await notify({
+        order_id: 'NOT-OURS',
+        payment_id: 'X1',
+        subscription_id: 'S1',
+      }).expect(400);
+      expect(ctx.payHereFindPayment).not.toHaveBeenCalled();
+    });
+
+    it('caps PayHere lookups per order: past the cap, 429 without asking PayHere and nothing stored', async () => {
+      const { order_id } = await newOrder();
+      // 10 lookups allowed per order per hour (P1..P10 recorded)
+      for (let i = 1; i <= 10; i++) {
+        await notify({
+          order_id,
+          payment_id: `P${i}`,
+          subscription_id: 'S1',
+        }).expect(200);
+      }
+      expect(ctx.payHereFindPayment).toHaveBeenCalledTimes(10);
+      await notify({
+        order_id,
+        payment_id: 'P11',
+        subscription_id: 'S1',
+      }).expect(429);
+      expect(ctx.payHereFindPayment).toHaveBeenCalledTimes(10);
+      expect(
+        await row('transaction', { payhere_pay_id: 'P11' }),
+      ).toBeUndefined();
+      expect(alert).toHaveBeenCalledWith(
+        'PayHere webhook',
+        expect.stringContaining('without asking PayHere'),
+      );
+    });
+
+    it('alerts about refused notifications for one order at the 1st and 10th only', async () => {
+      const { order_id } = await newOrder();
+      ctx.payHereFindPayment.mockResolvedValue({
+        payment_id: 'any',
+        status: 'RECEIVED',
+        amount: '1.00',
+        order_id,
+      });
+      try {
+        for (let i = 1; i <= 12; i++) {
+          await notify({
+            order_id,
+            payment_id: `W${i}`,
+            subscription_id: 'S1',
+          }).expect(i <= 10 ? 400 : 429);
+        }
+      } finally {
+        ctx.payHereFindPayment.mockReset();
+        ctx.payHereFindPayment.mockImplementation(
+          async (payment_id: string, oid: string | null) => ({
+            payment_id,
+            status: 'RECEIVED',
+            amount: null,
+            order_id: oid,
+          }),
+        );
+      }
+      const refusals = alert.mock.calls.filter(
+        ([source, msg]) =>
+          source === 'PayHere webhook' && String(msg).startsWith('Refused'),
+      );
+      expect(refusals).toHaveLength(2);
+      expect(refusals[1][1]).toContain('refusal #10');
+      expect(await count()).toBe(0);
+    });
+
+    it('records a payment PayHere lists only after a short wait (its API lags)', async () => {
+      const { order_id } = await newOrder();
+      ctx.payHereFindPayment.mockResolvedValueOnce(null);
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+      }).expect(200);
+      expect(await row('transaction', { payhere_pay_id: 'P1' })).toMatchObject({
+        status: 'SUCCESS',
+      });
+    });
+
+    it('refuses a payment PayHere lists as not RECEIVED, or for another amount', async () => {
+      const { order_id } = await newOrder();
+      ctx.payHereFindPayment.mockResolvedValue({
+        payment_id: 'P1',
+        status: 'CHARGEBACK',
+        amount: '1000.00',
+        order_id,
+      });
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+      }).expect(400);
+      ctx.payHereFindPayment.mockResolvedValue({
+        payment_id: 'P1',
+        status: 'RECEIVED',
+        amount: '1.00',
+        order_id,
+      });
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+      }).expect(400);
+      ctx.payHereFindPayment.mockReset();
+      ctx.payHereFindPayment.mockImplementation(
+        async (payment_id: string, oid: string | null) => ({
+          payment_id,
+          status: 'RECEIVED',
+          amount: null,
+          order_id: oid,
+        }),
+      );
+      expect(await count()).toBe(0);
+    });
+
+    it('records the payment when the PayHere lookup itself fails (settlement checks again)', async () => {
+      const { order_id } = await newOrder();
+      ctx.payHereFindPayment.mockRejectedValueOnce(new Error('PayHere 503'));
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+      }).expect(200);
+      expect(await row('transaction', { payhere_pay_id: 'P1' })).toMatchObject({
+        status: 'SUCCESS',
+        settled: false,
+      });
+    });
+
+    it('ignores a non-SUCCESS notification for an unknown payment PayHere does not list', async () => {
+      const { order_id } = await newOrder();
+      ctx.payHereFindPayment.mockResolvedValueOnce(null);
+      await notify({
+        order_id,
+        payment_id: 'FAKE9',
+        subscription_id: 'S1',
+        status_code: '-2',
+      }).expect(200);
+      expect(await count()).toBe(0);
+      expect(alert).not.toHaveBeenCalled();
+    });
+
+    it('does not look up a status change of a payment already recorded (chargeback)', async () => {
+      const { order_id } = await newOrder();
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+      }).expect(200);
+      ctx.payHereFindPayment.mockClear();
+      await notify({
+        order_id,
+        payment_id: 'P1',
+        subscription_id: 'S1',
+        status_code: '-3',
+      }).expect(200);
+      expect(ctx.payHereFindPayment).not.toHaveBeenCalled();
+      expect(await row('transaction', { payhere_pay_id: 'P1' })).toMatchObject({
+        status: 'CHARGEBACK',
+      });
     });
   });
 

@@ -167,6 +167,57 @@ describe('PayHereService', () => {
     });
   });
 
+  describe('getPaymentsByOrderId', () => {
+    it('lists the payments PayHere took for an order (Retrieval API)', async () => {
+      post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
+      get.mockResolvedValueOnce({
+        data: {
+          status: 1,
+          msg: 'Payments with order_id:ORDER-1',
+          data: [
+            {
+              payment_id: 320025071278,
+              order_id: 'ORDER-1',
+              status: 'RECEIVED',
+              amount: 1000,
+            },
+          ],
+        },
+      });
+
+      await expect(service.getPaymentsByOrderId('ORDER-1')).resolves.toEqual([
+        {
+          payment_id: '320025071278',
+          status: 'RECEIVED',
+          amount: '1000',
+          order_id: 'ORDER-1',
+        },
+      ]);
+      const [url, cfg] = get.mock.calls[0];
+      expect(url).toBe('https://sandbox.payhere.lk/merchant/v1/payment/search');
+      expect(cfg!.params).toEqual({ order_id: 'ORDER-1' });
+      expect(cfg!.headers!.Authorization).toBe('Bearer tok');
+    });
+
+    it('returns an empty list for "No payments found"', async () => {
+      post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
+      get.mockResolvedValueOnce({
+        data: { status: -1, msg: 'No payments found', data: null },
+      });
+      await expect(service.getPaymentsByOrderId('X')).resolves.toEqual([]);
+    });
+
+    it('throws on other PayHere error replies', async () => {
+      post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
+      get.mockResolvedValueOnce({
+        data: { status: -2, msg: 'Authentication error', data: null },
+      });
+      await expect(service.getPaymentsByOrderId('X')).rejects.toThrow(
+        'Authentication error',
+      );
+    });
+  });
+
   describe('getSubscriptionPayments', () => {
     it('lists the payments PayHere took for a subscription', async () => {
       post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
@@ -227,6 +278,78 @@ describe('PayHereService', () => {
       post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
       get.mockRejectedValueOnce(new Error('503'));
       await expect(service.getSubscriptionPayments('1')).rejects.toThrow('503');
+    });
+
+    it('returns an empty list for "No payments found" (status -1)', async () => {
+      // an error here would stop the order_id fallback ever running
+      post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
+      get.mockResolvedValueOnce({
+        data: { status: -1, msg: 'No payments found', data: null },
+      });
+      await expect(service.getSubscriptionPayments('1')).resolves.toEqual([]);
+    });
+  });
+
+  describe('findPayment', () => {
+    const listed = (payment_id: string, status = 'RECEIVED') => ({
+      payment_id,
+      order_id: 'ORDER-1',
+      status,
+      amount: 1000,
+    });
+
+    it('finds the payment by order_id (Retrieval API) without asking the Subscription Manager', async () => {
+      post.mockResolvedValueOnce({
+        data: { access_token: 'tok', expires_in: 600 },
+      });
+      get.mockResolvedValueOnce({
+        data: { status: 1, msg: 'ok', data: [listed('P1')] },
+      });
+      await expect(
+        service.findPayment('P1', 'ORDER-1', 'SUB-1'),
+      ).resolves.toMatchObject({ payment_id: 'P1', status: 'RECEIVED' });
+      expect(get).toHaveBeenCalledTimes(1);
+    });
+
+    it("falls back to the subscription's payments when the order has none", async () => {
+      post.mockResolvedValueOnce({
+        data: { access_token: 'tok', expires_in: 600 },
+      });
+      get
+        .mockResolvedValueOnce({
+          data: { status: -1, msg: 'No payments found', data: null },
+        })
+        .mockResolvedValueOnce({
+          data: { status: 1, msg: 'ok', data: [listed('P1')] },
+        });
+      await expect(
+        service.findPayment('P1', 'ORDER-1', 'SUB-1'),
+      ).resolves.toMatchObject({ payment_id: 'P1' });
+      expect(get.mock.calls[1][0]).toContain('/subscription/SUB-1/payments');
+    });
+
+    it('is null for a payment_id PayHere lists nowhere', async () => {
+      post.mockResolvedValueOnce({
+        data: { access_token: 'tok', expires_in: 600 },
+      });
+      get
+        .mockResolvedValueOnce({
+          data: { status: 1, msg: 'ok', data: [listed('P1')] },
+        })
+        .mockResolvedValueOnce({
+          data: { status: -1, msg: 'No payments found', data: null },
+        });
+      await expect(
+        service.findPayment('INVENTED', 'ORDER-1', 'SUB-1'),
+      ).resolves.toBeNull();
+    });
+
+    it('throws when PayHere fails (not the same as "not listed")', async () => {
+      post.mockResolvedValueOnce({
+        data: { access_token: 'tok', expires_in: 600 },
+      });
+      get.mockRejectedValueOnce(new Error('503'));
+      await expect(service.findPayment('P1', 'ORDER-1')).rejects.toThrow('503');
     });
   });
 

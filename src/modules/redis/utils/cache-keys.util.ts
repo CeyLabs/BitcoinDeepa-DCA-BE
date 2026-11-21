@@ -49,6 +49,17 @@ export class CacheKeys {
       `${CacheKeys.PREFIX}:alert:sell-collect-unavailable`,
   };
 
+  // PayHere webhook: per-order counters (not under btc:* or history:*, so
+  // clearing a cache never resets them)
+  static payhere = {
+    // PayHere API lookups the webhook made for an order this hour
+    lookups: (orderId: string): string =>
+      `${CacheKeys.PREFIX}:payhere:lookups:${orderId}`,
+    // Refused/throttled notifications for an order this hour (alert throttle)
+    refusedAlerts: (orderId: string): string =>
+      `${CacheKeys.PREFIX}:payhere:refused:${orderId}`,
+  };
+
   // P2P relay
   static p2p = {
     webIdToken: (userId: string): string =>

@@ -65,6 +65,44 @@ export class TransactionController {
       return res.status(HttpStatus.UNAUTHORIZED).send();
     }
 
+    // payment_id isn't signed: PayHere must know the payment before anything
+    // is logged or stored (a signed notification can be replayed with an
+    // invented payment_id)
+    let check: Awaited<ReturnType<TransactionService['checkWithPayHere']>>;
+    try {
+      check = await this.transactionService.checkWithPayHere(body);
+    } catch (error) {
+      this.logger.error(
+        `PayHere check failed for payment_id ${body.payment_id}: ${errorMessage(error)}`,
+      );
+      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send();
+    }
+    if (check.action === 'ignore') {
+      this.logger.warn(
+        `PayHere webhook ignored for order_id ${body.order_id}: ${check.reason}`,
+      );
+      return res.status(HttpStatus.OK).send('OK');
+    }
+    if (check.action === 'reject' || check.action === 'throttled') {
+      this.logger.warn(
+        `PayHere webhook ${check.action} for order_id ${body.order_id}, payment_id ${body.payment_id}: ${check.reason}`,
+      );
+      const what = `payment_id ${body.payment_id}, order_id ${body.order_id}, subscription_id ${body.subscription_id || '-'}, ${body.payhere_amount} ${body.payhere_currency}`;
+      await this.transactionService.alertRefusedNotification(
+        body.order_id,
+        check.action === 'reject'
+          ? `Refused a correctly signed SUCCESS notification (${what}): ${check.reason}. Nothing was recorded. A replayed notification, or a payment PayHere reversed - check the PayHere dashboard.`
+          : `Refused a correctly signed notification without asking PayHere (${what}): ${check.reason}. Most likely one signed notification replayed with invented payment_ids. Nothing was recorded; check the PayHere dashboard if a real payment for this order is missing.`,
+      );
+      return res
+        .status(
+          check.action === 'reject'
+            ? HttpStatus.BAD_REQUEST
+            : HttpStatus.TOO_MANY_REQUESTS,
+        )
+        .send();
+    }
+
     try {
       // Owner from our records - custom_1 is payer-editable
       const owner = await this.transactionService.getNotificationOwner(

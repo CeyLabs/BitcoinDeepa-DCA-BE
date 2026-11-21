@@ -44,6 +44,9 @@ export interface SubscriptionPayment {
   order_id: string | null;
 }
 
+/** A payment as PayHere's Retrieval API lists it */
+export type OrderPayment = SubscriptionPayment;
+
 // Every PayHere API call is bounded: settlement handles payments one after
 // another, so a hung request would stall every payout behind it.
 const PAYHERE_API_TIMEOUT_MS = 10000;
@@ -295,8 +298,9 @@ export class PayHereService {
 
   /**
    * Payments PayHere actually took for a subscription (Subscription Manager
-   * API). Only used by the order_id backfill script; settlement trusts the
-   * signed webhook and doesn't call this.
+   * API). Used to confirm a notification's payment_id before paying out: the
+   * md5sig doesn't cover payment_id, and a payer can point notify_url at
+   * their own server to obtain a genuinely signed notification to replay.
    * https://support.payhere.lk/api-&-mobile-sdk/subscription-manager-api
    */
   async getSubscriptionPayments(
@@ -325,8 +329,16 @@ export class PayHereService {
         throw error;
       });
 
-    // PayHere reports its own errors as HTTP 200 with status -1. Reading that
-    // as "no payments" would make real payments look forged.
+    // -1 "No payments found" is a real (empty) answer, as for
+    // getPaymentsByOrderId. PayHere reports its errors as status -1 too, and
+    // reading those as "no payments" would make real payments look forged -
+    // so only that exact message counts as empty.
+    if (
+      response.data.status === -1 &&
+      /no payments found/i.test(response.data.msg ?? '')
+    ) {
+      return [];
+    }
     if (response.data.status !== 1) {
       throw new Error(
         `PayHere payment lookup for subscription ${payhere_sub_id} failed: ${response.data.msg}`,
@@ -340,5 +352,88 @@ export class PayHereService {
         p.amount === undefined || p.amount === null ? null : String(p.amount),
       order_id: p.order_id ?? null,
     }));
+  }
+
+  /**
+   * Payments PayHere took for a checkout order_id (Retrieval API). The
+   * one-off counterpart of getSubscriptionPayments, used the same way: only a
+   * payment_id listed here as RECEIVED is paid out.
+   * https://support.payhere.lk/api-&-mobile-sdk/retrieval-api
+   */
+  async getPaymentsByOrderId(order_id: string): Promise<OrderPayment[]> {
+    const accessToken = await this.getAccessToken();
+    const url = `${this.getBaseUrl()}/merchant/v1/payment/search`;
+    const response: {
+      data: {
+        status: number;
+        msg: string;
+        data?:
+          | {
+              payment_id: number | string;
+              order_id?: string;
+              status: string;
+              amount?: number | string;
+            }[]
+          | null;
+      };
+    } = await axios
+      .get(url, {
+        params: { order_id },
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: PAYHERE_API_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        this.forgetTokenIfRejected(error);
+        throw error;
+      });
+
+    // -1 "No payments found" is a real answer (not paid yet, or forged).
+    // -1 is also used for errors (e.g. "Access denied for the domain"), and
+    // reading those as "no payments" would make real payments look forged -
+    // so only that exact message counts as empty.
+    if (
+      response.data.status === -1 &&
+      /no payments found/i.test(response.data.msg ?? '')
+    ) {
+      return [];
+    }
+    if (response.data.status !== 1) {
+      throw new Error(
+        `PayHere payment lookup for order ${order_id} failed: ${response.data.msg}`,
+      );
+    }
+
+    return (response.data.data ?? []).map((p) => ({
+      payment_id: String(p.payment_id),
+      status: p.status,
+      amount:
+        p.amount === undefined || p.amount === null ? null : String(p.amount),
+      order_id: p.order_id ?? null,
+    }));
+  }
+
+  /**
+   * The payment PayHere lists under this payment_id, or null if it lists no
+   * such payment. Looks it up by order_id with the Retrieval API (a
+   * subscription's charges keep its checkout order_id), then, for a
+   * subscription not found there, with the Subscription Manager API. Used by
+   * the webhook and by settlement, since the md5sig doesn't cover
+   * payment_id. API errors throw: they say nothing about the payment.
+   */
+  async findPayment(
+    payment_id: string,
+    order_id: string | null,
+    payhere_sub_id?: string | null,
+  ): Promise<OrderPayment | null> {
+    const find = (payments: OrderPayment[]) =>
+      payments.find((p) => p.payment_id === String(payment_id)) ?? null;
+    if (order_id) {
+      const found = find(await this.getPaymentsByOrderId(order_id));
+      if (found) return found;
+    }
+    if (payhere_sub_id) {
+      return find(await this.getSubscriptionPayments(payhere_sub_id));
+    }
+    return null;
   }
 }
