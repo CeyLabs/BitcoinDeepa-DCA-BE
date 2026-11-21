@@ -83,17 +83,24 @@ export class TransactionController {
       );
       return res.status(HttpStatus.OK).send('OK');
     }
-    if (check.action === 'reject') {
+    if (check.action === 'reject' || check.action === 'throttled') {
       this.logger.warn(
-        `PayHere webhook rejected for order_id ${body.order_id}: ${check.reason}`,
+        `PayHere webhook ${check.action} for order_id ${body.order_id}, payment_id ${body.payment_id}: ${check.reason}`,
       );
-      await this.telegramLoggerService
-        .logAlert(
-          'PayHere webhook',
-          `Refused a correctly signed SUCCESS notification: ${check.reason} (order_id ${body.order_id}, subscription_id ${body.subscription_id || '-'}, ${body.payhere_amount} ${body.payhere_currency}). Nothing was recorded. Most likely a replayed notification with an invented payment_id; if PayHere's dashboard does show this payment, it was refused because PayHere's API didn't list it yet - record it by hand.`,
+      const what = `payment_id ${body.payment_id}, order_id ${body.order_id}, subscription_id ${body.subscription_id || '-'}, ${body.payhere_amount} ${body.payhere_currency}`;
+      await this.transactionService.alertRefusedNotification(
+        body.order_id,
+        check.action === 'reject'
+          ? `Refused a correctly signed SUCCESS notification (${what}): ${check.reason}. Nothing was recorded. A replayed notification, or a payment PayHere reversed - check the PayHere dashboard.`
+          : `Refused a correctly signed notification without asking PayHere (${what}): ${check.reason}. Most likely one signed notification replayed with invented payment_ids. Nothing was recorded; check the PayHere dashboard if a real payment for this order is missing.`,
+      );
+      return res
+        .status(
+          check.action === 'reject'
+            ? HttpStatus.BAD_REQUEST
+            : HttpStatus.TOO_MANY_REQUESTS,
         )
-        .catch(() => undefined);
-      return res.status(HttpStatus.BAD_REQUEST).send();
+        .send();
     }
 
     try {

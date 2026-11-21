@@ -155,6 +155,13 @@ export function sameAmount(a: string | number, b: string | number): boolean {
 }
 
 /**
+ * PayHere lookups the webhook makes per order_id per hour. A genuine order
+ * needs one per notification; beyond this, a signed notification is being
+ * replayed, and every lookup spends the API quota settlement depends on.
+ */
+export const PAYHERE_LOOKUPS_PER_ORDER_PER_HOUR = 10;
+
+/**
  * PayHere's amount ("1000.00") as a number. Parsed as a decimal, not with
  * parseFloat, which stops at the first character it doesn't like
  * ("1,000.00" would be 1). Null when it isn't an amount.
@@ -385,33 +392,57 @@ export class TransactionService {
    * Checks a signed notification's payment_id with PayHere before anything is
    * recorded. The md5sig doesn't cover payment_id, and a payer can point the
    * unsigned notify_url at their own server, so a genuine signed notification
-   * can be re-posted with invented payment_ids: those are refused here.
+   * can be re-posted with invented payment_ids.
    *
-   * - SUCCESS: PayHere must list the payment as RECEIVED for the signed
-   *   amount, else `reject` (asked again with short waits first).
-   * - Any other status for a payment_id we don't have: PayHere must list it,
-   *   else `ignore` (nothing to record, and nothing it could pay out).
-   * - Any other status for a payment we already recorded (e.g. a chargeback
-   *   of a verified payment): no lookup.
-   * - The lookup itself failing: `process`. A PayHere outage must not lose
-   *   real payments; settlement checks SUCCESS payments with PayHere again
-   *   before paying, so an unverified one is never paid.
+   * - A status change of a payment we already recorded (a chargeback, or a
+   *   resent SUCCESS): no lookup.
+   * - A notification our own records already refuse (unknown order, wrong
+   *   amount, order of the other kind): no lookup - handlePayHereNotification
+   *   refuses it as before. Only checkouts we created reach PayHere's API.
+   * - More than PAYHERE_LOOKUPS_PER_ORDER_PER_HOUR lookups for one order_id:
+   *   `throttled`, without calling PayHere (replays must not use up our API
+   *   quota: settlement needs it to pay anyone).
+   * - SUCCESS that PayHere lists for another amount, or (after the retries)
+   *   with a status other than RECEIVED: `reject` - PayHere won't change its
+   *   mind.
+   * - SUCCESS not listed yet after the retries: `process`. PayHere's list can
+   *   lag, and refusing would lose a real payment; settlement pays only once
+   *   PayHere lists it (isConfirmedByPayHere), so a replay is still never
+   *   paid.
+   * - Another status for a payment_id we don't have and PayHere doesn't list:
+   *   `ignore` (nothing to record, nothing it could pay out).
+   * - The lookup itself failing: `process`, for the same reason.
    */
   async checkWithPayHere(data: PayHereNotificationParams): Promise<{
-    action: 'process' | 'ignore' | 'reject';
+    action: 'process' | 'ignore' | 'reject' | 'throttled';
     reason?: string;
+    /** recorded although PayHere didn't list it (yet) */
+    unconfirmed?: boolean;
   }> {
     const { payment_id, order_id, subscription_id, payhere_amount } = data;
     if (!payment_id) return { action: 'process' }; // refused later as invalid
     const success = this.getPayHereStatusMapped(data.status_code) === 'SUCCESS';
 
-    if (!success) {
-      const known = await this.knexService
-        .knex('transaction')
-        .select('payhere_pay_id')
-        .where('payhere_pay_id', payment_id)
-        .first();
-      if (known) return { action: 'process' };
+    const known = await this.knexService
+      .knex<Transaction>('transaction')
+      .select('status')
+      .where('payhere_pay_id', payment_id)
+      .first();
+    if (known && (!success || known.status === 'SUCCESS')) {
+      return { action: 'process' };
+    }
+
+    if (!(await this.matchesOurCheckout(data))) return { action: 'process' };
+
+    const lookups = await this.redisService.incrWithTtl(
+      CacheKeys.payhere.lookups(order_id),
+      60 * 60,
+    );
+    if (lookups !== null && lookups > PAYHERE_LOOKUPS_PER_ORDER_PER_HOUR) {
+      return {
+        action: 'throttled',
+        reason: `more than ${PAYHERE_LOOKUPS_PER_ORDER_PER_HOUR} PayHere lookups for order ${order_id} in the last hour`,
+      };
     }
 
     const delays = success ? TransactionService.payHereLookupRetryDelaysMs : [];
@@ -420,18 +451,21 @@ export class TransactionService {
       if (attempt > 0) {
         await new Promise((r) => setTimeout(r, delays[attempt - 1]));
       }
+      const last = attempt === delays.length;
       let payment: Awaited<ReturnType<PayHereService['findPayment']>>;
       try {
+        // The Retrieval API lists a subscription's charges under its order_id;
+        // the Subscription Manager is asked too, on the last try only
         payment = await this.payHereService.findPayment(
           payment_id,
           order_id,
-          subscription_id || null,
+          last ? subscription_id || null : null,
         );
       } catch (error) {
         this.logger.warn(
           `PayHere lookup for notification payment_id ${payment_id} failed (${payHereErrorDetail(error)}); recording it, settlement checks it again before paying`,
         );
-        return { action: 'process' };
+        return { action: 'process', unconfirmed: true };
       }
 
       if (!success) {
@@ -444,9 +478,9 @@ export class TransactionService {
       }
       if (!payment) {
         reason = `payment ${payment_id} is not listed by PayHere`;
-      } else if (payment.status !== 'RECEIVED') {
-        reason = `PayHere lists payment ${payment_id} as ${payment.status}, not RECEIVED`;
-      } else if (
+        continue;
+      }
+      if (
         payment.amount !== null &&
         payhere_amount !== undefined &&
         !sameAmount(payment.amount, payhere_amount)
@@ -456,11 +490,81 @@ export class TransactionService {
           action: 'reject',
           reason: `PayHere lists payment ${payment_id} for ${payment.amount}, not ${payhere_amount}`,
         };
-      } else {
-        return { action: 'process' };
       }
+      if (payment.status !== 'RECEIVED') {
+        reason = `PayHere lists payment ${payment_id} as ${payment.status}, not RECEIVED`;
+        if (last) return { action: 'reject', reason };
+        continue;
+      }
+      return { action: 'process' };
     }
-    return { action: 'reject', reason };
+    // Not listed yet: record it, settlement pays only once PayHere lists it
+    this.logger.warn(
+      `Recording payment_id ${payment_id} (order ${order_id}) unconfirmed: ${reason} yet. Settlement pays it only once PayHere does.`,
+    );
+    return { action: 'process', reason, unconfirmed: true };
+  }
+
+  /**
+   * The cheap checks handlePayHereNotification makes anyway, read-only and
+   * before any PayHere call: the order is a checkout we created, of the
+   * notification's kind; a one-time order's signed amount and currency are
+   * the order's; an existing subscription is bound to this order. False means
+   * the notification will be refused without asking PayHere.
+   */
+  private async matchesOurCheckout({
+    order_id,
+    subscription_id,
+    payhere_amount,
+    payhere_currency,
+  }: PayHereNotificationParams): Promise<boolean> {
+    const order = await this.knexService
+      .knex<BuyOrderRow>('buy_order')
+      .where('order_id', order_id)
+      .first();
+    if (!order) return false;
+    if (!subscription_id) {
+      return (
+        order.kind === 'ONE_TIME' &&
+        order.amount !== null &&
+        sameAmount(order.amount, payhere_amount) &&
+        order.currency === payhere_currency
+      );
+    }
+    if (order.kind !== 'RECURRING') return false;
+    const sub = await this.knexService
+      .knex<Subscription>('subscription')
+      .select('user_id', 'payhere_order_id')
+      .where('payhere_sub_id', subscription_id)
+      .first();
+    if (!sub) return true;
+    return sub.payhere_order_id
+      ? sub.payhere_order_id === order_id
+      : sub.user_id === order.user_id;
+  }
+
+  /**
+   * Alert about a refused or throttled notification, at most a few times per
+   * order_id per hour: replays of one signed notification must not flood the
+   * alert topic. Alerts on the 1st, 10th, 100th... refusal in the window, with
+   * the count.
+   */
+  async alertRefusedNotification(
+    order_id: string,
+    message: string,
+  ): Promise<void> {
+    const count = await this.redisService.incrWithTtl(
+      CacheKeys.payhere.refusedAlerts(order_id),
+      60 * 60,
+    );
+    if (count !== null && !/^10*$/.test(String(count))) return;
+    const repeat =
+      count !== null && count > 1
+        ? ` This is refusal #${count} for order ${order_id} in the last hour (alerts are sent at the 1st, 10th, 100th...).`
+        : '';
+    await this.telegramLoggerService
+      .logAlert('PayHere webhook', message + repeat)
+      .catch(() => undefined);
   }
 
   /**
