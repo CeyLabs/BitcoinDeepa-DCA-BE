@@ -251,6 +251,10 @@ CEYPAY_WEBHOOK_URL=  # Optional, defaults to BASE_URL/sell/ceypay-webhook
 R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=...
 ADMIN_DASHBOARD_URL=  # Optional, Telegram alert links; defaults to the first ADMIN_APP_URL
 
+# Telegram ops log (group LOG_GROUP_ID)
+LOG_TOPIC_ID=  # topic for routine logs
+ALERT_TOPIC_ID=  # Optional: topic for alerts that need a human (logAlert); defaults to LOG_TOPIC_ID
+
 # Server
 PORT=3000
 ```

@@ -33,6 +33,8 @@ export class TelegramLoggerService {
   private readonly botToken: string | undefined;
   private readonly logGroupId: string | undefined;
   private readonly logTopicId: string | undefined;
+  /** Topic for alerts (needs a human), so they aren't buried in routine logs */
+  private readonly alertTopicId: string | undefined;
   /** Telegram's 429 retry_after: nothing goes to the group until then */
   private blockedUntil = 0;
   private droppedWhileLimited = 0;
@@ -47,6 +49,7 @@ export class TelegramLoggerService {
     this.botToken = process.env.TELEGRAM_BOT_TOKEN;
     this.logGroupId = process.env.LOG_GROUP_ID;
     this.logTopicId = process.env.LOG_TOPIC_ID;
+    this.alertTopicId = process.env.ALERT_TOPIC_ID || this.logTopicId;
   }
 
   private formatUsername(user: JwtPayload): string {
@@ -116,7 +119,7 @@ export class TelegramLoggerService {
         ? { ok: false, limited: true }
         : await this.callLogGroup(
             'sendMessage',
-            { text: message, parse_mode: 'HTML' },
+            this.alertPayload(message),
             true,
           );
     if (outcome.ok) return;
@@ -129,6 +132,15 @@ export class TelegramLoggerService {
     } else {
       this.logger.error(`ALERT (${source}) not sent to Telegram: ${text}`);
     }
+  }
+
+  /** An alert goes to ALERT_TOPIC_ID (LOG_TOPIC_ID when unset). */
+  private alertPayload(message: string): Record<string, unknown> {
+    return {
+      text: message,
+      parse_mode: 'HTML',
+      message_thread_id: this.alertTopicId,
+    };
   }
 
   /** Hold an alert until the rate limit pause ends. False when the queue is full. */
@@ -162,7 +174,7 @@ export class TelegramLoggerService {
       while (this.queuedAlerts.length > 0) {
         const outcome = await this.callLogGroup(
           'sendMessage',
-          { text: this.queuedAlerts[0], parse_mode: 'HTML' },
+          this.alertPayload(this.queuedAlerts[0]),
           true,
         );
         // Limited: the head stays queued and is retried by the next drain
@@ -303,9 +315,9 @@ export class TelegramLoggerService {
   }
 
   /**
-   * One call to the Bot API in the log group (topic added). Returns the
-   * response's `result`, or null on any failure - logged in one line, never
-   * the whole response/error object.
+   * One call to the Bot API in the log group (LOG_TOPIC_ID added unless the
+   * payload names its own topic). Returns the response's `result`, or null on
+   * any failure - logged in one line, never the whole response/error object.
    */
   private async callLogGroup(
     method: LogGroupMethod,
