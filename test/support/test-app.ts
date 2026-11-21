@@ -83,6 +83,9 @@ export interface TestContext {
   /** Telegram DMs to users (never sent for real) */
   notifyUser: jest.SpyInstance;
   payHereCancel: jest.SpyInstance;
+  /** PayHere's payment lookup used by settlement (see below) */
+  payHerePayments: jest.SpyInstance;
+  payHereOrderPayments: jest.SpyInstance;
   /**
    * A Bearer token for the user: the fixture users' real session (from
    * resetData), any other id a legacy 7-day JWT (no wallet routes)
@@ -190,6 +193,39 @@ export async function createTestApp(): Promise<TestContext> {
   const knex = app.get(KnexService).knex;
   await knex.migrate.latest();
 
+  // PayHere "knows" every SUCCESS payment recorded for the subscription, like
+  // the real API would. Tests override it to simulate a forged payment_id.
+  const payHerePayments = jest
+    .spyOn(app.get(PayHereService), 'getSubscriptionPayments')
+    .mockImplementation(async (payhere_sub_id: string) => {
+      const rows: { payhere_pay_id: string; gross_amount: string | null }[] =
+        await knex('transaction')
+          .select('payhere_pay_id', 'gross_amount')
+          .where({ payhere_sub_id, status: 'SUCCESS' });
+      return rows.map((r) => ({
+        payment_id: r.payhere_pay_id,
+        status: 'RECEIVED',
+        amount: r.gross_amount,
+        order_id: null,
+      }));
+    });
+
+  // Same for one-off checkouts (Retrieval API, by order_id)
+  const payHereOrderPayments = jest
+    .spyOn(app.get(PayHereService), 'getPaymentsByOrderId')
+    .mockImplementation(async (payhere_order_id: string) => {
+      const rows: { payhere_pay_id: string; gross_amount: string | null }[] =
+        await knex('transaction')
+          .select('payhere_pay_id', 'gross_amount')
+          .where({ payhere_order_id, status: 'SUCCESS' });
+      return rows.map((r) => ({
+        payment_id: r.payhere_pay_id,
+        status: 'RECEIVED',
+        amount: r.gross_amount,
+        order_id: payhere_order_id,
+      }));
+    });
+
   const jwt = app.get(JwtService);
   return {
     app,
@@ -201,6 +237,8 @@ export async function createTestApp(): Promise<TestContext> {
     p2pBot,
     notifyUser,
     payHereCancel,
+    payHerePayments,
+    payHereOrderPayments,
     tokenFor: (userId) =>
       FIXTURE_USERS.includes(userId)
         ? sessionTokenFor(userId)

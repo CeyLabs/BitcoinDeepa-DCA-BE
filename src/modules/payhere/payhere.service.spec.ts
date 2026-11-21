@@ -167,6 +167,57 @@ describe('PayHereService', () => {
     });
   });
 
+  describe('getPaymentsByOrderId', () => {
+    it('lists the payments PayHere took for an order (Retrieval API)', async () => {
+      post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
+      get.mockResolvedValueOnce({
+        data: {
+          status: 1,
+          msg: 'Payments with order_id:ORDER-1',
+          data: [
+            {
+              payment_id: 320025071278,
+              order_id: 'ORDER-1',
+              status: 'RECEIVED',
+              amount: 1000,
+            },
+          ],
+        },
+      });
+
+      await expect(service.getPaymentsByOrderId('ORDER-1')).resolves.toEqual([
+        {
+          payment_id: '320025071278',
+          status: 'RECEIVED',
+          amount: '1000',
+          order_id: 'ORDER-1',
+        },
+      ]);
+      const [url, cfg] = get.mock.calls[0];
+      expect(url).toBe('https://sandbox.payhere.lk/merchant/v1/payment/search');
+      expect(cfg!.params).toEqual({ order_id: 'ORDER-1' });
+      expect(cfg!.headers!.Authorization).toBe('Bearer tok');
+    });
+
+    it('returns an empty list for "No payments found"', async () => {
+      post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
+      get.mockResolvedValueOnce({
+        data: { status: -1, msg: 'No payments found', data: null },
+      });
+      await expect(service.getPaymentsByOrderId('X')).resolves.toEqual([]);
+    });
+
+    it('throws on other PayHere error replies', async () => {
+      post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
+      get.mockResolvedValueOnce({
+        data: { status: -2, msg: 'Authentication error', data: null },
+      });
+      await expect(service.getPaymentsByOrderId('X')).rejects.toThrow(
+        'Authentication error',
+      );
+    });
+  });
+
   describe('getSubscriptionPayments', () => {
     it('lists the payments PayHere took for a subscription', async () => {
       post.mockResolvedValueOnce({ data: { access_token: 'tok' } });
