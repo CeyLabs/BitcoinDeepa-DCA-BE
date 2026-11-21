@@ -248,10 +248,14 @@ export class SettlementService {
         }
 
         // Put back what the claim cleared (e.g. LOW_BALANCE for the deposit
-        // callback)
+        // callback). With nothing to put back, record that this attempt sent
+        // nothing: a used attempt with no failure would read as a send whose
+        // outcome is unknown (mayHaveGoneThrough).
         await this.knexService
           .knex('transaction')
-          .update({ settlement_failure: transaction.settlement_failure })
+          .update({
+            settlement_failure: transaction.settlement_failure ?? 'REJECTED',
+          })
           .where('payhere_pay_id', payhere_pay_id)
           .where('retry_count', currentRetryCount);
         if (currentRetryCount >= MAX_SETTLEMENT_ATTEMPTS) {

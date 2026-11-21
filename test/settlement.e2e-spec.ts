@@ -727,7 +727,12 @@ describe('Settlement (e2e)', () => {
       ctx.payHereOrderPayments.mockResolvedValueOnce([received('OTHER')]);
       await settlement.retryUnsettledTransactions();
       expect(ctx.bitcoinDeepa.transferFunds).not.toHaveBeenCalled();
-      expect(await tx()).toMatchObject({ settled: false, retry_count: 1 });
+      // nothing was sent: not read as an unknown outcome next time
+      expect(await tx()).toMatchObject({
+        settled: false,
+        retry_count: 1,
+        settlement_failure: 'REJECTED',
+      });
     });
 
     it('a failed fallback lookup delays settlement without using an attempt', async () => {
