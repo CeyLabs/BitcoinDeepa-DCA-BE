@@ -7,7 +7,20 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import Big from 'big.js';
+import {
+  LKR_DP,
+  ROUND_DOWN,
+  ROUND_HALF_UP,
+  ROUND_UP,
+  USDT_DP,
+  basisPointsOf,
+  lkr,
+  sameAmount,
+  sats as wholeSats,
+  toApiNumber,
+  toMoney,
+  usdt,
+} from '../../common/money';
 import type { Knex } from 'knex';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
@@ -180,16 +193,17 @@ function userFacingReason(row: SellOrderRow): string | null {
   }
 }
 
+// API serialization point: whole sats and 2-dp LKR are exact as numbers
 export const toSellOrderView = (row: SellOrderRow): SellOrderView => ({
   id: row.id,
   status: row.status,
-  sats: Number(row.sats),
+  sats: toApiNumber(row.sats),
   feeBasisPoints: row.fee_basis_points,
-  grossLkr: Number(row.gross_lkr),
-  feeLkr: Number(row.fee_lkr),
-  bankChargeLkr: Number(row.bank_charge_lkr),
-  btcLkrRate: Number(row.btc_lkr_buying_rate),
-  amountLkr: Number(row.amount_lkr),
+  grossLkr: toApiNumber(row.gross_lkr),
+  feeLkr: toApiNumber(row.fee_lkr),
+  bankChargeLkr: toApiNumber(row.bank_charge_lkr),
+  btcLkrRate: toApiNumber(row.btc_lkr_buying_rate),
+  amountLkr: toApiNumber(row.amount_lkr),
   expiresAt: new Date(row.expires_at).toISOString(),
   bankRef: row.bank_ref,
   failureReason: userFacingReason(row),
@@ -257,36 +271,36 @@ export function ceyPayWebhookUrl(
  * (rounded up), then the flat bank charge. `amountLkr` is what the user gets.
  */
 export function priceSale(
-  sats: number,
+  sats: number | string,
   feeBasisPoints: number,
-  btcLkrRate: number,
-  bankChargeLkr = 0,
+  btcLkrRate: number | string,
+  bankChargeLkr: number | string = 0,
 ): {
   grossLkr: string;
   feeLkr: string;
   bankChargeLkr: string;
   amountLkr: string;
 } {
-  const grossLkr = new Big(sats)
-    .div(SATS_PER_BTC)
-    .times(btcLkrRate)
-    .round(2, Big.roundDown);
-  const feeLkr = grossLkr
-    .times(feeBasisPoints)
-    .div(10000)
-    .round(2, Big.roundUp);
-  const chargeLkr = new Big(bankChargeLkr).round(2, Big.roundHalfUp);
+  const grossLkr = lkr(
+    toMoney(sats).div(SATS_PER_BTC).times(toMoney(btcLkrRate)),
+    ROUND_DOWN,
+  );
+  const feeLkr = lkr(basisPointsOf(grossLkr, feeBasisPoints), ROUND_UP);
+  const chargeLkr = lkr(bankChargeLkr, ROUND_HALF_UP);
   return {
-    grossLkr: grossLkr.toFixed(2),
-    feeLkr: feeLkr.toFixed(2),
-    bankChargeLkr: chargeLkr.toFixed(2),
-    amountLkr: grossLkr.minus(feeLkr).minus(chargeLkr).toFixed(2),
+    grossLkr: grossLkr.toFixed(LKR_DP),
+    feeLkr: feeLkr.toFixed(LKR_DP),
+    bankChargeLkr: chargeLkr.toFixed(LKR_DP),
+    amountLkr: grossLkr.minus(feeLkr).minus(chargeLkr).toFixed(LKR_DP),
   };
 }
 
 /** USDT to quote so CeyPay pays at least `amountLkr` (8dp, rounded up). */
-export const usdtFor = (amountLkr: string, rateUsdtLkr: number): string =>
-  new Big(amountLkr).div(rateUsdtLkr).round(8, Big.roundUp).toFixed(8);
+export const usdtFor = (
+  amountLkr: string,
+  rateUsdtLkr: number | string,
+): string =>
+  usdt(toMoney(amountLkr).div(toMoney(rateUsdtLkr)), ROUND_UP).toFixed(USDT_DP);
 
 /**
  * Sell flow: user sells sats for LKR to their verified bank account.
@@ -365,10 +379,11 @@ export class SellService {
       .where('created_at', '>', db.raw("now() - interval '24 hours'"))
       .sum<{ total: string | null }>('sats as total')
       .first();
-    const used = Number(row?.total ?? 0);
+    const used = toMoney(row?.total); // SUM(bigint) comes back as a string
     const max = SellService.dailyMaxSats();
-    if (used + sats > max) {
-      const left = Math.max(0, max - used);
+    if (used.plus(sats).gt(max)) {
+      const remaining = wholeSats(toMoney(max).minus(used), ROUND_DOWN);
+      const left = remaining.lt(0) ? 0 : toApiNumber(remaining);
       throw new BadRequestException(
         left > 0
           ? `You can sell up to ${left.toLocaleString('en-US')} more sats today`
@@ -431,7 +446,7 @@ export class SellService {
       rate.btcLkr,
       SellService.bankChargeLkr(),
     );
-    if (Number(priced.amountLkr) <= 0) {
+    if (toMoney(priced.amountLkr).lte(0)) {
       throw new BadRequestException('Amount is too small to sell');
     }
 
@@ -570,7 +585,7 @@ export class SellService {
     const order = claim.order;
     const result = await this.bitcoinDeepa.createCollect(
       userId,
-      Number(order.sats),
+      toApiNumber(order.sats), // whole sats: exact
       collectMemo(order),
       order.id,
     );
@@ -608,7 +623,7 @@ export class SellService {
       ? await this.bitcoinDeepa.getCollect(order.bot_collect_id)
       : await this.bitcoinDeepa.createCollect(
           order.user_id,
-          Number(order.sats),
+          toApiNumber(order.sats), // whole sats: exact
           collectMemo(order),
           order.id,
         );
@@ -770,7 +785,7 @@ export class SellService {
           // The one step that pays out from our float: the request must be
           // this order's
           const mismatch =
-            Number(request.amount) !== Number(order.sats) ||
+            !sameAmount(request.amount, order.sats, 0) ||
             (request.external_id !== undefined &&
               request.external_id !== order.id);
           if (mismatch) {
@@ -1091,7 +1106,7 @@ export class SellService {
     if (!claimed) return false;
 
     const result = await this.bitcoinDeepa.transferFunds(
-      Number(order.sats),
+      toApiNumber(order.sats), // whole sats: exact
       order.user_id,
       `sell-refund:${order.id}`,
     );
@@ -1106,7 +1121,7 @@ export class SellService {
       });
       await this.telegramLogger.notifyUser(
         order.user_id,
-        `↩️ <b>Sale cancelled</b>\nWe couldn't pay out ${order.amount_lkr} LKR, so ${Number(order.sats).toLocaleString('en-US')} sats were returned to your wallet.`,
+        `↩️ <b>Sale cancelled</b>\nWe couldn't pay out ${order.amount_lkr} LKR, so ${toApiNumber(order.sats).toLocaleString('en-US')} sats were returned to your wallet.`,
       );
       return true;
     }
@@ -1164,7 +1179,7 @@ export class SellService {
     let rate = await this.bitcoinPrice.getUsdtLkr();
     for (let attempt = 0; attempt < 2; attempt++) {
       const quote = await this.ceyPay.getQuote(usdtFor(amountLkr, rate));
-      if (new Big(quote.amountLkr).gte(amountLkr)) return quote;
+      if (toMoney(quote.amountLkr).gte(toMoney(amountLkr))) return quote;
       // Rate moved since it was cached: size again from this quote's rate
       rate = quote.rateUsdtLkr;
       await this.bitcoinPrice.setUsdtLkr(rate);

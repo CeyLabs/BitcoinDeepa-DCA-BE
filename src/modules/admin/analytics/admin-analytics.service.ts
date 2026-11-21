@@ -1,3 +1,4 @@
+import { toApiNumber } from '../../../common/money';
 import { Injectable } from '@nestjs/common';
 import { KnexService } from '../../knex/knex.service';
 
@@ -30,7 +31,11 @@ export interface DailyPoint {
   newUsers: number;
 }
 
+/** A COUNT(*) */
 const num = (value: unknown): number => Number(value ?? 0);
+/** A SUM of a money/sats column: summed in SQL (numeric), serialized here */
+const amount = (value: unknown): number =>
+  toApiNumber(value as string | number | null);
 
 /**
  * Read-only aggregates for the admin dashboard. "Collected" means SETTLED
@@ -87,16 +92,16 @@ export class AdminAnalyticsService {
       },
       payments: {
         successful: num(r.successful),
-        grossLkr: num(r.gross),
-        netLkr: num(r.net),
-        bitcoindeepaFeesLkr: num(r.bitcoindeepa_fees),
-        satoshis: num(r.satoshis),
-        grossLkrLast30Days: num(r.gross_30d),
+        grossLkr: amount(r.gross),
+        netLkr: amount(r.net),
+        bitcoindeepaFeesLkr: amount(r.bitcoindeepa_fees),
+        satoshis: amount(r.satoshis),
+        grossLkrLast30Days: amount(r.gross_30d),
       },
       unsettled: {
         count: num(r.unsettled),
-        grossLkr: num(r.unsettled_gross),
-        satoshis: num(r.unsettled_satoshis),
+        grossLkr: amount(r.unsettled_gross),
+        satoshis: amount(r.unsettled_satoshis),
       },
     };
   }
@@ -151,9 +156,9 @@ export class AdminAnalyticsService {
 
     return rows.map((row) => ({
       date: row.date,
-      grossLkr: num(row.gross),
+      grossLkr: amount(row.gross),
       payments: num(row.payments),
-      unsettledGrossLkr: num(row.unsettled_gross),
+      unsettledGrossLkr: amount(row.unsettled_gross),
       newUsers: num(row.new_users),
     }));
   }

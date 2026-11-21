@@ -1,7 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import axios, { AxiosResponse } from 'axios';
-import Big from 'big.js';
+import {
+  ROUND_DOWN,
+  SATOSHIS_PER_BTC,
+  lkr,
+  sats,
+  toApiNumber,
+  toMoney,
+} from '../../common/money';
 import { KnexService } from '../knex/knex.service';
 import { RedisService } from '../redis/redis.service';
 import { CacheKeys } from '../redis/utils/cache-keys.util';
@@ -74,7 +81,6 @@ const CHANGE_24H_CACHE_TTL_SECONDS = parseInt(
   process.env.BTC_PRICE_CACHE_TTL || '300',
   10,
 );
-const SATOSHIS_PER_BTC = 100_000_000;
 /** One instance records the rate per minute (the claim outlives a late tick) */
 const RATE_LOG_CLAIM_TTL_SECONDS = 50;
 /**
@@ -106,11 +112,6 @@ export const fallbackMaxAgeSeconds = (): number => {
     : DEFAULT_FALLBACK_MAX_AGE_SECONDS;
 };
 
-// Integer division, rounded down (its own constructor: Big.DP/RM are global)
-const BigFloor = Big();
-BigFloor.DP = 0;
-BigFloor.RM = Big.roundDown;
-
 /**
  * Whole sats `amount` buys at `btcPrice` (same currency), rounded down.
  * Decimal arithmetic: with floats an exact result comes out one sat short
@@ -120,7 +121,12 @@ export const satoshisFor = (
   amount: number | string,
   btcPrice: number | string,
 ): number =>
-  new BigFloor(amount).times(SATOSHIS_PER_BTC).div(btcPrice).toNumber();
+  toApiNumber(
+    sats(
+      toMoney(amount).times(SATOSHIS_PER_BTC).div(toMoney(btcPrice)),
+      ROUND_DOWN,
+    ),
+  );
 
 const failureKey = (key: string): string => `${key}:failed`;
 
@@ -128,8 +134,11 @@ const failureKey = (key: string): string => `${key}:failed`;
  * LKR per BTC: BTC/USD × USDT/LKR (USDT taken as 1 USD), rounded down to
  * cents.
  */
-export const btcLkrRate = (btcUsd: number, usdtLkr: number): number =>
-  new Big(btcUsd).times(usdtLkr).round(2, Big.roundDown).toNumber();
+export const btcLkrRate = (
+  btcUsd: number | string,
+  usdtLkr: number | string,
+): number =>
+  toApiNumber(lkr(toMoney(btcUsd).times(toMoney(usdtLkr)), ROUND_DOWN));
 
 /**
  * The one BTC/LKR price used everywhere (buy, DCA, sell, wallet):
@@ -180,7 +189,7 @@ export class BitcoinPriceService {
    * `priced_at` say which it was, so the caller can record it.
    */
   async calculateSatoshis(
-    amount: number,
+    amount: number | string,
     currency: string,
   ): Promise<SatoshiCalculation | null> {
     const live = await this.getBitcoinPrice(currency);
@@ -293,9 +302,9 @@ export class BitcoinPriceService {
       return {
         id: String(row.id),
         loggedAt: new Date(row.created_at),
-        btcLkr: Number(row.btc_lkr),
-        btcUsd: Number(row.btc_usd),
-        usdtLkr: Number(row.usdt_lkr),
+        btcLkr: toApiNumber(row.btc_lkr),
+        btcUsd: toApiNumber(row.btc_usd),
+        usdtLkr: toApiNumber(row.usdt_lkr),
       };
     } catch (error) {
       this.logger.error(

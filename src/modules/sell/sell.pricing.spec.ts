@@ -79,3 +79,18 @@ describe('ceyPayWebhookUrl', () => {
     expect(ceyPayWebhookUrl({})).toBeUndefined();
   });
 });
+
+describe('priceSale (decimal inputs)', () => {
+  it('takes DB strings for sats, rate and charge', () => {
+    expect(priceSale('100000', 100, '21450000.00', '30.00')).toEqual(
+      priceSale(100000, 100, 21_450_000, 30),
+    );
+  });
+
+  it('never drifts on a sum of cents', () => {
+    // 0.1 + 0.2 territory: gross 0.30, fee 0 bps, charge 0.10 → 0.20
+    const priced = priceSale(1, 0, 30_000_000, 0.1);
+    expect(priced.grossLkr).toBe('0.30');
+    expect(priced.amountLkr).toBe('0.20');
+  });
+});

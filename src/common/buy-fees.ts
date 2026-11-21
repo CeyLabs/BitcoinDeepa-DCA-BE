@@ -1,4 +1,4 @@
-import Big from 'big.js';
+import { basisPointsOf, toApiNumber, toMoney } from './money';
 
 export interface BuyFees {
   gross: number;
@@ -13,9 +13,11 @@ export interface BuyFees {
 
 /**
  * Fees on a buy (subscription charge or one-time), from the env basis points:
- * each fee = gross × bps / 10000, net = gross - both fees.
+ * each fee = gross × bps / 10000, net = gross - both fees. Computed as
+ * decimals; the numbers returned are exact for 2-dp LKR and the fee bps
+ * resolution (1 bp of a cent is 6 dp, well within a double).
  */
-export function computeBuyFees(gross: number): BuyFees {
+export function computeBuyFees(gross: number | string): BuyFees {
   const paymentProcessorFeeBps = parseInt(
     process.env.PAYHERE_FEE_BASIS_POINTS || '0',
     10,
@@ -25,18 +27,18 @@ export function computeBuyFees(gross: number): BuyFees {
     10,
   );
 
-  const g = new Big(gross);
-  const paymentProcessorFee = g.times(paymentProcessorFeeBps).div(10000);
-  const bitcoindeepaFee = g.times(bitcoindeepaFeeBps).div(10000);
+  const g = toMoney(gross);
+  const paymentProcessorFee = basisPointsOf(g, paymentProcessorFeeBps);
+  const bitcoindeepaFee = basisPointsOf(g, bitcoindeepaFeeBps);
   const totalFees = paymentProcessorFee.plus(bitcoindeepaFee);
 
   return {
-    gross,
+    gross: toApiNumber(g),
     paymentProcessorFeeBps,
-    paymentProcessorFee: paymentProcessorFee.toNumber(),
+    paymentProcessorFee: toApiNumber(paymentProcessorFee),
     bitcoindeepaFeeBps,
-    bitcoindeepaFee: bitcoindeepaFee.toNumber(),
-    totalFees: totalFees.toNumber(),
-    net: g.minus(totalFees).toNumber(),
+    bitcoindeepaFee: toApiNumber(bitcoindeepaFee),
+    totalFees: toApiNumber(totalFees),
+    net: toApiNumber(g.minus(totalFees)),
   };
 }

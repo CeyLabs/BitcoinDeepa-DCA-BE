@@ -1,5 +1,7 @@
 import type { Knex } from 'knex';
 
+import { type Money, toMoney } from './money';
+
 /**
  * One-time buy limits, shared by the checkout link (POST /buy/payhere-link)
  * and the webhook, which re-checks them when a payment arrives - a link can
@@ -32,7 +34,7 @@ export const buyLimits = {
 export async function paidOneTimeLkr(
   db: Knex | Knex.Transaction,
   userId: string,
-): Promise<number> {
+): Promise<Money> {
   const row = await db('transaction')
     .where('user_id', userId)
     .where('kind', 'ONE_TIME')
@@ -40,7 +42,7 @@ export async function paidOneTimeLkr(
     .where('created_at', '>', db.raw("now() - interval '24 hours'"))
     .sum<{ total: string | null }>('gross_amount as total')
     .first();
-  return Number(row?.total ?? 0);
+  return toMoney(row?.total); // SUM(decimal) comes back as a string
 }
 
 /**
@@ -51,7 +53,7 @@ export async function paidOneTimeLkr(
 export async function reservedOneTimeLkr(
   db: Knex | Knex.Transaction,
   userId: string,
-): Promise<number> {
+): Promise<Money> {
   const row = await db('buy_order as o')
     .where('o.user_id', userId)
     .where('o.kind', 'ONE_TIME')
@@ -65,5 +67,5 @@ export async function reservedOneTimeLkr(
     })
     .sum<{ total: string | null }>('o.amount as total')
     .first();
-  return Number(row?.total ?? 0);
+  return toMoney(row?.total);
 }

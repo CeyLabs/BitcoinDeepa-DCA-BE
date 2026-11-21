@@ -41,11 +41,13 @@ function signed(
 
 describe('parseAmount', () => {
   it.each([
-    ['1000.00', 1000],
-    ['1234.56', 1234.56],
+    ['1000.00', '1000'],
+    ['1234.56', '1234.56'],
     // parseFloat would read this as 1
-    ['1,000.00', 1000],
-    ['0.00', 0],
+    ['1,000.00', '1000'],
+    ['0.00', '0'],
+    // more precision than a double keeps
+    ['123456789012345.678', '123456789012345.678'],
   ])('reads %s as %s', (value, amount) => {
     expect(parseAmount(value)).toBe(amount);
   });

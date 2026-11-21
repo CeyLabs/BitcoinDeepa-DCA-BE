@@ -1,3 +1,4 @@
+import { toApiNumber, toApiNumberOrNull, toMoney } from '../../common/money';
 import {
   BadRequestException,
   HttpException,
@@ -182,12 +183,13 @@ export class BuyService {
     userId: string,
     amountLkr: number,
   ): Promise<void> {
-    const used =
-      (await paidOneTimeLkr(db, userId)) +
-      (await reservedOneTimeLkr(db, userId));
+    const used = (await paidOneTimeLkr(db, userId)).plus(
+      await reservedOneTimeLkr(db, userId),
+    );
     const max = buyLimits.dailyMaxLkr();
-    if (used + amountLkr > max) {
-      const left = Math.max(0, max - used);
+    if (used.plus(amountLkr).gt(max)) {
+      const remaining = toMoney(max).minus(used);
+      const left = remaining.lt(0) ? 0 : toApiNumber(remaining);
       throw new BadRequestException(
         left > 0
           ? `You can buy up to ${left.toLocaleString('en-US')} LKR more today (unfinished checkouts count until they expire)`
@@ -234,13 +236,12 @@ export class BuyService {
 
     return {
       order_id: order.order_id,
-      amount_lkr: Number(order.amount),
+      amount_lkr: toApiNumber(order.amount), // API serialization
       currency: order.currency,
       created_at: order.created_at,
       status: tx?.status ?? 'AWAITING_PAYMENT',
       payhere_pay_id: tx?.payhere_pay_id ?? null,
-      satoshis:
-        tx?.satoshis_purchased == null ? null : Number(tx.satoshis_purchased),
+      satoshis: toApiNumberOrNull(tx?.satoshis_purchased),
       settled: tx?.settled ?? false,
       // The reason is for the team, not the member
       held: !!tx?.hold_reason && !tx.settled,

@@ -1,3 +1,4 @@
+import { sameAmount } from '../../common/money';
 import { Injectable, Logger } from '@nestjs/common';
 import type { KeyObject } from 'crypto';
 import axios, { AxiosResponse, Method } from 'axios';
@@ -306,7 +307,7 @@ export class BitcoinDeepaService {
     memo: string,
   ): Promise<FundTransferResponse> {
     const requestBody: FundTransferRequest = {
-      amount: Number(amount),
+      amount,
       to: toTelegramId,
       memo,
     };
@@ -437,7 +438,7 @@ export class BitcoinDeepaService {
           tx.direction === 'incoming' &&
           tx.success &&
           (tx.memo ?? '').endsWith(ref) &&
-          Number(tx.amount) === Number(sats),
+          sameAmount(tx.amount, sats, 0),
       );
       if (found) return true;
       if (history.transactions.length < MAX_HISTORY_PAGE) return false;
@@ -470,7 +471,7 @@ export class BitcoinDeepaService {
     return this.collectCall(
       'POST',
       this.collectEndpoint,
-      { amount: Number(amount), memo, external_id: externalId },
+      { amount, memo, external_id: externalId },
       payerTelegramId,
     );
   }
